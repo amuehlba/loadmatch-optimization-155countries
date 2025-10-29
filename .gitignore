@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv
+.ipynb_checkpoints/
+data/processed/*
+data/results_python/*
+data/results_fortran/*
+.vscode/
