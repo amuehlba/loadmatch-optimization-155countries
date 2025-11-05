@@ -1697,13 +1697,20 @@ C
        DAMCAPRAT  = DCRNORTHAM
        FDISTHEAT  = 0.2  
        DAYH2STOR  = 40  
-       FACONWIN   = 1.05            
-       FACOFFWIN  = 1.0           
-       FACUTILPV  = 1.0        
-       FACRESPV   = 1.0        
-       FACCOMPV   = 1.0        
-       CSPTURBFAC = 1.6
-       FACSHT     = 1.0
+C       FACONWIN   = 1.05            
+C       FACOFFWIN  = 1.0           
+C       FACUTILPV  = 1.0        
+C       FACRESPV   = 1.0        
+C       FACCOMPV   = 1.0        
+C       CSPTURBFAC = 1.6
+C       FACSHT     = 1.0
+       FACONWIN = 1.8527292272370661
+       FACOFFWIN = 1.0
+       FACUTILPV = 1.0
+       FACRESPV = 1.0
+       FACCOMPV = 1.0
+       CSPTURBFAC = 1.0
+       FACSHT = 1.0
        BATDISCH   = 0.
        FCCHARG    = 0.
        FCDISCH    = 0.
@@ -3720,13 +3727,21 @@ C      GRIDLOAD   = 'CONUS2016-19'
        FDISTHEAT  = 0.2
 
 C FRCIHFLEX = 0.5; HDISSIP=1%,2%,3%  
-       FACONWIN   = 1.75
-       FACOFFWIN  = 0.95
-       FACUTILPV  = 2.3 
-       FACRESPV   = 0.45
-       FACCOMPV   = 0.45
-       CSPTURBFAC = 0.5 
-       FACSHT     = 0.
+C       FACONWIN   = 1.75
+C       FACOFFWIN  = 0.95
+C       FACUTILPV  = 2.3 
+C       FACRESPV   = 0.45
+C       FACCOMPV   = 0.45
+C       CSPTURBFAC = 0.5 
+C       FACSHT     = 0.
+C Testing new factors
+       FACONWIN   = 2.847665
+       FACOFFWIN  = 0.1
+       FACUTILPV  = 1.432038
+       FACRESPV   = 0.1
+       FACCOMPV   = 0.1
+       CSPTURBFAC = 4.465003
+       FACSHT     = 0.1
 C
        IF (IMERGH2.EQ.1) THEN
         BATDISCH   = 1.15  
@@ -13139,7 +13154,7 @@ C             (HOUR 1 = JAN 1, 0:00-0:59 UTC, 2030
 C NLOADCOUN = NUMBER OF COUNTRIES READ FROM FILE loadreg.COUNTRY2030GW
 C
       IF (GRIDLOAD.EQ.'COUNTRY2030GW') THEN
-       OPEN(KLOD, FILE = PATHLOAD//'loadreg.COUNTRY2030GW')
+       OPEN(KLOD, FILE = './data/raw/loadreg.COUNTRY2030GW')
 C
        NLOADCOUN = 0
 C
