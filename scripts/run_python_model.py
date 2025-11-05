@@ -15,16 +15,14 @@ def collect_results(model: pyo.ConcreteModel) -> dict:
 
     for tech in model.electric_techs:
         base_capacity = pyo.value(model.base_capacity[tech])
-        added_capacity = pyo.value(model.cap_add[tech])
+        total_capacity = pyo.value(model.capacity[tech])
         results[f"{tech}_capacity_base_mw"] = base_capacity
-        results[f"{tech}_capacity_add_mw"] = added_capacity
-        results[f"{tech}_capacity_total_mw"] = base_capacity + added_capacity
+        results[f"{tech}_capacity_total_mw"] = total_capacity
 
     solar_base = model.metadata.get("solar_base_capacity_mw", 0.0)
-    solar_add = pyo.value(model.solar_capacity_add)
+    solar_total = pyo.value(model.solar_capacity)
     results["solar_thermal_capacity_base_mw"] = solar_base
-    results["solar_thermal_capacity_add_mw"] = solar_add
-    results["solar_thermal_capacity_total_mw"] = solar_base + solar_add
+    results["solar_thermal_capacity_total_mw"] = solar_total
 
     storage_base = model.metadata.get("storage_base_power_mw", {})
     for carrier, var in [
