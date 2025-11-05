@@ -8,3 +8,12 @@ data/processed/*
 data/results_python/*
 data/results_fortran/*
 .vscode/
+
+# Build artifacts
+fortran/build/
+fortran/bin/
+*.o
+*.mod
+
+# Data
+data/*
