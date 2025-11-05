@@ -30,6 +30,15 @@ DEFAULT_STORAGE_COSTS = {
     "cold": {"power": 150_000.0, "energy": 40_000.0},
 }
 
+DEFAULT_CAPACITY_LIMITS_MW = {
+    "onshore_wind": 5_000_000.0,
+    "offshore_wind": 5_000_000.0,
+    "rooftop_pv": 5_000_000.0,
+    "utility_pv": 5_000_000.0,
+    "csp": 5_000.0,
+    "solar_thermal": 5_000_000.0,
+}
+
 LOAD_SHEDDING_PENALTY = 1_000_000.0
 CURTAILMENT_PENALTY = 1.0
 
@@ -71,6 +80,7 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
     base_caps = inputs["base_capacities_mw"]
 
     solar_availability = inputs["solar_thermal_availability"]
+    solar_base_capacity = base_caps["solar_thermal"]
     supply_profiles = inputs.get("supply_profiles_mw", {})
 
     electric_load = inputs["electric_load_mw"]
@@ -83,6 +93,25 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
     # Heat pumps: convert electricity to thermal and cooling energy.
     heat_cop = inputs.get("heat_cop", 4.0)
     cold_cop = inputs.get("cold_cop", 3.0)
+
+    user_capacity_limits = inputs.get("capacity_limits_mw", {})
+    capacity_upper_bounds = {}
+    for tech in electric_techs:
+        default_limit = DEFAULT_CAPACITY_LIMITS_MW.get(tech, base_caps[tech])
+        upper_bound = user_capacity_limits.get(tech, default_limit)
+        if upper_bound <= 0.0:
+            upper_bound = default_limit
+        if upper_bound < base_caps[tech]:
+            upper_bound = base_caps[tech]
+        capacity_upper_bounds[tech] = upper_bound
+
+    solar_capacity_max = inputs.get(
+        "solar_capacity_limit_mw",
+        max(
+            DEFAULT_CAPACITY_LIMITS_MW.get("solar_thermal", solar_base_capacity),
+            solar_base_capacity,
+        ),
+    )
 
     # Storage parameters for each carrier
     storage_params = {
@@ -153,7 +182,11 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
     m.cold_load = pyo.Param(m.T, initialize=_dict_from_series(cold_load))
 
     # Decision variables
-    m.cap_add = pyo.Var(m.electric_techs, within=pyo.NonNegativeReals)
+    m.capacity = pyo.Var(
+        m.electric_techs,
+        within=pyo.NonNegativeReals,
+        bounds=lambda _m, tech: (0.0, capacity_upper_bounds[tech]),
+    )
     m.gen = pyo.Var(m.electric_techs, m.T, within=pyo.NonNegativeReals)
 
     m.load_shed_electric = pyo.Var(m.T, within=pyo.NonNegativeReals)
@@ -207,7 +240,10 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
     solar_cap_cost = capital_costs["solar_thermal"]
     solar_var_cost = variable_costs.get("solar_thermal", 0.0)
 
-    m.solar_capacity_add = pyo.Var(within=pyo.NonNegativeReals)
+    m.solar_capacity = pyo.Var(
+        within=pyo.NonNegativeReals,
+        bounds=(0.0, solar_capacity_max),
+    )
     m.solar_gen = pyo.Var(m.T, within=pyo.NonNegativeReals)
 
     m.solar_availability = pyo.Param(
@@ -231,8 +267,7 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
     )
 
     def heat_generation_limit(_m, t):
-        total_capacity = solar_base_capacity + _m.solar_capacity_add
-        return _m.solar_gen[t] <= _m.solar_availability[t] * total_capacity
+        return _m.solar_gen[t] <= _m.solar_availability[t] * _m.solar_capacity
 
     m.heat_generation_limit = pyo.Constraint(m.T, rule=heat_generation_limit)
 
@@ -312,8 +347,7 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
 
     # Generation capacity limits
     def generation_limit_rule(_m, tech, t):
-        total_capacity = _m.base_capacity[tech] + _m.cap_add[tech]
-        return _m.gen[tech, t] <= _m.availability[tech, t] * total_capacity
+        return _m.gen[tech, t] <= _m.availability[tech, t] * _m.capacity[tech]
 
     m.generation_limits = pyo.Constraint(
         m.electric_techs, m.T, rule=generation_limit_rule
@@ -361,10 +395,10 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
 
     # Objective components
     capex_electric = sum(
-        m.capital_cost[tech] * m.cap_add[tech] for tech in m.electric_techs
+        m.capital_cost[tech] * m.capacity[tech] for tech in m.electric_techs
     )
 
-    capex_heat = solar_cap_cost * m.solar_capacity_add
+    capex_heat = solar_cap_cost * m.solar_capacity
 
     storage_capex = (
         storage_costs["electric"]["power"] * m.storage_power_add_electric
@@ -418,6 +452,8 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
         "heat_cop": heat_cop,
         "cold_cop": cold_cop,
         "solar_base_capacity_mw": solar_base_capacity,
+        "capacity_upper_bounds_mw": capacity_upper_bounds,
+        "solar_capacity_limit_mw": solar_capacity_max,
         "storage_base_power_mw": {
             "electric": elec_params.base_power_mw,
             "heat": heat_params.base_power_mw,
