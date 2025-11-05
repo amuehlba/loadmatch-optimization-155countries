@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import csv
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -142,7 +140,7 @@ def load_countrystats(country: str, filepath: Path) -> Dict[str, float]:
     raise ValueError(f"Country '{country}' not found in {filepath}")
 
 
-def load_inputs(region: str, data_dir: Path | None = None) -> Dict[str, object]:
+def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, object]:
     """
     Aggregate all inputs required by the optimization model for a single region.
 

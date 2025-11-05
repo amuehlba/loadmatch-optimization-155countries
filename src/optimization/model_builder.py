@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
 from typing import Dict, Iterable
 
 import pyomo.environ as pyo
@@ -43,15 +40,15 @@ LOAD_SHEDDING_PENALTY = 1_000_000.0
 CURTAILMENT_PENALTY = 1.0
 
 
-@dataclass(frozen=True)
-class StorageParameters:
-    base_power_mw: float
-    energy_hours: float
-    charge_efficiency: float
-    discharge_efficiency: float
+class StorageParameters(object):
+    def __init__(self, base_power_mw, energy_hours, charge_efficiency, discharge_efficiency):
+        self.base_power_mw = float(base_power_mw)
+        self.energy_hours = float(energy_hours)
+        self.charge_efficiency = float(charge_efficiency)
+        self.discharge_efficiency = float(discharge_efficiency)
 
     @property
-    def base_energy_mwh(self) -> float:
+    def base_energy_mwh(self):
         return self.base_power_mw * self.energy_hours
 
 
