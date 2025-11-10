@@ -9,6 +9,9 @@ LP_SUMMARY = Path("data/results_python/summary.dat")
 FACTOR_RESULT = Path("data/results_python/fortran_factors.dat")
 FACTOR_DEST = Path("fortran/fortran_factors.dat")
 FORTRAN_EXE = Path("fortran/bin/powerworld")
+RESULTS_DIR = Path("data/results_verification")
+FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
+FORTRAN_ERR = RESULTS_DIR / "fortran_stderr.log"
 
 
 def run_fortran():
@@ -18,6 +21,10 @@ def run_fortran():
         stderr=subprocess.PIPE,
         universal_newlines=True,
     )
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    FORTRAN_LOG.write_text(result.stdout)
+    FORTRAN_ERR.write_text(result.stderr)
+
     if result.returncode != 0:
         raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
     return result.stdout

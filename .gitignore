@@ -17,3 +17,5 @@ fortran/bin/
 
 # Data
 data/*
+
+fortran/fortran_factors.dat
