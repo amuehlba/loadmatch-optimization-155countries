@@ -12,6 +12,7 @@ FORTRAN_EXE = Path("fortran/bin/powerworld")
 RESULTS_DIR = Path("data/results_verification")
 FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
 FORTRAN_ERR = RESULTS_DIR / "fortran_stderr.log"
+FORTRAN_OUT = RESULTS_DIR / "fortran_last_run.out"
 
 
 def run_fortran():
@@ -24,6 +25,10 @@ def run_fortran():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     FORTRAN_LOG.write_text(result.stdout)
     FORTRAN_ERR.write_text(result.stderr)
+    combined = result.stdout
+    if result.stderr:
+        combined += "\n----- STDERR -----\n" + result.stderr
+    FORTRAN_OUT.write_text(combined)
 
     if result.returncode != 0:
         raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
@@ -80,6 +85,7 @@ def run_workflow(region="UNITED-STATES"):
     export_fortran_factors.main()
     copy_factor_file()
     stdout = run_fortran()
+    print("Fortran output written to {}".format(FORTRAN_OUT))
     if check_feasibility(stdout):
         print("Fortran verification succeeded with LP factors.")
         return
