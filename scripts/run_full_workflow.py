@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,6 +15,7 @@ RESULTS_DIR = Path("data/results_verification")
 FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
 FORTRAN_ERR = RESULTS_DIR / "fortran_stderr.log"
 FORTRAN_OUT = RESULTS_DIR / "fortran_last_run.out"
+HISTORY_FILE = RESULTS_DIR / "factor_history.log"
 FACTOR_KEYS = [
     "FACONWIN",
     "FACOFFWIN",
@@ -23,6 +25,9 @@ FACTOR_KEYS = [
     "CSPTURBFAC",
     "FACSHT",
 ]
+ANNUAL_COST_PATTERN = re.compile(
+    r"ANNUAL TOT ENERGY COST.*?=\s+([-0-9\.Ee+]+)\s+([-0-9\.Ee+]+)\s+([-0-9\.Ee+]+)"
+)
 
 
 def run_fortran():
@@ -60,28 +65,44 @@ def check_feasibility(fortran_output):
         return False
     return True
 
-def log_candidate(factors, path=None):
-    if path is None:
-        path = RESULTS_DIR / "factors_history.txt"
-    lines = ["{} = {:.10f}".format(k, factors.get(k, 0.0)) for k in FACTOR_KEYS]
+def log_candidate(factors, feasible, cost, label="candidate"):
+    lines = [
+        "LABEL: {}".format(label),
+        "FEASIBLE: {}".format(feasible),
+        "COST_MN_BIL_PER_YEAR: {:.6f}".format(cost),
+    ]
+    lines.extend(
+        "{} = {:.10f}".format(k, float(factors.get(k, 0.0))) for k in FACTOR_KEYS
+    )
     lines.append("")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with HISTORY_FILE.open("a") as handle:
         handle.write("\n".join(lines))
 
 
-def evaluate_factors(factors):
-    log_candidate(factors)
+def parse_cost(stdout):
+    match = ANNUAL_COST_PATTERN.search(stdout)
+    if not match:
+        return float("inf")
+    try:
+        return float(match.group(2))
+    except (ValueError, IndexError):
+        return float("inf")
+
+
+def evaluate_factors(factors, label="candidate"):
     write_dat(factors, FACTOR_RESULT)
     copy_factor_file()
     stdout = run_fortran()
     feasible = check_feasibility(stdout)
-    print("--- Fortran output tail ({} factors) ---".format("LP" if feasible else "candidate"))
+    cost = parse_cost(stdout)
+    log_candidate(factors, feasible, cost, label)
+    print("--- Fortran output tail ({}) ---".format(label))
     lines = stdout.strip().splitlines()
     tail = "\n".join(lines[-20:]) if lines else ""
     print(tail)
     print("----------------------------------------")
-    return feasible, stdout
+    return feasible, cost, stdout
 
 
 def inflate_factors(factors, step):
@@ -94,43 +115,50 @@ def inflate_factors(factors, step):
     return inflated
 
 
-def hooke_jeeves_search(base_factors, initial_step=0.1, shrink=0.5, max_iter=10):
+def hooke_jeeves_search(
+    feasible_factors, feasible_cost, initial_step=0.1, shrink=0.5, max_iter=20
+):
     step = initial_step
-    candidate = base_factors.copy()
-    for iteration in range(max_iter):
-        print(
-            "Hooke-Jeeves iteration {} with step {:.4f}".format(iteration + 1, step)
-        )
-        feasible, stdout = evaluate_factors(candidate)
-        if feasible:
-            return candidate, stdout
+    candidate = feasible_factors.copy()
+    best_cost = feasible_cost
+    best_factors = feasible_factors.copy()
 
+    for iteration in range(max_iter):
+        print("Hooke-Jeeves iteration {} step {:.4f}".format(iteration + 1, step))
         improved = False
         for key in FACTOR_KEYS:
             current = candidate.get(key, 0.0)
-            if current <= 0:
-                delta = max(step, 0.05)
-            else:
-                delta = current * step
-            trial = candidate.copy()
-            trial[key] = current + delta
-            print(
-                "  Testing {} -> {:.6f}".format(
-                    key, trial[key]
-                )
-            )
-            feasible, stdout = evaluate_factors(trial)
-            if feasible:
-                candidate = trial
-                improved = True
-                print("  Found feasible update for {}".format(key))
+            deltas = []
+            if current > 0:
+                deltas.append(-current * step)
+            deltas.append(current * step if current > 0 else step)
+
+            for delta in deltas:
+                trial_value = current + delta
+                if trial_value <= 0:
+                    continue
+                trial = candidate.copy()
+                trial[key] = trial_value
+                label = "HJ-iter{}-{}".format(iteration + 1, key)
+                feasible, cost, _ = evaluate_factors(trial, label=label)
+                if feasible and cost < best_cost:
+                    candidate = trial
+                    best_cost = cost
+                    best_factors = trial.copy()
+                    improved = True
+                    print(
+                        "  Improved {} -> {:.6f}, cost {:.3f}".format(
+                            key, trial_value, cost
+                        )
+                    )
+                    break
+            if improved:
                 break
         if not improved:
             step *= shrink
             if step < 1e-4:
                 break
-
-    raise RuntimeError("Hooke-Jeeves search failed to find a feasible factor set.")
+    return best_factors, best_cost
 
 
 def run_workflow(region="UNITED-STATES"):
@@ -139,16 +167,45 @@ def run_workflow(region="UNITED-STATES"):
     copy_factor_file()
     stdout = run_fortran()
     print("Fortran output written to {}".format(FORTRAN_OUT))
-    if check_feasibility(stdout):
-        print("Fortran verification succeeded with LP factors.")
+    base_factors = read_dat(str(FACTOR_RESULT))
+    feasible_initial = check_feasibility(stdout)
+    initial_cost = parse_cost(stdout)
+    log_candidate(base_factors, feasible_initial, initial_cost, label="LP")
+    if feasible_initial:
+        print(
+            "Fortran verification succeeded with LP factors (cost {:.3f}).".format(
+                initial_cost
+            )
+        )
         return
 
-    base_factors = read_dat(str(FACTOR_RESULT))
-    candidate = inflate_factors(base_factors, 0.5)
-    print("LP factors infeasible; starting Hooke-Jeeves search.")
-    hooke_factors, _ = hooke_jeeves_search(candidate)
-    print("Hooke-Jeeves search produced a feasible factor set.")
+    print("LP factors infeasible; inflating to obtain a feasible starting point.")
+    candidate = inflate_factors(base_factors, 0.1)
+    feasible, cost, _ = evaluate_factors(candidate, label="inflate-start")
+    attempts = 0
+    while not feasible and attempts < 10:
+        candidate = inflate_factors(candidate, 0.1)
+        attempts += 1
+        feasible, cost, _ = evaluate_factors(
+            candidate, label="inflate-step{}".format(attempts)
+        )
+    if not feasible:
+        raise RuntimeError("Unable to find feasible starting point for Hooke-Jeeves.")
+
+    print(
+        "Hooke-Jeeves search starting from feasible point with cost {:.3f}.".format(
+            cost
+        )
+    )
+    hooke_factors, best_cost = hooke_jeeves_search(candidate, cost)
+    print(
+        "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
+            best_cost
+        )
+    )
     write_dat(hooke_factors, RESULTS_DIR / "hooke_jeeves_factors.dat")
+    write_dat(hooke_factors, FACTOR_RESULT)
+    copy_factor_file()
 
 
 def main():
