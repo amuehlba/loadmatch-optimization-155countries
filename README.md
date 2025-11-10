@@ -34,7 +34,38 @@ pip install -r requirements.txt
 > executables shipped with Pyomo are available. Install alternative solvers
 > if required.
 
-### Python optimisation workflow
+### End-to-end workflow
+
+To run the full pipeline—optimise capacities, translate them to Fortran
+factors, run LoadMatch, and trigger the Hooke–Jeeves fallback if the LP
+solution violates feasibility—use:
+
+```bash
+source .venv/bin/activate
+python -m scripts.run_full_workflow
+```
+
+This script performs the following steps automatically:
+
+1. Executes the Pyomo LP (`scripts.run_python_model`), producing
+   `data/results_python/summary.dat`.
+2. Converts the optimised capacities into the factor file
+   (`scripts.export_fortran_factors`), saving it to
+   `data/results_python/fortran_factors.dat`.
+3. Copies the factor file to `fortran/fortran_factors.dat`, which
+   `powerworld.f` now reads at start-up.
+4. Runs the Fortran executable (`fortran/bin/powerworld`).
+5. Inspects the Fortran log for “UNMET”/“UNSERVED”. If no violations are
+   found, the workflow ends.
+6. Otherwise inflates all factors by 10% and uses a Hooke–Jeeves search to
+   increase capacities (and re-run Fortran) until a feasible result is found.
+
+The exported factors that pass verification remain in
+`fortran/fortran_factors.dat` for downstream use.
+
+### Running components individually
+
+If you prefer to inspect each step manually, the legacy split still works:
 
 1. Solve the LP for a given region (default is `UNITED-STATES`):
 
@@ -102,13 +133,6 @@ The simplest approach keeps the Fortran source untouched:
 
    Outputs (e.g. `countrydata.out`, `wwsmonthly.*`) are written under
    `data/raw/` following the legacy conventions.
-
-### Optional: automatic factor overrides
-
-If you wish to avoid editing `powerworld.f`, add a Fortran subroutine that
-reads `fortran_factors.dat` and overwrites `FACONWIN`, etc., then call it in
-each regional branch. The repository currently keeps this step manual to avoid
-modifying the legacy code.
 
 ## Model Notes
 
