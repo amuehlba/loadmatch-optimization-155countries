@@ -57,8 +57,18 @@ def check_feasibility(fortran_output):
         return False
     return True
 
+def log_candidate(factors, path=None):
+    if path is None:
+        path = RESULTS_DIR / "factors_history.txt"
+    lines = ["{} = {:.10f}".format(k, factors.get(k, 0.0)) for k in FACTOR_KEYS]
+    lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write("\n".join(lines))
+
 
 def evaluate_factors(factors):
+    log_candidate(factors)
     write_dat(factors, FACTOR_RESULT)
     copy_factor_file()
     stdout = run_fortran()
@@ -80,6 +90,9 @@ def hooke_jeeves_search(base_factors, initial_step=0.1, shrink=0.5, max_iter=10)
     step = initial_step
     candidate = base_factors.copy()
     for iteration in range(max_iter):
+        print(
+            "Hooke-Jeeves iteration {} with step {:.4f}".format(iteration + 1, step)
+        )
         feasible, stdout = evaluate_factors(candidate)
         if feasible:
             return candidate, stdout
@@ -93,10 +106,16 @@ def hooke_jeeves_search(base_factors, initial_step=0.1, shrink=0.5, max_iter=10)
                 delta = current * step
             trial = candidate.copy()
             trial[key] = current + delta
+            print(
+                "  Testing {} -> {:.6f}".format(
+                    key, trial[key]
+                )
+            )
             feasible, stdout = evaluate_factors(trial)
             if feasible:
                 candidate = trial
                 improved = True
+                print("  Found feasible update for {}".format(key))
                 break
         if not improved:
             step *= shrink
@@ -117,10 +136,11 @@ def run_workflow(region="UNITED-STATES"):
         return
 
     base_factors = read_dat(str(FACTOR_RESULT))
-    candidate = inflate_factors(base_factors, 0.1)
+    candidate = inflate_factors(base_factors, 0.2)
     print("LP factors infeasible; starting Hooke-Jeeves search.")
-    hooke_jeeves_search(candidate)
+    hooke_factors, _ = hooke_jeeves_search(candidate)
     print("Hooke-Jeeves search produced a feasible factor set.")
+    write_dat(hooke_factors, RESULTS_DIR / "hooke_jeeves_factors.dat")
 
 
 def main():
