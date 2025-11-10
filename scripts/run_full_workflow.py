@@ -115,6 +115,19 @@ def inflate_factors(factors, step):
     return inflated
 
 
+def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25):
+    candidate = base_factors.copy()
+    step = initial_step
+    for attempt in range(1, max_attempts + 1):
+        candidate = inflate_factors(candidate, step)
+        label = "inflate-step{}".format(attempt)
+        feasible, cost, _ = evaluate_factors(candidate, label=label)
+        if feasible:
+            return candidate, cost
+        step *= growth
+    raise RuntimeError("Unable to inflate factors to achieve feasibility.")
+
+
 def hooke_jeeves_search(
     feasible_factors, feasible_cost, initial_step=0.1, shrink=0.5, max_iter=20
 ):
@@ -180,17 +193,7 @@ def run_workflow(region="UNITED-STATES"):
         return
 
     print("LP factors infeasible; inflating to obtain a feasible starting point.")
-    candidate = inflate_factors(base_factors, 0.1)
-    feasible, cost, _ = evaluate_factors(candidate, label="inflate-start")
-    attempts = 0
-    while not feasible and attempts < 10:
-        candidate = inflate_factors(candidate, 0.1)
-        attempts += 1
-        feasible, cost, _ = evaluate_factors(
-            candidate, label="inflate-step{}".format(attempts)
-        )
-    if not feasible:
-        raise RuntimeError("Unable to find feasible starting point for Hooke-Jeeves.")
+    candidate, cost = inflate_until_feasible(base_factors)
 
     print(
         "Hooke-Jeeves search starting from feasible point with cost {:.3f}.".format(
