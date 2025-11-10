@@ -13,6 +13,15 @@ RESULTS_DIR = Path("data/results_verification")
 FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
 FORTRAN_ERR = RESULTS_DIR / "fortran_stderr.log"
 FORTRAN_OUT = RESULTS_DIR / "fortran_last_run.out"
+FACTOR_KEYS = [
+    "FACONWIN",
+    "FACOFFWIN",
+    "FACUTILPV",
+    "FACRESPV",
+    "FACCOMPV",
+    "CSPTURBFAC",
+    "FACSHT",
+]
 
 
 def run_fortran():
@@ -42,7 +51,11 @@ def copy_factor_file():
 
 def check_feasibility(fortran_output):
     text = fortran_output.upper()
-    return "UNMET" not in text and "UNSERVED" not in text
+    if "REMAINING INFLEX LOAD" in text or "EXCESIN)>0" in text:
+        return False
+    if "UNMET" in text or "UNSERVED" in text:
+        return False
+    return True
 
 
 def evaluate_factors(factors):
@@ -54,30 +67,43 @@ def evaluate_factors(factors):
 
 
 def inflate_factors(factors, step):
-    return {k: max(v * (1.0 + step), 0.0) for k, v in factors.items()}
+    inflated = {}
+    for key, value in factors.items():
+        if value > 0:
+            inflated[key] = value * (1.0 + step)
+        else:
+            inflated[key] = max(step, 0.05)
+    return inflated
 
 
 def hooke_jeeves_search(base_factors, initial_step=0.1, shrink=0.5, max_iter=10):
     step = initial_step
     candidate = base_factors.copy()
-    feasible, stdout = evaluate_factors(candidate)
-    if feasible:
-        return candidate, stdout
-
-    while step > 1e-4:
-        improved = False
-        trial = inflate_factors(candidate, step)
-        feasible, stdout = evaluate_factors(trial)
+    for iteration in range(max_iter):
+        feasible, stdout = evaluate_factors(candidate)
         if feasible:
-            candidate = trial
-            improved = True
-            break
-        step *= shrink
-    if not improved:
-        raise RuntimeError(
-            "Hooke-Jeeves search failed to find a feasible factor set."
-        )
-    return candidate, stdout
+            return candidate, stdout
+
+        improved = False
+        for key in FACTOR_KEYS:
+            current = candidate.get(key, 0.0)
+            if current <= 0:
+                delta = max(step, 0.05)
+            else:
+                delta = current * step
+            trial = candidate.copy()
+            trial[key] = current + delta
+            feasible, stdout = evaluate_factors(trial)
+            if feasible:
+                candidate = trial
+                improved = True
+                break
+        if not improved:
+            step *= shrink
+            if step < 1e-4:
+                break
+
+    raise RuntimeError("Hooke-Jeeves search failed to find a feasible factor set.")
 
 
 def run_workflow(region="UNITED-STATES"):
@@ -89,10 +115,11 @@ def run_workflow(region="UNITED-STATES"):
     if check_feasibility(stdout):
         print("Fortran verification succeeded with LP factors.")
         return
+
     base_factors = read_dat(str(FACTOR_RESULT))
-    inflated = inflate_factors(base_factors, 0.1)
+    candidate = inflate_factors(base_factors, 0.1)
     print("LP factors infeasible; starting Hooke-Jeeves search.")
-    hooke_jeeves_search(inflated)
+    hooke_jeeves_search(candidate)
     print("Hooke-Jeeves search produced a feasible factor set.")
 
 
