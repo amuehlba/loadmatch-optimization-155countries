@@ -73,6 +73,11 @@ def evaluate_factors(factors):
     copy_factor_file()
     stdout = run_fortran()
     feasible = check_feasibility(stdout)
+    print("--- Fortran output tail ({} factors) ---".format("LP" if feasible else "candidate"))
+    lines = stdout.strip().splitlines()
+    tail = "\n".join(lines[-20:]) if lines else ""
+    print(tail)
+    print("----------------------------------------")
     return feasible, stdout
 
 
