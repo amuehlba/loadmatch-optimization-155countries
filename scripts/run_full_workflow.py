@@ -1,5 +1,4 @@
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -50,11 +49,10 @@ def run_fortran():
     return result.stdout
 
 
-def copy_factor_file():
-    FACTOR_DEST.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(str(FACTOR_RESULT), str(FACTOR_DEST))
-    FACTOR_PATHHOME.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(str(FACTOR_RESULT), str(FACTOR_PATHHOME))
+def write_factor_files(factors):
+    write_dat(factors, FACTOR_RESULT)
+    write_dat(factors, FACTOR_DEST)
+    write_dat(factors, FACTOR_PATHHOME)
 
 
 def check_feasibility(fortran_output):
@@ -91,8 +89,7 @@ def parse_cost(stdout):
 
 
 def evaluate_factors(factors, label="candidate"):
-    write_dat(factors, FACTOR_RESULT)
-    copy_factor_file()
+    write_factor_files(factors)
     stdout = run_fortran()
     feasible = check_feasibility(stdout)
     cost = parse_cost(stdout)
@@ -152,7 +149,9 @@ def hooke_jeeves_search(
                     continue
                 trial = candidate.copy()
                 trial[key] = trial_value
-                label = "HJ-iter{}-{}".format(iteration + 1, key)
+                label = "HJ-iter{}-{}-{}".format(
+                    iteration + 1, key, "inc" if delta > 0 else "dec"
+                )
                 feasible, cost, _ = evaluate_factors(trial, label=label)
                 if feasible and cost < best_cost:
                     candidate = trial
@@ -177,10 +176,10 @@ def hooke_jeeves_search(
 def run_workflow(region="UNITED-STATES"):
     run_python_model.main()
     export_fortran_factors.main()
-    copy_factor_file()
+    base_factors = read_dat(str(FACTOR_RESULT))
+    write_factor_files(base_factors)
     stdout = run_fortran()
     print("Fortran output written to {}".format(FORTRAN_OUT))
-    base_factors = read_dat(str(FACTOR_RESULT))
     feasible_initial = check_feasibility(stdout)
     initial_cost = parse_cost(stdout)
     log_candidate(base_factors, feasible_initial, initial_cost, label="LP")
@@ -207,8 +206,7 @@ def run_workflow(region="UNITED-STATES"):
         )
     )
     write_dat(hooke_factors, RESULTS_DIR / "hooke_jeeves_factors.dat")
-    write_dat(hooke_factors, FACTOR_RESULT)
-    copy_factor_file()
+    write_factor_files(hooke_factors)
 
 
 def main():
