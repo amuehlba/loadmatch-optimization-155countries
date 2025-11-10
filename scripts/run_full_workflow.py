@@ -136,7 +136,7 @@ def run_workflow(region="UNITED-STATES"):
         return
 
     base_factors = read_dat(str(FACTOR_RESULT))
-    candidate = inflate_factors(base_factors, 0.2)
+    candidate = inflate_factors(base_factors, 0.5)
     print("LP factors infeasible; starting Hooke-Jeeves search.")
     hooke_factors, _ = hooke_jeeves_search(candidate)
     print("Hooke-Jeeves search produced a feasible factor set.")
