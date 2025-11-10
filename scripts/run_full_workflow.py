@@ -8,6 +8,7 @@ from scripts import run_python_model, export_fortran_factors
 LP_SUMMARY = Path("data/results_python/summary.dat")
 FACTOR_RESULT = Path("data/results_python/fortran_factors.dat")
 FACTOR_DEST = Path("fortran/fortran_factors.dat")
+FACTOR_PATHHOME = Path("data/raw/fortran_factors.dat")
 FORTRAN_EXE = Path("fortran/bin/powerworld")
 RESULTS_DIR = Path("data/results_verification")
 FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
@@ -47,6 +48,8 @@ def run_fortran():
 def copy_factor_file():
     FACTOR_DEST.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(FACTOR_RESULT), str(FACTOR_DEST))
+    FACTOR_PATHHOME.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(str(FACTOR_RESULT), str(FACTOR_PATHHOME))
 
 
 def check_feasibility(fortran_output):
