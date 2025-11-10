@@ -14,8 +14,9 @@ FORTRAN_EXE = Path("fortran/bin/powerworld")
 def run_fortran():
     result = subprocess.run(
         [str(FORTRAN_EXE)],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
     )
     if result.returncode != 0:
         raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
