@@ -1,6 +1,6 @@
 import argparse
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Sequence
 
 from src.io.data_loader import load_inputs
 from src.io.dat_parser import read_dat, write_dat
@@ -69,7 +69,7 @@ def compute_fortran_factors(region: str, summary: Dict[str, float], inputs: Dict
     return factors
 
 
-def main():
+def parse_args(argv: Optional[Sequence[str]] = None):
     parser = argparse.ArgumentParser(
         description="Convert optimized capacities into LoadMatch Fortran scaling factors."
     )
@@ -90,7 +90,11 @@ def main():
         default=Path("data/results_python/fortran_factors.dat"),
         help="Destination .dat file to write the scaling factors.",
     )
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None):
+    args = parse_args(argv)
 
     if not args.summary.exists():
         raise FileNotFoundError(f"Optimization summary not found: {args.summary}")

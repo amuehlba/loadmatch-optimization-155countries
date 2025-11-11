@@ -302,7 +302,7 @@ def evaluate_trials_parallel(specs, max_workers):
 
 def run_workflow(region="UNITED-STATES", parallel_evals=1):
     run_python_model.main()
-    export_fortran_factors.main()
+    export_fortran_factors.main([])
     base_factors = read_dat(str(FACTOR_RESULT))
     write_factor_files(base_factors)
     stdout = run_fortran()
