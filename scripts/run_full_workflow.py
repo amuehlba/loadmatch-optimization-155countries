@@ -1,5 +1,11 @@
+import argparse
+import multiprocessing
+import os
 import re
+import shutil
 import subprocess
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from src.io.dat_parser import read_dat, write_dat
@@ -9,7 +15,9 @@ LP_SUMMARY = Path("data/results_python/summary.dat")
 FACTOR_RESULT = Path("data/results_python/fortran_factors.dat")
 FACTOR_DEST = Path("fortran/fortran_factors.dat")
 FACTOR_PATHHOME = Path("data/raw/fortran_factors.dat")
-FORTRAN_EXE = Path("fortran/bin/powerworld")
+FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
+BASE_RAW_DIR = Path("data/raw").resolve()
+WORKSPACE_BASE = Path("data/tmp_workspaces")
 RESULTS_DIR = Path("data/results_verification")
 FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
 FORTRAN_ERR = RESULTS_DIR / "fortran_stderr.log"
@@ -152,8 +160,54 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     raise RuntimeError("Unable to inflate factors to achieve feasibility.")
 
 
+def prepare_workspace():
+    WORKSPACE_BASE.mkdir(parents=True, exist_ok=True)
+    workspace_path = Path(
+        tempfile.mkdtemp(prefix="loadmatch_run_", dir=str(WORKSPACE_BASE))
+    )
+    data_raw = workspace_path / "data" / "raw"
+    data_raw.mkdir(parents=True, exist_ok=True)
+    for item in BASE_RAW_DIR.iterdir():
+        if item.name == "fortran_factors.dat":
+            continue
+        target = data_raw / item.name
+        if target.exists():
+            continue
+        if item.is_dir():
+            os.symlink(str(item), str(target), target_is_directory=True)
+        else:
+            os.symlink(str(item), str(target))
+    return workspace_path, data_raw
+
+
+def run_fortran_worker(label, factors):
+    workspace, data_raw = prepare_workspace()
+    try:
+        write_dat(factors, data_raw / "fortran_factors.dat")
+        result = subprocess.run(
+            [str(FORTRAN_EXE)],
+            cwd=str(workspace),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        combined = result.stdout
+        if result.stderr:
+            combined += "\n----- STDERR -----\n" + result.stderr
+        if result.returncode != 0:
+            raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
+        return label, factors, combined
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def hooke_jeeves_search(
-    feasible_factors, feasible_cost, initial_step=0.1, shrink=0.5, max_iter=20
+    feasible_factors,
+    feasible_cost,
+    initial_step=0.1,
+    shrink=0.5,
+    max_iter=20,
+    parallel_evals=1,
 ):
     step = initial_step
     candidate = feasible_factors.copy()
@@ -163,6 +217,7 @@ def hooke_jeeves_search(
     for iteration in range(max_iter):
         print("Hooke-Jeeves iteration {} step {:.4f}".format(iteration + 1, step))
         improved = False
+        trial_specs = []
         for key in FACTOR_KEYS:
             current = candidate.get(key, 0.0)
             deltas = []
@@ -179,20 +234,36 @@ def hooke_jeeves_search(
                 label = "HJ-iter{}-{}-{}".format(
                     iteration + 1, key, "inc" if delta > 0 else "dec"
                 )
-                feasible, cost, _ = evaluate_factors(trial, label=label)
-                if feasible and cost < best_cost:
-                    candidate = trial
-                    best_cost = cost
-                    best_factors = trial.copy()
-                    improved = True
-                    print(
-                        "  Improved {} -> {:.6f}, cost {:.3f}".format(
-                            key, trial_value, cost
-                        )
+                trial_specs.append(
+                    {"key": key, "label": label, "factors": trial}
+                )
+
+        if not trial_specs:
+            break
+
+        if parallel_evals > 1:
+            evaluation_results = evaluate_trials_parallel(
+                trial_specs, parallel_evals
+            )
+        else:
+            evaluation_results = evaluate_trials_sequential(trial_specs)
+
+        for spec, result in zip(trial_specs, evaluation_results):
+            feasible = result["feasible"]
+            cost = result["cost"]
+            trial = spec["factors"]
+            if feasible and cost < best_cost:
+                candidate = trial
+                best_cost = cost
+                best_factors = trial.copy()
+                improved = True
+                print(
+                    "  Improved {} -> {:.6f}, cost {:.3f}".format(
+                        spec["key"], trial[spec["key"]], cost
                     )
-                    break
-            if improved:
+                )
                 break
+
         if not improved:
             step *= shrink
             if step < 1e-4:
@@ -200,7 +271,36 @@ def hooke_jeeves_search(
     return best_factors, best_cost
 
 
-def run_workflow(region="UNITED-STATES"):
+def evaluate_trials_sequential(specs):
+    results = []
+    for spec in specs:
+        feasible, cost, _ = evaluate_factors(spec["factors"], label=spec["label"])
+        results.append({"feasible": feasible, "cost": cost})
+    return results
+
+
+def evaluate_trials_parallel(specs, max_workers):
+    results = []
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(run_fortran_worker, spec["label"], spec["factors"])
+            for spec in specs
+        ]
+        for spec, future in zip(specs, futures):
+            label, factors, output = future.result()
+            feasible = check_feasibility(output)
+            cost = parse_cost(output)
+            log_candidate(factors, feasible, cost, label)
+            lines = output.strip().splitlines()
+            tail = "\n".join(lines[-20:]) if lines else ""
+            print("--- Fortran output tail ({}) ---".format(label))
+            print(tail)
+            print("----------------------------------------")
+            results.append({"feasible": feasible, "cost": cost})
+    return results
+
+
+def run_workflow(region="UNITED-STATES", parallel_evals=1):
     run_python_model.main()
     export_fortran_factors.main()
     base_factors = read_dat(str(FACTOR_RESULT))
@@ -226,7 +326,9 @@ def run_workflow(region="UNITED-STATES"):
             cost
         )
     )
-    hooke_factors, best_cost = hooke_jeeves_search(candidate, cost)
+    hooke_factors, best_cost = hooke_jeeves_search(
+        candidate, cost, parallel_evals=parallel_evals
+    )
     print(
         "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
             best_cost
@@ -236,9 +338,27 @@ def run_workflow(region="UNITED-STATES"):
     write_factor_files(hooke_factors)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run optimisation + Fortran verification with optional parallel Hooke-Jeeves."
+    )
+    parser.add_argument(
+        "--parallel-evals",
+        type=int,
+        default=1,
+        help="Number of simultaneous Fortran evaluations per Hooke-Jeeves iteration (default: 1).",
+    )
+    return parser.parse_args()
+
+
 def main():
-    run_workflow()
+    args = parse_args()
+    run_workflow(parallel_evals=max(1, args.parallel_evals))
 
 
 if __name__ == "__main__":
+    try:
+        multiprocessing.set_start_method("spawn")
+    except RuntimeError:
+        pass
     main()
