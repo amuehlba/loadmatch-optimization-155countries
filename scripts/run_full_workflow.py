@@ -112,9 +112,35 @@ def inflate_factors(factors, step):
     return inflated
 
 
+def raise_subunity_factors(factors, step):
+    updated = factors.copy()
+    changed = False
+    for key, value in updated.items():
+        if value <= 0:
+            updated[key] = max(step, 0.05)
+            changed = True
+        elif value < 1.0:
+            updated[key] = min(1.0, value * (1.0 + step))
+            changed = True
+    return updated, changed
+
+
 def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25):
     candidate = base_factors.copy()
     step = initial_step
+
+    # Phase 1: raise sub-unity factors toward 1.0
+    for attempt in range(1, max_attempts + 1):
+        candidate, changed = raise_subunity_factors(candidate, step)
+        label = "inflate-subunity{}".format(attempt)
+        feasible, cost, _ = evaluate_factors(candidate, label=label)
+        if feasible:
+            return candidate, cost
+        if not changed:
+            break
+
+    # Phase 2: expand all factors once everything is >= 1
+    candidate = {k: max(1.0, v) for k, v in candidate.items()}
     for attempt in range(1, max_attempts + 1):
         candidate = inflate_factors(candidate, step)
         label = "inflate-step{}".format(attempt)
@@ -122,6 +148,7 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
         if feasible:
             return candidate, cost
         step *= growth
+
     raise RuntimeError("Unable to inflate factors to achieve feasibility.")
 
 
