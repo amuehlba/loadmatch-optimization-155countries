@@ -45,6 +45,17 @@ source .venv/bin/activate
 python -m scripts.run_full_workflow
 ```
 
+Common options:
+
+- `--parallel-evals N` executes the Hooke–Jeeves perturbations in parallel
+  (one LoadMatch run per candidate) using per-run workspaces. The default
+  `1` reproduces the serial workflow; on a research cluster you can request
+  more cores and pass, e.g., `--parallel-evals 7`.
+- `--hj-initial-step`, `--hj-shrink`, `--hj-max-iter`, `--hj-min-step`
+  customise the search aggressiveness. Defaults (0.2, 0.7, 40, 1e-5) provide
+  deeper exploration than the original settings; increase `--hj-max-iter` or
+  decrease `--hj-min-step` if you want to keep probing after the first plateau.
+
 This script performs the following steps automatically:
 
 1. Executes the Pyomo LP (`scripts.run_python_model`), producing
@@ -57,8 +68,10 @@ This script performs the following steps automatically:
 4. Runs the Fortran executable (`fortran/bin/powerworld`).
 5. Inspects the Fortran log for “UNMET”/“UNSERVED”. If no violations are
    found, the workflow ends.
-6. Otherwise inflates all factors by 10% and uses a Hooke–Jeeves search to
-   increase capacities (and re-run Fortran) until a feasible result is found.
+6. Otherwise nudges any factors below 1.0 up toward unity, inflates further
+   if needed to regain feasibility, and finally runs a (serial or parallel)
+   Hooke–Jeeves search to reduce the MN annual cost while maintaining
+   feasibility.
 
 The exported factors that pass verification remain in
 `fortran/fortran_factors.dat` for downstream use.

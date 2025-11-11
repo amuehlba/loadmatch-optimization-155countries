@@ -204,9 +204,10 @@ def run_fortran_worker(label, factors):
 def hooke_jeeves_search(
     feasible_factors,
     feasible_cost,
-    initial_step=0.1,
-    shrink=0.5,
-    max_iter=20,
+    initial_step=0.2,
+    shrink=0.7,
+    max_iter=40,
+    min_step=1e-5,
     parallel_evals=1,
 ):
     step = initial_step
@@ -266,7 +267,7 @@ def hooke_jeeves_search(
 
         if not improved:
             step *= shrink
-            if step < 1e-4:
+            if step < min_step:
                 break
     return best_factors, best_cost
 
@@ -300,7 +301,14 @@ def evaluate_trials_parallel(specs, max_workers):
     return results
 
 
-def run_workflow(region="UNITED-STATES", parallel_evals=1):
+def run_workflow(
+    region="UNITED-STATES",
+    parallel_evals=1,
+    hj_initial_step=0.2,
+    hj_shrink=0.7,
+    hj_max_iter=40,
+    hj_min_step=1e-5,
+):
     run_python_model.main()
     export_fortran_factors.main([])
     base_factors = read_dat(str(FACTOR_RESULT))
@@ -327,7 +335,13 @@ def run_workflow(region="UNITED-STATES", parallel_evals=1):
         )
     )
     hooke_factors, best_cost = hooke_jeeves_search(
-        candidate, cost, parallel_evals=parallel_evals
+        candidate,
+        cost,
+        initial_step=hj_initial_step,
+        shrink=hj_shrink,
+        max_iter=hj_max_iter,
+        min_step=hj_min_step,
+        parallel_evals=parallel_evals,
     )
     print(
         "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
@@ -348,12 +362,42 @@ def parse_args():
         default=1,
         help="Number of simultaneous Fortran evaluations per Hooke-Jeeves iteration (default: 1).",
     )
+    parser.add_argument(
+        "--hj-initial-step",
+        type=float,
+        default=0.2,
+        help="Initial relative step size for Hooke-Jeeves (default: 0.2).",
+    )
+    parser.add_argument(
+        "--hj-shrink",
+        type=float,
+        default=0.7,
+        help="Shrink factor applied when no improvement is found (default: 0.7).",
+    )
+    parser.add_argument(
+        "--hj-max-iter",
+        type=int,
+        default=40,
+        help="Maximum Hooke-Jeeves iterations (default: 40).",
+    )
+    parser.add_argument(
+        "--hj-min-step",
+        type=float,
+        default=1e-5,
+        help="Minimum step size before terminating Hooke-Jeeves (default: 1e-5).",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    run_workflow(parallel_evals=max(1, args.parallel_evals))
+    run_workflow(
+        parallel_evals=max(1, args.parallel_evals),
+        hj_initial_step=args.hj_initial_step,
+        hj_shrink=args.hj_shrink,
+        hj_max_iter=args.hj_max_iter,
+        hj_min_step=args.hj_min_step,
+    )
 
 
 if __name__ == "__main__":
