@@ -32,7 +32,7 @@ DEFAULT_CAPACITY_LIMITS_MW = {
     "offshore_wind": 5_000_000.0,
     "rooftop_pv": 5_000_000.0,
     "utility_pv": 5_000_000.0,
-    "csp": 0_000.0,
+    "csp": 0_001.0,
     "solar_thermal": 5_000_000.0,
 }
 
