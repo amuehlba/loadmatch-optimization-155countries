@@ -1721,6 +1721,11 @@ C       FACSHT     = 1.0
        HWFAC      = 1.0
        FLDISELEC  = 0.3
        HCDDADD    = 1.
+
+       FACREGION = 'UNITED-STATES'
+       CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
+     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
+     2    FACUTILPV, CSPTURBFAC, FACSHT)
 C  
 C *****************************************************************************
 C                                EAST AFRICA
@@ -20836,8 +20841,11 @@ C
         ENDIF
         GOTO 10
 
- 900  CONTINUE
+900  CONTINUE
       CLOSE(UNIT)
+      WRITE(*,'(A,1X,A,1X,7(1X,1PE12.5))') 'APPLIED FACTORS FOR',
+     1 REGION, FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
+     2 FACUTILPV, CSPTURBFAC, FACSHT
       RETURN
       END
 
