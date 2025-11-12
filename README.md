@@ -47,14 +47,25 @@ python -m scripts.run_full_workflow
 
 Common options:
 
-- `--parallel-evals N` executes the Hooke–Jeeves perturbations in parallel
-  (one LoadMatch run per candidate) using per-run workspaces. The default
-  `1` reproduces the serial workflow; on a research cluster you can request
-  more cores and pass, e.g., `--parallel-evals 7`.
+- `--parallel-evals N` executes Hooke–Jeeves perturbations in parallel
+  (one LoadMatch run per candidate) using per-run workspaces. The default `1`
+  reproduces the serial workflow; on a research cluster you can request more
+  cores and pass, e.g., `--parallel-evals 7`.
+- `--hj-direction {inc,dec,both}` restricts the search to increases,
+  decreases, or both (default: `both`).
 - `--hj-initial-step`, `--hj-shrink`, `--hj-max-iter`, `--hj-min-step`
   customise the search aggressiveness. Defaults (0.2, 0.7, 40, 1e-5) provide
-  deeper exploration than the original settings; increase `--hj-max-iter` or
-  decrease `--hj-min-step` if you want to keep probing after the first plateau.
+  deeper exploration; increase `--hj-max-iter` or decrease `--hj-min-step`
+  if you want to keep probing after the first plateau.
+
+Example (7 parallel trials, decrease-only search):
+
+```bash
+python -m scripts.run_full_workflow \
+    --parallel-evals 7 \
+    --hj-direction dec \
+    --hj-max-iter 60
+```
 
 This script performs the following steps automatically:
 

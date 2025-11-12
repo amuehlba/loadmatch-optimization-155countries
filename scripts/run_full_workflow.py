@@ -209,6 +209,7 @@ def hooke_jeeves_search(
     max_iter=40,
     min_step=1e-5,
     parallel_evals=1,
+    direction="both",
 ):
     step = initial_step
     candidate = feasible_factors.copy()
@@ -222,9 +223,10 @@ def hooke_jeeves_search(
         for key in FACTOR_KEYS:
             current = candidate.get(key, 0.0)
             deltas = []
-            if current > 0:
+            if direction in ("dec", "both") and current > 0:
                 deltas.append(-current * step)
-            deltas.append(current * step if current > 0 else step)
+            if direction in ("inc", "both"):
+                deltas.append(current * step if current > 0 else step)
 
             for delta in deltas:
                 trial_value = current + delta
@@ -308,6 +310,7 @@ def run_workflow(
     hj_shrink=0.7,
     hj_max_iter=40,
     hj_min_step=1e-5,
+    hj_direction="both",
 ):
     run_python_model.main()
     export_fortran_factors.main([])
@@ -342,6 +345,7 @@ def run_workflow(
         max_iter=hj_max_iter,
         min_step=hj_min_step,
         parallel_evals=parallel_evals,
+        direction=hj_direction,
     )
     print(
         "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
@@ -386,6 +390,12 @@ def parse_args():
         default=1e-5,
         help="Minimum step size before terminating Hooke-Jeeves (default: 1e-5).",
     )
+    parser.add_argument(
+        "--hj-direction",
+        choices=["inc", "dec", "both"],
+        default="both",
+        help="Direction of factor perturbations in Hooke-Jeeves (default: both).",
+    )
     return parser.parse_args()
 
 
@@ -397,6 +407,7 @@ def main():
         hj_shrink=args.hj_shrink,
         hj_max_iter=args.hj_max_iter,
         hj_min_step=args.hj_min_step,
+        hj_direction=args.hj_direction,
     )
 
 
