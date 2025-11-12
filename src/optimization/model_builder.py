@@ -98,8 +98,8 @@ def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
         upper_bound = user_capacity_limits.get(tech, default_limit)
         if upper_bound <= 0.0:
             upper_bound = default_limit
-        if upper_bound < base_caps[tech]:
-            upper_bound = base_caps[tech]
+        # if upper_bound < base_caps[tech]:
+        #     upper_bound = base_caps[tech]
         capacity_upper_bounds[tech] = upper_bound
 
     solar_capacity_max = inputs.get(
