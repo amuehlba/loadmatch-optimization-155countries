@@ -3744,16 +3744,6 @@ C Testing new factors
        CSPTURBFAC = 4.465003
        FACSHT     = 0.1
 
-       IF (IFCONUS.EQ.1) THEN
-        FACREGION = 'UNITED-STATES'
-       ELSE
-        FACREGION = GRIDUSE
-       ENDIF
-
-       CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
-     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
-     2    FACUTILPV, CSPTURBFAC, FACSHT)
-C
        IF (IMERGH2.EQ.1) THEN
         BATDISCH   = 1.15  
         FCCHARG    = 0.13 
@@ -3783,11 +3773,21 @@ C WITH NO BATTERIES
        STORUGDYS  = 12.
 C
        IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 1.6 
-        FACOFFWIN  = 0.89    
-        FACUTILPV  = 1.88     
-        BATDISCH   = 0.84     
+       FACONWIN   = 1.6 
+       FACOFFWIN  = 0.89    
+       FACUTILPV  = 1.88     
+       BATDISCH   = 0.84     
        ENDIF
+
+       IF (IFCONUS.EQ.1) THEN
+        FACREGION = 'UNITED-STATES'
+       ELSE
+        FACREGION = GRIDUSE
+       ENDIF
+
+       CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
+     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
+     2    FACUTILPV, CSPTURBFAC, FACSHT)
 C
 C DATA FROM FERC: 
 C https://www.ferc.gov/licensing/pumped-storage-projects

@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import Dict, Sequence
 
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
@@ -15,6 +16,7 @@ LP_SUMMARY = Path("data/results_python/summary.dat")
 FACTOR_RESULT = Path("data/results_python/fortran_factors.dat")
 FACTOR_DEST = Path("fortran/fortran_factors.dat")
 FACTOR_PATHHOME = Path("data/raw/fortran_factors.dat")
+FACTOR_PATHS = [FACTOR_RESULT, FACTOR_DEST, FACTOR_PATHHOME]
 FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
 WORKSPACE_BASE = Path("data/tmp_workspaces")
@@ -58,9 +60,33 @@ def run_fortran():
 
 
 def write_factor_files(factors):
-    write_dat(factors, FACTOR_RESULT)
-    write_dat(factors, FACTOR_DEST)
-    write_dat(factors, FACTOR_PATHHOME)
+    for path in FACTOR_PATHS:
+        write_dat(factors, path)
+    _verify_factor_files(factors)
+
+
+def _read_factor_file(path: Path) -> Dict[str, float]:
+    if not path.exists():
+        return {}
+    data = read_dat(str(path))
+    return {k.lower(): float(v) for k, v in data.items()}
+
+
+def _verify_factor_files(factors: Dict[str, float]):
+    expected = {k.lower(): float(v) for k, v in factors.items()}
+    for path in FACTOR_PATHS:
+        data = _read_factor_file(path)
+        missing = [k for k in expected if k not in data]
+        if missing:
+            raise RuntimeError(
+                f"Factor file {path} missing keys: {', '.join(missing)}"
+            )
+        for key, val in expected.items():
+            if abs(data.get(key, float("nan")) - val) > 1e-9:
+                raise RuntimeError(
+                    f"Factor mismatch in {path} for {key}: "
+                    f"expected {val}, found {data.get(key)}"
+                )
 
 
 def check_feasibility(fortran_output):
