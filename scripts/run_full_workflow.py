@@ -210,17 +210,21 @@ def hooke_jeeves_search(
     min_step=1e-5,
     parallel_evals=1,
     direction="both",
+    locked_factors=None,
 ):
     step = initial_step
     candidate = feasible_factors.copy()
     best_cost = feasible_cost
     best_factors = feasible_factors.copy()
+    locked = {name.lower() for name in (locked_factors or [])}
 
     for iteration in range(max_iter):
         print("Hooke-Jeeves iteration {} step {:.4f}".format(iteration + 1, step))
         improved = False
         trial_specs = []
         for key in FACTOR_KEYS:
+            if key.lower() in locked:
+                continue
             current = candidate.get(key, 0.0)
             deltas = []
             if direction in ("dec", "both") and current > 0:
@@ -311,6 +315,7 @@ def run_workflow(
     hj_max_iter=40,
     hj_min_step=1e-5,
     hj_direction="both",
+    hj_locked_factors=None,
 ):
     run_python_model.main()
     export_fortran_factors.main([])
@@ -346,6 +351,7 @@ def run_workflow(
         min_step=hj_min_step,
         parallel_evals=parallel_evals,
         direction=hj_direction,
+        locked_factors=hj_locked_factors,
     )
     print(
         "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
@@ -396,6 +402,14 @@ def parse_args():
         default="both",
         help="Direction of factor perturbations in Hooke-Jeeves (default: both).",
     )
+    parser.add_argument(
+        "--hj-lock",
+        nargs="*",
+        default=[],
+        metavar="FACTOR",
+        help="List of factor names to keep fixed during Hooke-Jeeves "
+        "(e.g., FACONWIN FACRESPV). Case-insensitive; default: none.",
+    )
     return parser.parse_args()
 
 
@@ -408,6 +422,7 @@ def main():
         hj_max_iter=args.hj_max_iter,
         hj_min_step=args.hj_min_step,
         hj_direction=args.hj_direction,
+        hj_locked_factors=args.hj_lock,
     )
 
 

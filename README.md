@@ -53,6 +53,8 @@ Common options:
   cores and pass, e.g., `--parallel-evals 7`.
 - `--hj-direction {inc,dec,both}` restricts the search to increases,
   decreases, or both (default: `both`).
+- `--hj-lock FACTOR [FACTOR ...]` keeps specific factors fixed during the
+  Hooke–Jeeves search (e.g., `--hj-lock CSPTURBFAC FACRESPV`).
 - `--hj-initial-step`, `--hj-shrink`, `--hj-max-iter`, `--hj-min-step`
   customise the search aggressiveness. Defaults (0.2, 0.7, 40, 1e-5) provide
   deeper exploration; increase `--hj-max-iter` or decrease `--hj-min-step`
@@ -64,6 +66,7 @@ Example (7 parallel trials, decrease-only search):
 python -m scripts.run_full_workflow \
     --parallel-evals 7 \
     --hj-direction dec \
+    --hj-lock CSPTURBFAC \
     --hj-max-iter 60
 ```
 
