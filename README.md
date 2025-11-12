@@ -174,6 +174,42 @@ The simplest approach keeps the Fortran source untouched:
 - **Solver failures** – check that HiGHS is installed; alternatively, point the
   Pyomo `SolverFactory` to another LP/MILP solver.
 
+## Visualising factor histories
+
+The workflow logs every Hooke–Jeeves trial to
+`data/results_verification/factor_history.log`. To analyse those runs on your
+local machine:
+
+1. Copy the log from the cluster, e.g.:
+
+   ```bash
+   scp <user>@<cluster>:/path/to/repo/data/results_verification/factor_history.log .
+   ```
+
+2. Use the helper utilities in `scripts/factor_history_tools.py` to parse and
+   plot trajectories. Example:
+
+   ```python
+   from pathlib import Path
+   import matplotlib.pyplot as plt
+   from scripts.factor_history_tools import (
+       parse_factor_history,
+       records_to_dataframe,
+       add_absolute_capacities,
+       plot_factor_trajectories,
+       plot_cost_and_feasibility,
+   )
+
+   records = parse_factor_history(Path("factor_history.log"))
+   df = add_absolute_capacities(records_to_dataframe(records))
+   plot_factor_trajectories(df, absolute=True)
+   plot_cost_and_feasibility(df)
+   plt.show()
+   ```
+
+The plotting helpers convert the multiplier history into absolute MW using the
+original base capacities, making it easy to compare trajectories across trials.
+
 ## Contributing
 
 - Keep edits to the Fortran source minimal and well-documented to ease syncing
