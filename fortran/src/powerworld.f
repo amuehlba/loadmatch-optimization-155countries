@@ -3779,6 +3779,13 @@ C
        BATDISCH   = 0.84     
        ENDIF
 
+       PHSMIN     = 0.
+       FRSTORINIT = 0.9
+       UGFAC      = 0.9
+       HWFAC      = 1.0
+       FLDISELEC  = 0.3
+       HCDDADD    = 1. 
+
        IF (IFCONUS.EQ.1) THEN
         FACREGION = 'UNITED-STATES'
        ELSE
@@ -3788,21 +3795,7 @@ C
        CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
      1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
      2    FACUTILPV, CSPTURBFAC, FACSHT)
-C
-C DATA FROM FERC: 
-C https://www.ferc.gov/licensing/pumped-storage-projects
-C LICENSES:                    18.897 GW MAY 22, 2023
-C PENDING LICENSES:             3.672 GW MAY 22, 2023
-C PRELIMINARY PERMITS:         41.2   GW MAY 22, 2023
-C PENDING PRELIMINARY PERMITS: 49.5   GW
-C TOTAL PENDING:               94.38  GW  
 
-       PHSMIN     = 0.
-       FRSTORINIT = 0.9
-       UGFAC      = 0.9
-       HWFAC      = 1.0
-       FLDISELEC  = 0.3
-       HCDDADD    = 1. 
 C
 C *****************************************************************************
 C                INDIVIDUAL + COMBINATIONS OF EUROPEAN COUNTRIES 
