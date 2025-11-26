@@ -76,15 +76,14 @@ Examples:
       --hj-max-iter 60
   ```
 
-- Genetic algorithm, 7 parallel trials, decrease-only mutations, locking CSP:
+- Genetic algorithm, 12 parallel trials, decrease-only mutations, locking CSP:
 
   ```bash
   python -m scripts.run_full_workflow \
       --optimizer ga \
-      --parallel-evals 7 \
-      --hj-direction dec \
+      --parallel-evals 12 \
       --hj-lock CSPTURBFAC \
-      --ga-population 20 \
+      --ga-population 12 \
       --ga-generations 50 \
       --ga-mutation-rate 0.3 \
       --ga-mutation-scale 0.2 \
