@@ -64,18 +64,32 @@ Common options:
   `--ga-mutation-scale`, and `--ga-elite-frac`. GA supports the same `--hj-direction`
   and `--hj-lock` semantics.
 
-Example (7 parallel trials, decrease-only search):
+Examples:
 
-```bash
-python -m scripts.run_full_workflow \
-    --parallel-evals 7 \
-    --hj-direction dec \
-    --hj-lock CSPTURBFAC \
-    --optimizer ga \
-    --ga-population 20 \
-    --ga-generations 50 \
-    --hj-max-iter 60
-```
+- Hooke–Jeeves, 7 parallel trials, decrease-only search, locking CSP:
+
+  ```bash
+  python -m scripts.run_full_workflow \
+      --parallel-evals 7 \
+      --hj-direction dec \
+      --hj-lock CSPTURBFAC \
+      --hj-max-iter 60
+  ```
+
+- Genetic algorithm, 7 parallel trials, decrease-only mutations, locking CSP:
+
+  ```bash
+  python -m scripts.run_full_workflow \
+      --optimizer ga \
+      --parallel-evals 7 \
+      --hj-direction dec \
+      --hj-lock CSPTURBFAC \
+      --ga-population 20 \
+      --ga-generations 50 \
+      --ga-mutation-rate 0.3 \
+      --ga-mutation-scale 0.2 \
+      --ga-elite-frac 0.2
+  ```
 
 This script performs the following steps automatically:
 
