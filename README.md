@@ -59,6 +59,10 @@ Common options:
   customise the search aggressiveness. Defaults (0.2, 0.7, 40, 1e-5) provide
   deeper exploration; increase `--hj-max-iter` or decrease `--hj-min-step`
   if you want to keep probing after the first plateau.
+- `--optimizer {hj,ga}` selects Hooke–Jeeves or a genetic algorithm. GA has
+  additional knobs: `--ga-population`, `--ga-generations`, `--ga-mutation-rate`,
+  `--ga-mutation-scale`, and `--ga-elite-frac`. GA supports the same `--hj-direction`
+  and `--hj-lock` semantics.
 
 Example (7 parallel trials, decrease-only search):
 
@@ -67,6 +71,9 @@ python -m scripts.run_full_workflow \
     --parallel-evals 7 \
     --hj-direction dec \
     --hj-lock CSPTURBFAC \
+    --optimizer ga \
+    --ga-population 20 \
+    --ga-generations 50 \
     --hj-max-iter 60
 ```
 

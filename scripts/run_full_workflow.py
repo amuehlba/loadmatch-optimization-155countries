@@ -1,13 +1,14 @@
 import argparse
 import multiprocessing
 import os
+import random
 import re
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, Sequence, List
 
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
@@ -333,6 +334,120 @@ def evaluate_trials_parallel(specs, max_workers):
     return results
 
 
+def mutate_factors(
+    base: Dict[str, float],
+    mutation_rate: float,
+    mutation_scale: float,
+    direction: str,
+    locked: set,
+) -> Dict[str, float]:
+    mutated = base.copy()
+    keys = [k for k in FACTOR_KEYS if k.lower() not in locked]
+    changed = False
+    for key in keys:
+        if random.random() < mutation_rate:
+            current = mutated.get(key, 1.0)
+            delta = current * mutation_scale
+            if direction == "dec":
+                delta = -abs(delta)
+            elif direction == "inc":
+                delta = abs(delta)
+            else:
+                delta = delta if random.random() < 0.5 else -delta
+            trial = current + delta
+            if trial <= 0:
+                trial = max(0.01, current * 0.5)
+            mutated[key] = trial
+            changed = True
+    if not changed and keys:
+        key = random.choice(keys)
+        current = mutated.get(key, 1.0)
+        delta = current * mutation_scale
+        delta = -abs(delta) if direction == "dec" else abs(delta)
+        trial = current + delta
+        if trial <= 0:
+            trial = max(0.01, current * 0.5)
+        mutated[key] = trial
+    return mutated
+
+
+def crossover_factors(parent1: Dict[str, float], parent2: Dict[str, float]) -> Dict[str, float]:
+    child = {}
+    for key in FACTOR_KEYS:
+        w = random.random()
+        child[key] = w * parent1.get(key, 1.0) + (1 - w) * parent2.get(key, 1.0)
+    return child
+
+
+def genetic_search(
+    feasible_factors: Dict[str, float],
+    feasible_cost: float,
+    population_size: int = 12,
+    generations: int = 20,
+    mutation_rate: float = 0.3,
+    mutation_scale: float = 0.2,
+    elite_frac: float = 0.2,
+    direction: str = "both",
+    parallel_evals: int = 1,
+    locked_factors: Sequence[str] = (),
+) -> (Dict[str, float], float):
+    locked = {f.lower() for f in locked_factors or []}
+    population: List[Dict[str, float]] = [feasible_factors.copy()]
+    while len(population) < population_size:
+        population.append(
+            mutate_factors(
+                feasible_factors, mutation_rate, mutation_scale, direction, locked
+            )
+        )
+
+    best_factors = feasible_factors.copy()
+    best_cost = feasible_cost
+
+    for gen in range(generations):
+        specs = []
+        for idx, indiv in enumerate(population):
+            specs.append(
+                {
+                    "key": "GA",
+                    "label": f"GA-gen{gen+1}-ind{idx+1}",
+                    "factors": indiv,
+                }
+            )
+
+        if parallel_evals > 1:
+            evals = evaluate_trials_parallel(specs, parallel_evals)
+        else:
+            evals = evaluate_trials_sequential(specs)
+
+        scored = []
+        for spec, res in zip(specs, evals):
+            cost = res["cost"]
+            feasible = res["feasible"]
+            if not feasible:
+                cost = float("inf")
+            scored.append((cost, spec["factors"]))
+            if feasible and cost < best_cost:
+                best_cost = cost
+                best_factors = spec["factors"].copy()
+
+        scored.sort(key=lambda x: x[0])
+        elites = [f for c, f in scored if c < float("inf")]
+        elite_count = max(1, int(elite_frac * population_size))
+        elites = elites[:elite_count]
+        if not elites:
+            elites = [best_factors.copy()]
+
+        new_population: List[Dict[str, float]] = elites.copy()
+        while len(new_population) < population_size:
+            parents = random.sample(elites, 2) if len(elites) >= 2 else elites * 2
+            child = crossover_factors(parents[0], parents[1])
+            child = mutate_factors(child, mutation_rate, mutation_scale, direction, locked)
+            new_population.append(child)
+        population = new_population
+
+    return best_factors, best_cost
+
+
 def run_workflow(
     region="UNITED-STATES",
     parallel_evals=1,
@@ -342,6 +457,12 @@ def run_workflow(
     hj_min_step=1e-5,
     hj_direction="both",
     hj_locked_factors=None,
+    optimizer="hj",
+    ga_population=12,
+    ga_generations=20,
+    ga_mutation_rate=0.3,
+    ga_mutation_scale=0.2,
+    ga_elite_frac=0.2,
 ):
     run_python_model.main()
     export_fortran_factors.main([])
@@ -368,24 +489,45 @@ def run_workflow(
             cost
         )
     )
-    hooke_factors, best_cost = hooke_jeeves_search(
-        candidate,
-        cost,
-        initial_step=hj_initial_step,
-        shrink=hj_shrink,
-        max_iter=hj_max_iter,
-        min_step=hj_min_step,
-        parallel_evals=parallel_evals,
-        direction=hj_direction,
-        locked_factors=hj_locked_factors,
-    )
-    print(
-        "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
-            best_cost
+    if optimizer == "ga":
+        best_factors, best_cost = genetic_search(
+            candidate,
+            cost,
+            population_size=ga_population,
+            generations=ga_generations,
+            mutation_rate=ga_mutation_rate,
+            mutation_scale=ga_mutation_scale,
+            elite_frac=ga_elite_frac,
+            direction=hj_direction,
+            parallel_evals=parallel_evals,
+            locked_factors=hj_locked_factors,
         )
-    )
-    write_dat(hooke_factors, RESULTS_DIR / "hooke_jeeves_factors.dat")
-    write_factor_files(hooke_factors)
+        print(
+            "Genetic algorithm produced feasible factors with cost {:.3f}.".format(
+                best_cost
+            )
+        )
+        write_dat(best_factors, RESULTS_DIR / "genetic_factors.dat")
+        write_factor_files(best_factors)
+    else:
+        hooke_factors, best_cost = hooke_jeeves_search(
+            candidate,
+            cost,
+            initial_step=hj_initial_step,
+            shrink=hj_shrink,
+            max_iter=hj_max_iter,
+            min_step=hj_min_step,
+            parallel_evals=parallel_evals,
+            direction=hj_direction,
+            locked_factors=hj_locked_factors,
+        )
+        print(
+            "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
+                best_cost
+            )
+        )
+        write_dat(hooke_factors, RESULTS_DIR / "hooke_jeeves_factors.dat")
+        write_factor_files(hooke_factors)
 
 
 def parse_args():
@@ -436,6 +578,42 @@ def parse_args():
         help="List of factor names to keep fixed during Hooke-Jeeves "
         "(e.g., FACONWIN FACRESPV). Case-insensitive; default: none.",
     )
+    parser.add_argument(
+        "--optimizer",
+        choices=["hj", "ga"],
+        default="hj",
+        help="Optimizer to use after feasibility: hj (Hooke-Jeeves) or ga (genetic algorithm).",
+    )
+    parser.add_argument(
+        "--ga-population",
+        type=int,
+        default=12,
+        help="Genetic algorithm population size (default: 12).",
+    )
+    parser.add_argument(
+        "--ga-generations",
+        type=int,
+        default=20,
+        help="Genetic algorithm generations (default: 20).",
+    )
+    parser.add_argument(
+        "--ga-mutation-rate",
+        type=float,
+        default=0.3,
+        help="Genetic algorithm mutation rate (default: 0.3).",
+    )
+    parser.add_argument(
+        "--ga-mutation-scale",
+        type=float,
+        default=0.2,
+        help="Relative mutation scale (default: 0.2).",
+    )
+    parser.add_argument(
+        "--ga-elite-frac",
+        type=float,
+        default=0.2,
+        help="Elite fraction preserved each GA generation (default: 0.2).",
+    )
     return parser.parse_args()
 
 
@@ -449,6 +627,12 @@ def main():
         hj_min_step=args.hj_min_step,
         hj_direction=args.hj_direction,
         hj_locked_factors=args.hj_lock,
+        optimizer=args.optimizer,
+        ga_population=args.ga_population,
+        ga_generations=args.ga_generations,
+        ga_mutation_rate=args.ga_mutation_rate,
+        ga_mutation_scale=args.ga_mutation_scale,
+        ga_elite_frac=args.ga_elite_frac,
     )
 
 
