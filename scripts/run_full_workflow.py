@@ -56,7 +56,7 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     # --- CSP / storage configuration ---
     "CSPSTORGAT":  (2.61244594,   "ratio",     "CSP storage charge/discharge ratio"),
     "MXHRDRM":     (11.0,         "hours",     "Max demand-response shift hours"),
-    "BATDISCH":    (0.0,          "tw",        "Battery max discharge rate (TW)"),
+    "BATDISCH":    (1.55,         "tw",        "Battery max discharge rate (TW)"),
     "HCHARCSP":    (14.0,         "hours",     "CSP max charge hours"),
     "STORHBAT":    (4.0,          "hours",     "Battery storage duration hours"),
     "STORHCOLD":   (14.0,         "hours",     "Cold storage hours (PCM-ice + CW-STES)"),
@@ -83,9 +83,9 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "FMORTBAU":    (0.9,          "fixed",     "BAU air-pollution mortality fraction"),
     # --- Hot-water, H2, heat battery ---
     "HWFAC":       (1.0,          "factor",    "HW-STES charge rate factor"),
-    "FCDISCH":     (0.0,          "tw",        "H2 fuel-cell discharge rate (TW)"),
-    "FCCHARG":     (0.0,          "tw",        "H2 electrolyser charge rate (TW)"),
-    "STORHHFC":    (0.0,          "hours",     "H2 electricity storage hours"),
+    "FCDISCH":     (0.091,        "tw",        "H2 fuel-cell discharge rate (TW)"),
+    "FCCHARG":     (0.091,        "tw",        "H2 electrolyser charge rate (TW)"),
+    "STORHHFC":    (13.0,         "hours",     "H2 electricity storage hours"),
     "HBTDISCH":    (0.0,          "tw",        "Heat battery discharge rate (TW)"),
     "STORHHBT":    (15.0,         "hours",     "Heat battery storage hours"),
     # --- Industrial heat flexibility ---
