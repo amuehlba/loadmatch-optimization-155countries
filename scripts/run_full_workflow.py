@@ -147,6 +147,99 @@ def _clamp(key: str, value: float) -> float:
     return value
 
 
+BASELINE_FILE = Path("data/raw/baseline_results.dat")
+
+# Map from baseline_results.dat labels to PARAM_REGISTRY keys.
+# Values that appear on multi-value lines need a positional index.
+_BASELINE_PARSE_MAP = {
+    # (line_prefix, column_index) -> registry key
+    # Line 1: FACONWIN  FACOFFWIN  FACROOFPV  = v0 v1 v2
+    ("FACONWIN", 0): "FACONWIN",
+    ("FACONWIN", 1): "FACOFFWIN",
+    # Line 2: FACRESPV  FACCOMPV   FACUTILPV  = v0 v1 v2
+    ("FACRESPV", 0): "FACRESPV",
+    ("FACRESPV", 1): "FACCOMPV",
+    ("FACRESPV", 2): "FACUTILPV",
+    # Line 3: CSPTURBFAC CSPCHARFAC   FACSHT  = v0 v1 v2
+    ("CSPTURBFAC", 0): "CSPTURBFAC",
+    ("CSPTURBFAC", 2): "FACSHT",
+    # HCHARCSP line
+    ("HCHARCSP", 0): "HCHARCSP",
+    # STORHPHS line
+    ("STORHPHS", 0): "STORHPHS",
+    # STORHCOLD line
+    ("STORHCOLD", 0): "STORHCOLD",
+    # STORHBAT  BATDISCH  STORBTWH
+    ("STORHBAT", 0): "STORHBAT",
+    ("STORHBAT", 1): "BATDISCH",
+    # STORHHFC  H2SDISCH  STORFTWH
+    ("STORHHFC", 0): "STORHHFC",
+    # FCCHARG  FCDISCH
+    ("FCCHARG", 0): "FCCHARG",
+    ("FCCHARG", 1): "FCDISCH",
+    # STORHHBT  HBTDISCH  STOHBTWH
+    ("STORHHBT", 0): "STORHHBT",
+    ("STORHHBT", 1): "HBTDISCH",
+    # STORHHWAT HOTDISCH  STORHTWH
+    ("STORHHWAT", 0): "STORHHWAT",
+    # STORUGDYS  TWINUTES  UTESCHARG
+    ("STORUGDYS", 0): "STORUGDYS",
+    # WARMMAX-TW UGFAC  MXHRDRM
+    ("WARMMAX-TW", 1): "UGFAC",
+    ("WARMMAX-TW", 2): "MXHRDRM",
+    # H2STORMX-TWH HWFAC HPSIZE-TW
+    ("H2STORMX-TWH", 1): "HWFAC",
+    # DAYH2STOR
+    ("DAYH2STOR", 0): "DAYH2STOR",
+    # DAMCAPRAT
+    ("DAMCAPRAT", 0): "DAMCAPRAT",
+    # HPTURBRAT
+    ("HPTURBRAT", 0): "HPTURBRAT",
+}
+
+
+def parse_baseline_factors(path: Path) -> Dict[str, float]:
+    """Parse baseline_results.dat and return a dict of PARAM_REGISTRY keys to values.
+
+    Only parameters that have a mapping in _BASELINE_PARSE_MAP are returned.
+    Remaining parameters should be filled from PARAM_REGISTRY defaults.
+    """
+    factors: Dict[str, float] = {}
+    with open(path, "rb") as f:
+        raw = f.read().decode("ascii", errors="replace")
+
+    for line in raw.replace("\r", "").split("\n"):
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        left, right = line.split("=", 1)
+        prefix = left.split()[0] if left.split() else ""
+        values = right.split()
+        for (pfx, col_idx), reg_key in _BASELINE_PARSE_MAP.items():
+            if pfx == prefix and col_idx < len(values):
+                try:
+                    factors[reg_key] = float(values[col_idx])
+                except ValueError:
+                    pass
+    return factors
+
+
+def load_baseline_start(path: Path) -> Dict[str, float]:
+    """Build a complete factor dict from baseline_results.dat.
+
+    Parsed values override PARAM_REGISTRY defaults.
+    """
+    parsed = parse_baseline_factors(path)
+    full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+    full.update(parsed)
+    print(f"Loaded {len(parsed)} baseline factors from {path}")
+    for k, v in sorted(parsed.items()):
+        default = PARAM_REGISTRY[k][0]
+        marker = "" if abs(v - default) < 1e-9 else " *"
+        print(f"  {k:12s} = {v:.6f}  (default {default:.6f}){marker}")
+    return full
+
+
 ANNUAL_COST_PATTERN = re.compile(
     r"ANNUAL TOT ENERGY COST.*?=\s+([-0-9\.Ee+]+)\s+([-0-9\.Ee+]+)\s+([-0-9\.Ee+]+)"
 )
@@ -659,11 +752,19 @@ def run_workflow(
     ga_mutation_cooling=0.98,
     ga_factor_scales=None,
     ga_magnitude_damping=0.5,
+    baseline_start=None,
 ):
-    run_python_model.main()
-    export_fortran_factors.main([])
-    lp_factors = read_dat(str(FACTOR_RESULT))
-    base_factors = _build_full_factors(lp_factors)
+    if baseline_start:
+        baseline_path = Path(baseline_start)
+        if not baseline_path.exists():
+            raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
+        print(f"Using baseline factors from {baseline_path} (skipping LP).")
+        base_factors = load_baseline_start(baseline_path)
+    else:
+        run_python_model.main()
+        export_fortran_factors.main([])
+        lp_factors = read_dat(str(FACTOR_RESULT))
+        base_factors = _build_full_factors(lp_factors)
     write_factor_files(base_factors)
     stdout = run_fortran()
     print("Fortran output written to {}".format(FORTRAN_OUT))
@@ -855,6 +956,16 @@ def parse_args():
         default=0.5,
         help="Exponent for 1/max(1,value) to damp mutations on large values (default: 0.5).",
     )
+    parser.add_argument(
+        "--baseline-start",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to a baseline_results.dat file from a previous publication. "
+        "When provided, the LP step is skipped and the baseline factors are used "
+        "as the initial guess for the GA/HJ optimiser. "
+        "Default: %(default)s (run LP from scratch).",
+    )
     return parser.parse_args()
 
 def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
@@ -891,6 +1002,7 @@ def main():
         ga_mutation_cooling=args.ga_mutation_cooling,
         ga_factor_scales=factor_scales,
         ga_magnitude_damping=args.ga_magnitude_damping,
+        baseline_start=args.baseline_start,
     )
 
 

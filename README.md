@@ -103,9 +103,10 @@ python -m scripts.run_full_workflow [OPTIONS]
 This does everything automatically:
 
 1. Solves the Pyomo LP, producing `data/results_python/summary.dat`
+   *(skipped when `--baseline-start` is used)*
 2. Converts LP capacities into `data/results_python/fortran_factors.dat` (all 37
    parameters; LP values for the 7 capacity factors, Fortran CONUS defaults for
-   the other 30)
+   the other 30) *(or loads factors from a baseline file)*
 3. Copies the factor file to `fortran/fortran_factors.dat` and `data/raw/fortran_factors.dat`
 4. Runs the Fortran executable
 5. If infeasible: inflates capacity factors until feasibility is achieved
@@ -137,7 +138,7 @@ controls mutation behaviour, and physical bounds:
 | FACSHT      | 1.0     | capacity  | Solar thermal heat scaling               |
 | CSPSTORGAT  | 2.612   | ratio     | CSP storage charge/discharge ratio       |
 | MXHRDRM     | 11      | hours     | Max demand-response shift hours          |
-| BATDISCH    | 0.0     | tw        | Battery max discharge rate (TW)          |
+| BATDISCH    | 1.55    | tw        | Battery max discharge rate (TW)          |
 | HCHARCSP    | 14.0    | hours     | CSP max charge hours                     |
 | STORHBAT    | 4.0     | hours     | Battery storage duration hours           |
 | STORHCOLD   | 14.0    | hours     | Cold storage hours (PCM-ice + CW-STES)   |
@@ -159,9 +160,9 @@ controls mutation behaviour, and physical bounds:
 | HCDDADD     | 1.0     | fixed     | HDD/CDD daily minimum (locked)          |
 | FMORTBAU    | 0.9     | fixed     | BAU mortality fraction (locked)          |
 | HWFAC       | 1.0     | factor    | HW-STES charge rate factor               |
-| FCDISCH     | 0.0     | tw        | H2 fuel-cell discharge rate (TW)         |
-| FCCHARG     | 0.0     | tw        | H2 electrolyser charge rate (TW)         |
-| STORHHFC    | 0.0     | hours     | H2 electricity storage hours             |
+| FCDISCH     | 0.091   | tw        | H2 fuel-cell discharge rate (TW)         |
+| FCCHARG     | 0.091   | tw        | H2 electrolyser charge rate (TW)         |
+| STORHHFC    | 13.0    | hours     | H2 electricity storage hours             |
 | HBTDISCH    | 0.0     | tw        | Heat battery discharge rate (TW)         |
 | STORHHBT    | 15.0    | hours     | Heat battery storage hours               |
 | FRCIHFLEX   | 0.5     | fraction  | Flexible industrial heat fraction        |
@@ -195,6 +196,7 @@ variables).  Override with `--hj-lock` if you want different locking.
 | `--optimizer {hj,ga}` | `hj` | Hooke–Jeeves or genetic algorithm |
 | `--hj-direction {inc,dec,both}` | `both` | Restrict perturbations |
 | `--hj-lock FACTOR [...]` | `HCDDADD FMORTBAU` | Lock factors during search |
+| `--baseline-start PATH` | — | Skip LP; use baseline file as initial guess |
 
 ### Hooke–Jeeves options
 
@@ -235,6 +237,26 @@ parallel_evals  ≈  population_size  ≤  available_CPUs
 With 38 CPUs, **use a population of 36 with 36 parallel evaluations** (leaving
 2 cores for the OS and the Python orchestrator).  Alternatively, use 38 parallel
 evaluations if you want maximum utilisation — the Python overhead is minimal.
+
+### Warm-starting from baseline results
+
+If you have results from a previous publication in `data/raw/baseline_results.dat`,
+you can skip the LP step and use those factors as the initial guess.  This is
+typically **much faster** because the baseline is already close to feasible,
+requiring fewer (or zero) inflation steps before the GA starts.
+
+```bash
+python -m scripts.run_full_workflow \
+    --baseline-start data/raw/baseline_results.dat \
+    --optimizer ga \
+    --parallel-evals 36 \
+    --ga-population 36 \
+    --ga-generations 80
+```
+
+The parser reads 25 parameters from the baseline file format (capacity factors,
+storage durations, power rates, etc.) and fills the remaining 12 with CONUS
+defaults from `PARAM_REGISTRY`.
 
 ### Recommended GA run (all 37 parameters, 38 CPUs)
 
@@ -371,14 +393,29 @@ The workflow logs every trial to `data/results_verification/factor_history.log`.
 
 ### On your local machine
 
-1. Copy the log from the server:
+1. Copy the log and baseline file from the server:
 
    ```bash
-   scp <user>@<server>:/path/to/repo/data/results_verification/factor_history.log .
+   scp <user>@<server>:/path/to/repo/data/results_verification/factor_history.log \
+       data/results_verification/
    ```
 
-2. Use the analysis notebook (`notebooks/factor_history_analysis.ipynb`) or the
-   helper utilities directly:
+2. Open the analysis notebook (`notebooks/factor_history_analysis.ipynb`) which
+   produces the following publication-ready figures:
+
+   | Figure | Content |
+   |--------|---------|
+   | Fig 1  | Cost convergence + feasibility rate per generation |
+   | Fig 2  | Capacity-factor trajectories (7 factors, with baseline reference) |
+   | Fig 3  | Non-capacity parameter trajectories (6-panel: storage hours, days, power rates, fractions, ratios, DR) |
+   | Fig 4  | Baseline vs GA-optimised: bar chart of all parameters normalised to baseline |
+   | Fig 5  | Population cost distribution per generation (box plots) |
+   | Fig 6  | Parameter sensitivity: coefficient of variation in final generation |
+   | Fig 7  | Capacity evolution bar chart (LP → inflate → GA) with cost overlay |
+
+   All figures are saved as PDF to `data/results_verification/`.
+
+3. Or use the helper utilities directly:
 
    ```python
    from pathlib import Path
@@ -386,22 +423,15 @@ The workflow logs every trial to `data/results_verification/factor_history.log`.
    from scripts.factor_history_tools import (
        parse_factor_history,
        records_to_dataframe,
-       add_absolute_capacities,
        plot_factor_trajectories,
        plot_cost_and_feasibility,
        FACTOR_COLUMNS,
    )
 
-   records = parse_factor_history(Path("factor_history.log"))
-   df = add_absolute_capacities(records_to_dataframe(records))
-
-   # Plot capacity trajectories (absolute MW)
-   plot_factor_trajectories(df, absolute=True)
-
-   # Plot all 37 parameter trajectories
+   records = parse_factor_history(Path("data/results_verification/factor_history.log"))
+   df = records_to_dataframe(records)
+   plot_factor_trajectories(df, absolute=False)
    plot_factor_trajectories(df, columns=FACTOR_COLUMNS)
-
-   # Cost + feasibility scatter
    plot_cost_and_feasibility(df)
    plt.show()
    ```
