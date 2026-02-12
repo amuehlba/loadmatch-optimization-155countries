@@ -35,7 +35,10 @@ import pandas as pd
 
 from src.io.data_loader import load_inputs
 
+# All tunable parameters (lowercase).  Must stay in sync with PARAM_REGISTRY
+# in scripts/run_full_workflow.py.
 FACTOR_COLUMNS = [
+    # Original 7 capacity factors
     "faconwin",
     "facoffwin",
     "facutilpv",
@@ -43,6 +46,49 @@ FACTOR_COLUMNS = [
     "faccompv",
     "cspturbfac",
     "facsht",
+    # CSP / storage configuration
+    "cspstorgat",
+    "mxhrdrm",
+    "batdisch",
+    "hcharcsp",
+    "storhbat",
+    "storhcold",
+    "storhhwat",
+    "storhphs",
+    # UTES and hydrogen storage
+    "ugfac",
+    "storugdys",
+    "dayh2stor",
+    # Hydropower
+    "hpturbrat",
+    "damcaprat",
+    "daybashyd",
+    # Thermal storage and demand response
+    "coolstes",
+    "phsmin",
+    "fheatflx",
+    "fcoldflx",
+    "frstorinit",
+    "fdistheat",
+    # Heat pump and health
+    "cperform",
+    "hcddadd",
+    "fmortbau",
+    # Hot-water, H2, heat battery
+    "hwfac",
+    "fcdisch",
+    "fccharg",
+    "storhhfc",
+    "hbtdisch",
+    "storhhbt",
+    # Industrial heat flexibility
+    "frcihflex",
+]
+
+# Subset used for the original capacity-based trajectory plots
+CAPACITY_COLUMNS = [
+    "faconwin", "facoffwin", "facutilpv", "facrespv",
+    "faccompv", "cspturbfac", "facsht",
 ]
 
 
@@ -126,14 +172,23 @@ def plot_factor_trajectories(
     absolute: bool = True,
     region: str = "UNITED-STATES",
     figsize: tuple = (12, 6),
+    columns: Sequence[str] | None = None,
 ) -> plt.Axes:
-    """Plot factor or capacity trajectories over trials."""
-    plot_df = df.copy()
-    columns = FACTOR_COLUMNS
-    ylabel = "Multiplier"
-    title = "Factor trajectory (multipliers)"
+    """Plot factor or capacity trajectories over trials.
 
-    if absolute:
+    Parameters
+    ----------
+    columns : list of str, optional
+        Explicit column names to plot.  When *None* (default), plots
+        capacity columns if *absolute* is True or the original 7 capacity
+        factor columns otherwise.  Pass ``FACTOR_COLUMNS`` to plot every
+        parameter.
+    """
+    plot_df = df.copy()
+    if columns is not None:
+        ylabel = "Value"
+        title = "Parameter trajectory"
+    elif absolute:
         try:
             plot_df = add_absolute_capacities(plot_df, region=region)
             columns = [
@@ -150,7 +205,13 @@ def plot_factor_trajectories(
             print(
                 "Absolute capacities unavailable (missing raw inputs); plotting multipliers instead."
             )
-            absolute = False
+            columns = CAPACITY_COLUMNS
+            ylabel = "Multiplier"
+            title = "Factor trajectory (capacity multipliers)"
+    else:
+        columns = CAPACITY_COLUMNS
+        ylabel = "Multiplier"
+        title = "Factor trajectory (capacity multipliers)"
 
     plt.figure(figsize=figsize)
     for col in columns:

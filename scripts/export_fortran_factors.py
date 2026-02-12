@@ -103,12 +103,18 @@ def main(argv: Optional[Sequence[str]] = None):
     inputs = load_inputs(args.region)
     factors = compute_fortran_factors(args.region, summary, inputs)
 
+    # Merge LP capacity factors with Fortran CONUS defaults for all other
+    # tunable parameters so that fortran_factors.dat is always complete.
+    from scripts.run_full_workflow import PARAM_REGISTRY
+    all_factors = {k: PARAM_REGISTRY[k][0] for k in PARAM_REGISTRY}
+    all_factors.update(factors)  # LP values override defaults for original 7
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    write_dat(factors, args.output)
+    write_dat(all_factors, args.output)
 
     print(f"Wrote Fortran factor overrides to {args.output}")
-    for name, value in factors.items():
-        print(f"  {name:10s} = {value:.6f}")
+    for name, value in all_factors.items():
+        print(f"  {name:12s} = {value:.6f}")
 
 
 if __name__ == "__main__":

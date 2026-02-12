@@ -1,28 +1,43 @@
 # LoadMatch Python–Fortran Workflow
 
-This repository links a Python-based linear optimisation model with the legacy
-LoadMatch Fortran simulator. The Python model sizes generation and storage
-technologies to minimise annualised cost in hourly resolution. The resulting
-capacity targets are converted into the multiplier factors expected by the
-Fortran executable, which then performs the detailed 30-second dispatch check.
+This repository couples a Python LP (linear programme) with the legacy LoadMatch
+Fortran simulator (`powerworld.f`).  The Python LP sizes generation and storage
+capacities to minimise annualised cost at hourly resolution.  Those capacity
+targets are converted into the ~37 multiplier factors expected by the Fortran
+executable, which performs the detailed 30-second dispatch check.  If the LP
+solution is infeasible in Fortran, a meta-heuristic (Hooke–Jeeves or genetic
+algorithm) iteratively adjusts **all** tunable model parameters until feasibility
+is achieved at minimum cost.
 
-The project is organised as follows:
+## Repository layout
 
-- `src/io/` – parsers for the legacy `.dat` inputs and the conversion utilities
-  that read Python optimisation results.
-- `src/optimization/` – Pyomo model definition (`model_builder.py`) that sizes
-  capacities from scratch subject to technology-specific upper bounds.
-- `scripts/` – runnable entry points for the Python optimisation and the
-  factor-export tool.
-- `fortran/` – original LoadMatch source and build artifacts.
-- `data/raw/` – canonical input files (`countrystats.dat`,
-  `wwssupworld.<REGION>`, `loadreg.COUNTRY2030GW`, etc.).
-- `data/results_python/` – outputs from the Python model and the derived
-  Fortran multiplier file.
+```
+loadmatch-python/
+├── src/
+│   ├── io/              # Parsers for .dat inputs and conversion utilities
+│   └── optimization/    # Pyomo model definition (model_builder.py)
+├── scripts/
+│   ├── run_full_workflow.py      # Main entry point (LP + Fortran + GA/HJ)
+│   ├── run_python_model.py       # Standalone Python LP
+│   ├── export_fortran_factors.py # Convert LP results → fortran_factors.dat
+│   └── factor_history_tools.py   # Parse and plot optimisation history
+├── fortran/
+│   ├── src/powerworld.f          # LoadMatch Fortran source (~21 000 lines)
+│   ├── build/                    # Compiler intermediate files
+│   └── bin/powerworld            # Compiled executable
+├── data/
+│   ├── raw/                      # Canonical inputs (countrystats.dat, wwssupworld.*, loadreg.*, etc.)
+│   ├── results_python/           # Python LP outputs + fortran_factors.dat
+│   └── results_verification/     # Fortran logs, factor_history.log, best factors
+├── notebooks/
+│   └── factor_history_analysis.ipynb  # Visualisation of GA/HJ optimisation runs
+├── requirements.txt
+└── README.md
+```
 
-## Getting Started
+## Quick start
 
-### Python environment
+### 1. Python environment
 
 ```bash
 python3 -m venv .venv
@@ -30,198 +45,340 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Note**: `pyomo` requires a MILP solver. The scripts assume that the HiGHS
-> executables shipped with Pyomo are available. Install alternative solvers
-> if required.
+> **Note:** `pyomo` needs an LP solver.  The scripts use HiGHS (bundled with
+> recent Pyomo).  Install an alternative solver if HiGHS is unavailable.
 
-### End-to-end workflow
+### 2. Compile the Fortran executable (on the server)
 
-To run the full pipeline—optimise capacities, translate them to Fortran
-factors, run LoadMatch, and trigger the Hooke–Jeeves fallback if the LP
-solution violates feasibility—use:
+The Fortran binary must be compiled on an **x86_64 Linux** machine because the
+code requires `-mcmodel=large` (not supported on Apple Silicon).
+
+```bash
+mkdir -p fortran/build fortran/bin
+gfortran -O2 -mcmodel=large \
+    -fdefault-real-8 -fdefault-double-8 -fno-automatic \
+    -J fortran/build \
+    fortran/src/powerworld.f \
+    -o fortran/bin/powerworld
+```
+
+Verify the binary exists:
+
+```bash
+ls -lh fortran/bin/powerworld
+```
+
+### 3. Ensure input data is in place
+
+The following files must be present under `data/raw/`:
+
+- `countrystats.dat` — base capacities per technology and region
+- `wwssupworld.<REGION>` (e.g. `wwssupworld.UNITED-STATES`) — hourly supply
+  profiles (~470 MB)
+- `loadreg.COUNTRY2030GW` — hourly load profiles
+- Various supporting files referenced by `powerworld.f`
+
+Path variables inside `powerworld.f` (around line 1050) must point to this
+directory.  For a layout rooted in the repo:
+
+```fortran
+      PATHHOME = './data/raw/'
+      PATHTEMP = './data/raw/'
+      PATHTEM1 = './data/raw/'
+      PATHLOAD = './data/raw/'
+      PTH2LOAD = './data/raw/'
+```
+
+---
+
+## Running the full workflow on the server
+
+### One-command run
 
 ```bash
 source .venv/bin/activate
-python -m scripts.run_full_workflow
+python -m scripts.run_full_workflow [OPTIONS]
 ```
 
-Common options:
+This does everything automatically:
 
-- `--parallel-evals N` executes Hooke–Jeeves perturbations in parallel
-  (one LoadMatch run per candidate) using per-run workspaces. The default `1`
-  reproduces the serial workflow; on a research cluster you can request more
-  cores and pass, e.g., `--parallel-evals 7`.
-- `--hj-direction {inc,dec,both}` restricts the search to increases,
-  decreases, or both (default: `both`).
-- `--hj-lock FACTOR [FACTOR ...]` keeps specific factors fixed during the
-  Hooke–Jeeves search (e.g., `--hj-lock CSPTURBFAC FACRESPV`).
-- `--hj-initial-step`, `--hj-shrink`, `--hj-max-iter`, `--hj-min-step`
-  customise the search aggressiveness. Defaults (0.2, 0.7, 40, 1e-5) provide
-  deeper exploration; increase `--hj-max-iter` or decrease `--hj-min-step`
-  if you want to keep probing after the first plateau.
-- `--optimizer {hj,ga}` selects Hooke–Jeeves or a genetic algorithm. GA has
-  additional knobs: `--ga-population`, `--ga-generations`, `--ga-mutation-rate`,
-  `--ga-mutation-scale`, and `--ga-elite-frac`. GA supports the same `--hj-direction`
-  and `--hj-lock` semantics.
+1. Solves the Pyomo LP, producing `data/results_python/summary.dat`
+2. Converts LP capacities into `data/results_python/fortran_factors.dat` (all 37
+   parameters; LP values for the 7 capacity factors, Fortran CONUS defaults for
+   the other 30)
+3. Copies the factor file to `fortran/fortran_factors.dat` and `data/raw/fortran_factors.dat`
+4. Runs the Fortran executable
+5. If infeasible: inflates capacity factors until feasibility is achieved
+6. Runs the GA or Hooke–Jeeves optimiser to minimise cost while maintaining
+   feasibility
 
-Examples:
+Results are saved to:
+- `data/results_verification/factor_history.log` — full trial-by-trial log
+- `data/results_verification/genetic_factors.dat` (GA) or
+  `data/results_verification/hooke_jeeves_factors.dat` (HJ) — best factors found
+- `fortran/fortran_factors.dat` — final factors ready for production runs
 
-- Hooke–Jeeves, 7 parallel trials, decrease-only search, locking CSP:
+---
 
-  ```bash
-  python -m scripts.run_full_workflow \
-      --parallel-evals 7 \
-      --hj-direction dec \
-      --hj-lock CSPTURBFAC \
-      --hj-max-iter 60
-  ```
+## Tunable parameters (37 total)
 
-- Genetic algorithm, 12 parallel trials, decrease-only mutations, locking CSP:
+The GA/HJ optimiser can tune all parameters that `powerworld.f` reads from
+`fortran_factors.dat`.  Each parameter has a CONUS default, a category that
+controls mutation behaviour, and physical bounds:
 
-  ```bash
-  python -m scripts.run_full_workflow \
-      --optimizer ga \
-      --parallel-evals 12 \
-      --hj-lock CSPTURBFAC \
-      --ga-population 12 \
-      --ga-generations 50 \
-      --ga-mutation-rate 0.3 \
-      --ga-mutation-scale 0.2 \
-      --ga-elite-frac 0.2
-  ```
+| Parameter    | Default | Category  | Description                              |
+|-------------|---------|-----------|------------------------------------------|
+| FACONWIN    | 1.0     | capacity  | Onshore wind capacity scaling            |
+| FACOFFWIN   | 1.0     | capacity  | Offshore wind capacity scaling           |
+| FACUTILPV   | 1.0     | capacity  | Utility PV capacity scaling              |
+| FACRESPV    | 1.0     | capacity  | Residential rooftop PV scaling           |
+| FACCOMPV    | 1.0     | capacity  | Commercial rooftop PV scaling            |
+| CSPTURBFAC  | 1.0     | capacity  | CSP turbine ratio                        |
+| FACSHT      | 1.0     | capacity  | Solar thermal heat scaling               |
+| CSPSTORGAT  | 2.612   | ratio     | CSP storage charge/discharge ratio       |
+| MXHRDRM     | 11      | hours     | Max demand-response shift hours          |
+| BATDISCH    | 0.0     | tw        | Battery max discharge rate (TW)          |
+| HCHARCSP    | 14.0    | hours     | CSP max charge hours                     |
+| STORHBAT    | 4.0     | hours     | Battery storage duration hours           |
+| STORHCOLD   | 14.0    | hours     | Cold storage hours (PCM-ice + CW-STES)   |
+| STORHHWAT   | 14.0    | hours     | Hot-water STES hours                     |
+| STORHPHS    | 14.0    | hours     | Pumped hydro storage hours               |
+| UGFAC       | 3.0     | factor    | UTES charge rate factor                  |
+| STORUGDYS   | 60.0    | days      | UTES seasonal heat storage days          |
+| DAYH2STOR   | 40.0    | days      | H2 storage days                          |
+| HPTURBRAT   | 10.0    | ratio     | Hydro turbine discharge ratio            |
+| DAMCAPRAT   | 0.583   | ratio     | Hydro dam capacity / annual output       |
+| DAYBASHYD   | 360.0   | days      | Baseload hydro storage days              |
+| COOLSTES    | 0.4     | fraction  | Fraction AC from CW-STES vs ice          |
+| PHSMIN      | 0.016   | tw        | Min PHS nameplate capacity (TW)          |
+| FHEATFLX    | 0.15    | fraction  | Flexible heat load fraction              |
+| FCOLDFLX    | 0.15    | fraction  | Flexible cold load fraction              |
+| FRSTORINIT  | 0.5     | fraction  | Initial storage fill fraction            |
+| FDISTHEAT   | 0.2     | fraction  | District heating fraction                |
+| CPERFORM    | 4.0     | cop       | Heat pump COP (kWh-th / kWh-el)         |
+| HCDDADD     | 1.0     | fixed     | HDD/CDD daily minimum (locked)          |
+| FMORTBAU    | 0.9     | fixed     | BAU mortality fraction (locked)          |
+| HWFAC       | 1.0     | factor    | HW-STES charge rate factor               |
+| FCDISCH     | 0.0     | tw        | H2 fuel-cell discharge rate (TW)         |
+| FCCHARG     | 0.0     | tw        | H2 electrolyser charge rate (TW)         |
+| STORHHFC    | 0.0     | hours     | H2 electricity storage hours             |
+| HBTDISCH    | 0.0     | tw        | Heat battery discharge rate (TW)         |
+| STORHHBT    | 15.0    | hours     | Heat battery storage hours               |
+| FRCIHFLEX   | 0.5     | fraction  | Flexible industrial heat fraction        |
 
-This script performs the following steps automatically:
+**HCDDADD** and **FMORTBAU** are locked by default (not engineering design
+variables).  Override with `--hj-lock` if you want different locking.
 
-1. Executes the Pyomo LP (`scripts.run_python_model`), producing
-   `data/results_python/summary.dat`.
-2. Converts the optimised capacities into the factor file
-   (`scripts.export_fortran_factors`), saving it to
-   `data/results_python/fortran_factors.dat`.
-3. Copies the factor file to `fortran/fortran_factors.dat`, which
-   `powerworld.f` now reads at start-up.
-4. Runs the Fortran executable (`fortran/bin/powerworld`).
-5. Inspects the Fortran log for “UNMET”/“UNSERVED”. If no violations are
-   found, the workflow ends.
-6. Otherwise nudges any factors below 1.0 up toward unity, inflates further
-   if needed to regain feasibility, and finally runs a (serial or parallel)
-   Hooke–Jeeves search to reduce the MN annual cost while maintaining
-   feasibility.
+### Category bounds
 
-The exported factors that pass verification remain in
-`fortran/fortran_factors.dat` for downstream use.
+| Category | Min  | Max  | Mutation scale |
+|----------|------|------|---------------|
+| capacity | 0.05 | none | 1.0           |
+| ratio    | 0.0  | none | 0.5           |
+| factor   | 0.0  | none | 0.5           |
+| hours    | 0.0  | none | 0.3           |
+| days     | 0.0  | none | 0.3           |
+| tw       | 0.0  | none | 0.3           |
+| fraction | 0.0  | 1.0  | 0.5           |
+| cop      | 1.0  | 6.0  | 0.2           |
+| fixed    | --   | --   | 0.0 (locked)  |
 
-### Running components individually
+---
 
-If you prefer to inspect each step manually, the legacy split still works:
+## CLI reference
 
-1. Solve the LP for a given region (default is `UNITED-STATES`):
+### Common options (all optimisers)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--parallel-evals N` | 1 | Parallel Fortran evaluations per generation |
+| `--optimizer {hj,ga}` | `hj` | Hooke–Jeeves or genetic algorithm |
+| `--hj-direction {inc,dec,both}` | `both` | Restrict perturbations |
+| `--hj-lock FACTOR [...]` | `HCDDADD FMORTBAU` | Lock factors during search |
+
+### Hooke–Jeeves options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--hj-initial-step` | 0.2 | Relative step size |
+| `--hj-shrink` | 0.7 | Step reduction after no improvement |
+| `--hj-max-iter` | 40 | Max iterations |
+| `--hj-min-step` | 1e-5 | Stop when step < this |
+
+### Genetic algorithm options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ga-population` | 24 | Population size |
+| `--ga-generations` | 50 | Number of generations |
+| `--ga-mutation-rate` | 0.15 | Per-factor mutation probability |
+| `--ga-mutation-scale` | 0.2 | Relative mutation magnitude |
+| `--ga-elite-frac` | 0.2 | Fraction of population preserved |
+| `--ga-mutation-cooling` | 0.98 | Per-generation decay on rate and scale |
+| `--ga-magnitude-damping` | 0.5 | Dampens mutations on large-valued params |
+| `--ga-factor-scale NAME=SCALE` | — | Per-factor mutation scale override (repeatable) |
+
+---
+
+## Recommended server configurations
+
+### Resource allocation: 38 CPUs available
+
+Each Fortran evaluation is single-threaded and takes roughly the same wall-clock
+time.  The GA evaluates `population_size` individuals per generation.  To keep
+all CPUs busy you want:
+
+```
+parallel_evals  ≈  population_size  ≤  available_CPUs
+```
+
+With 38 CPUs, **use a population of 36 with 36 parallel evaluations** (leaving
+2 cores for the OS and the Python orchestrator).  Alternatively, use 38 parallel
+evaluations if you want maximum utilisation — the Python overhead is minimal.
+
+### Recommended GA run (all 37 parameters, 38 CPUs)
+
+```bash
+source .venv/bin/activate
+python -m scripts.run_full_workflow \
+    --optimizer ga \
+    --parallel-evals 36 \
+    --ga-population 36 \
+    --ga-generations 80 \
+    --ga-mutation-rate 0.15 \
+    --ga-mutation-scale 0.2 \
+    --ga-elite-frac 0.2 \
+    --ga-mutation-cooling 0.985 \
+    --ga-magnitude-damping 0.5
+```
+
+**Why these numbers:**
+- **Population 36**: With 35 active parameters, the rule of thumb is population
+  >= N_params.  36 fits neatly into 36 parallel slots.
+- **Generations 80**: With 35 dimensions, expect convergence in 50-100
+  generations.  80 is a reasonable starting point; you can stop early if cost
+  plateaus (check `factor_history.log`).
+- **Mutation rate 0.15**: At 35 params, this means ~5 mutations per individual
+  per generation — enough exploration without destroying good solutions.
+- **Cooling 0.985**: Slower cooling than the default 0.98 because with more
+  generations, you want mutations to stay meaningful longer.
+  After 80 generations: effective rate = 0.15 * 0.985^80 = 0.044 (still active).
+
+**Total Fortran evaluations:** 36 individuals x 80 generations + inflation trials
+= ~2,900 evaluations. With 36 parallel slots, that's ~80 sequential batches.
+
+### Convergence guidance
+
+There is no single rule for "enough generations", but these heuristics help:
+
+1. **Monitor the log**: Plot cost vs trial using the notebook or:
+   ```python
+   from scripts.factor_history_tools import parse_factor_history, records_to_dataframe
+   df = records_to_dataframe(parse_factor_history(Path("data/results_verification/factor_history.log")))
+   # Check last 5 generations for improvement
+   ```
+2. **Cost plateau**: If the best feasible cost hasn't improved by > 0.1% in the
+   last 10 generations, you're likely converged.
+3. **Re-run with warm start**: The GA starts from the best feasible point found
+   during inflation.  To continue from a previous GA run, manually set the
+   starting factors in `fortran_factors.dat` and bypass the LP step.
+4. **Staged optimisation** (recommended for first exploration):
+   - Phase 1: Lock all non-capacity params, optimise only the 7 capacity factors
+   - Phase 2: Lock capacity factors at their Phase 1 values, unlock storage/DR
+   - Phase 3: Unlock everything for fine-tuning
+
+### Staged optimisation example
+
+**Phase 1** — capacity factors only (fast, 7 dimensions):
+
+```bash
+python -m scripts.run_full_workflow \
+    --optimizer ga \
+    --parallel-evals 36 \
+    --ga-population 36 \
+    --ga-generations 30 \
+    --hj-lock HCDDADD FMORTBAU \
+        CSPSTORGAT MXHRDRM BATDISCH HCHARCSP STORHBAT STORHCOLD \
+        STORHHWAT STORHPHS UGFAC STORUGDYS DAYH2STOR HPTURBRAT \
+        DAMCAPRAT DAYBASHYD COOLSTES PHSMIN FHEATFLX FCOLDFLX \
+        FRSTORINIT FDISTHEAT CPERFORM HWFAC FCDISCH FCCHARG \
+        STORHHFC HBTDISCH STORHHBT FRCIHFLEX
+```
+
+**Phase 2** — storage and demand response (unlock 28 non-capacity params):
+
+```bash
+# First copy Phase 1 best factors into fortran_factors.dat, then:
+python -m scripts.run_full_workflow \
+    --optimizer ga \
+    --parallel-evals 36 \
+    --ga-population 36 \
+    --ga-generations 50 \
+    --hj-lock HCDDADD FMORTBAU \
+        FACONWIN FACOFFWIN FACUTILPV FACRESPV FACCOMPV CSPTURBFAC FACSHT
+```
+
+**Phase 3** — full unlock:
+
+```bash
+python -m scripts.run_full_workflow \
+    --optimizer ga \
+    --parallel-evals 36 \
+    --ga-population 36 \
+    --ga-generations 80 \
+    --hj-lock HCDDADD FMORTBAU
+```
+
+---
+
+## Running components individually
+
+### Solve the LP only
+
+```bash
+source .venv/bin/activate
+python -m scripts.run_python_model
+```
+
+Produces `data/results_python/summary.dat`.
+
+### Export Fortran factors only
+
+```bash
+python -m scripts.export_fortran_factors \
+    --region UNITED-STATES \
+    --summary data/results_python/summary.dat \
+    --output data/results_python/fortran_factors.dat
+```
+
+The output file contains all 37 parameters (LP values for the 7 capacity factors,
+CONUS defaults for the rest).
+
+### Run Fortran manually
+
+```bash
+cd /path/to/loadmatch-python
+./fortran/bin/powerworld
+```
+
+The executable reads `fortran_factors.dat` from the `PATHHOME` directory.
+
+---
+
+## Visualising optimisation history
+
+The workflow logs every trial to `data/results_verification/factor_history.log`.
+
+### On your local machine
+
+1. Copy the log from the server:
 
    ```bash
-   source .venv/bin/activate
-   python -m scripts.run_python_model
+   scp <user>@<server>:/path/to/repo/data/results_verification/factor_history.log .
    ```
 
-   This reads the raw data under `data/raw/`, builds the Pyomo model, and
-   produces `data/results_python/summary.dat` with the optimised capacities,
-   storage additions, and a cost summary.
-
-2. Translate the optimised capacities into the factors used by the Fortran
-   model:
-
-   ```bash
-   python -m scripts.export_fortran_factors \
-       --region UNITED-STATES \
-       --summary data/results_python/summary.dat \
-       --output data/results_python/fortran_factors.dat
-   ```
-
-   The generated `.dat` file contains the `FAC*` and `CSPTURBFAC` values that
-   multiply the legacy capacities.
-
-### Fortran workflow (manual factor injection)
-
-The simplest approach keeps the Fortran source untouched:
-
-1. Open `fortran/src/powerworld.f` and locate the block for the target region
-   (e.g. CONUS section around `FACONWIN`, `FACOFFWIN`, …, `FACSHT`).
-2. Replace the hard-coded constants with the factor values from
-   `data/results_python/fortran_factors.dat`.
-3. Ensure the path variables near line ~1050 point to the data directory.
-   For a relative layout, set:
-
-   ```fortran
-         PATHHOME = './data/raw/'
-         PATHTEMP = './data/raw/'
-         PATHTEM1 = './data/raw/'
-         PATHLOAD = './data/raw/'
-         PTH2LOAD = './data/raw/'
-   ```
-
-4. Build the Fortran executable. On Linux/x86_64:
-
-   ```bash
-   mkdir -p fortran/build fortran/bin
-   gfortran -O2 -mcmodel=large \
-       -fdefault-real-8 -fdefault-double-8 -fno-automatic \
-       -J fortran/build \
-       fortran/src/powerworld.f \
-       -o fortran/bin/powerworld
-   ```
-
-   > **Apple Silicon note**: Arm gfortran does not support `-mcmodel=large`.
-   > Compile under Rosetta with an x86_64 toolchain or use Intel’s oneAPI
-   > `ifort`.
-
-5. Run the executable from the repository root so the relative paths resolve:
-
-   ```bash
-   ./fortran/bin/powerworld
-   ```
-
-   Outputs (e.g. `countrydata.out`, `wwsmonthly.*`) are written under
-   `data/raw/` following the legacy conventions.
-
-## Model Notes
-
-- The Python LP constructs capacities directly (`capacity[tech]`), rather than
-  treating capacities as a base plus new build. Factors are therefore computed
-  by comparing optimised totals against the base values stored in
-  `countrystats.dat`.
-- Each technology is subject to an upper bound: defaults are set to
-  5 000 000 MW and can be overridden by passing a `capacity_limits_mw`
-  dictionary into `build_model`.
-- Solar thermal is handled similarly with `solar_capacity_limit_mw`.
-- Storage can expand beyond the existing power rating and energy duration,
-  and the metadata exported by the Python model contains the base and
-  additional components for reference.
-
-## Troubleshooting
-
-- **`ModuleNotFoundError: No module named 'src'`** – run scripts from the repo
-  root with `python -m …`, or export `PYTHONPATH=$(pwd)`.
-- **Fortran linker error (`ADRP out of range`)** – compile with
-  `-mcmodel=large` on an x86_64 compiler (Rosetta on macOS or a regular GNU
-  toolchain on Linux).
-- **End-of-file on `loadreg.COUNTRY2030GW`** – ensure path variables in
-  `powerworld.f` do not contain trailing blanks. Using `CHARACTER(11)` and
-  short relative paths prevents this.
-- **Solver failures** – check that HiGHS is installed; alternatively, point the
-  Pyomo `SolverFactory` to another LP/MILP solver.
-
-## Visualising factor histories
-
-The workflow logs every Hooke–Jeeves trial to
-`data/results_verification/factor_history.log`. To analyse those runs on your
-local machine:
-
-1. Copy the log from the cluster, e.g.:
-
-   ```bash
-   scp <user>@<cluster>:/path/to/repo/data/results_verification/factor_history.log .
-   ```
-
-2. Use the helper utilities in `scripts/factor_history_tools.py` to parse and
-   plot trajectories. Example:
+2. Use the analysis notebook (`notebooks/factor_history_analysis.ipynb`) or the
+   helper utilities directly:
 
    ```python
    from pathlib import Path
@@ -232,28 +389,80 @@ local machine:
        add_absolute_capacities,
        plot_factor_trajectories,
        plot_cost_and_feasibility,
+       FACTOR_COLUMNS,
    )
 
    records = parse_factor_history(Path("factor_history.log"))
    df = add_absolute_capacities(records_to_dataframe(records))
+
+   # Plot capacity trajectories (absolute MW)
    plot_factor_trajectories(df, absolute=True)
+
+   # Plot all 37 parameter trajectories
+   plot_factor_trajectories(df, columns=FACTOR_COLUMNS)
+
+   # Cost + feasibility scatter
    plot_cost_and_feasibility(df)
    plt.show()
    ```
 
-The plotting helpers convert the multiplier history into absolute MW using the
-original base capacities, making it easy to compare trajectories across trials.
+---
+
+## GA design notes
+
+### Mutation handling
+
+- **Category-aware scales**: Each parameter category has a default mutation scale
+  multiplier (see table above).  Capacity factors mutate at full scale;
+  fractions (0–1) and COP are more conservative.
+- **Zero-valued parameters**: Several parameters default to 0 (BATDISCH,
+  FCDISCH, FCCHARG, STORHHFC, HBTDISCH).  Multiplicative mutation would leave
+  them stuck at 0.  The GA uses the parameter's Fortran default as a reference
+  magnitude for additive perturbation when the current value is near zero.
+- **Magnitude damping**: Large-valued parameters (e.g. DAYBASHYD = 360) receive
+  damped mutations via `1 / max(1, |value|)^damping`.
+- **Bounds clamping**: Every mutated value is clamped to its category bounds
+  (e.g. fractions to [0, 1], COP to [1, 6]).
+- **Crossover**: BLX-alpha blending — child = w * parent1 + (1-w) * parent2
+  with w ~ Uniform(0,1).
+
+### Inflation logic
+
+The `inflate_until_feasible()` function only touches the **7 original capacity
+factors**.  It first raises sub-unity factors toward 1.0, then multiplicatively
+inflates all capacity factors.  Storage/DR/ratio parameters remain at their
+defaults during inflation and are only adjusted by the GA or HJ.
+
+---
+
+## Troubleshooting
+
+- **`ModuleNotFoundError: No module named 'src'`** — Run from the repo root
+  with `python -m ...`, or `export PYTHONPATH=$(pwd)`.
+- **Fortran linker error (`ADRP out of range`)** — Compile with
+  `-mcmodel=large` on x86_64 (does not work on Apple Silicon ARM).
+- **End-of-file on `loadreg.COUNTRY2030GW`** — Ensure path variables in
+  `powerworld.f` have no trailing blanks.  Use `CHARACTER(11)` and short
+  relative paths.
+- **Solver failures** — Check that HiGHS is installed; alternatively, point the
+  Pyomo `SolverFactory` to another LP solver.
+- **`command not found: python`** — Use `python3` explicitly, or ensure `.venv`
+  is activated.
+- **GA produces only infeasible individuals** — The inflation phase may have
+  started from a point too far from feasibility.  Try increasing
+  `--ga-population` or running a Hooke–Jeeves pass first (`--optimizer hj`),
+  then feeding its output as the GA starting point.
 
 ## Contributing
 
-- Keep edits to the Fortran source minimal and well-documented to ease syncing
-  with upstream versions.
-- When adjusting optimisation defaults (costs, bounds, storage parameters),
-  reflect the changes in this README and update the Python scripts so the
-  factor export remains compatible.
+- Keep Fortran edits minimal to ease syncing with upstream.
+- When adding parameters to `PARAM_REGISTRY` in `run_full_workflow.py`, also
+  update `FACTOR_COLUMNS` in `factor_history_tools.py` and the
+  `READ_FACTOR_OVERRIDES` subroutine in `powerworld.f`.
+- Run verification tests: `python -c "from scripts.run_full_workflow import PARAM_REGISTRY; print(len(PARAM_REGISTRY), 'params')"`.
 
 ## License
 
-Respect the licensing terms that accompany the original LoadMatch Fortran code
-and the associated datasets. Consult the project maintainers for publication
-or redistribution permissions.
+Respect the licensing terms accompanying the original LoadMatch Fortran code and
+associated datasets.  Consult the project maintainers for publication or
+redistribution permissions.
