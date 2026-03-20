@@ -47,8 +47,13 @@ def collect_results(model: pyo.ConcreteModel) -> dict:
     return results
 
 
-def main():
-    inputs = load_inputs(region="UNITED-STATES")
+def main(region: str = "UNITED-STATES", output_dir: Path = None):
+    if output_dir is None:
+        output_dir = Path("data/results_python")
+        if region != "UNITED-STATES":
+            output_dir = output_dir / region
+
+    inputs = load_inputs(region=region)
     model = build_model(inputs)
 
     solver = pyo.SolverFactory("gurobi")
@@ -60,10 +65,9 @@ def main():
 
     results = collect_results(model)
 
-    output_dir = Path("data/results_python")
     output_dir.mkdir(parents=True, exist_ok=True)
     write_dat(results, output_dir / "summary.dat")
-    print("Python optimization complete. Results stored in data/results_python/summary.dat")
+    print(f"Python optimization complete. Results stored in {output_dir / 'summary.dat'}")
 
 
 if __name__ == "__main__":

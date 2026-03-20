@@ -20,15 +20,18 @@ loadmatch-python/
 │   ├── run_full_workflow.py      # Main entry point (LP + Fortran + GA/HJ)
 │   ├── run_python_model.py       # Standalone Python LP
 │   ├── export_fortran_factors.py # Convert LP results → fortran_factors.dat
-│   └── factor_history_tools.py   # Parse and plot optimisation history
+│   ├── factor_history_tools.py   # Parse and plot optimisation history
+│   └── run_regions_slurm.sh      # SLURM job-array script for multi-region runs
 ├── fortran/
 │   ├── src/powerworld.f          # LoadMatch Fortran source (~21 000 lines)
 │   ├── build/                    # Compiler intermediate files
 │   └── bin/powerworld            # Compiled executable
 ├── data/
-│   ├── raw/                      # Canonical inputs (countrystats.dat, wwssupworld.*, loadreg.*, etc.)
-│   ├── results_python/           # Python LP outputs + fortran_factors.dat
-│   └── results_verification/     # Fortran logs, factor_history.log, best factors
+│   ├── raw/                      # Canonical inputs (see "Input data" section below)
+│   ├── results_python/
+│   │   └── <REGION>/             # LP outputs + fortran_factors.dat per region
+│   └── results_verification/
+│       └── <REGION>/             # Fortran logs, factor_history.log, best factors per region
 ├── notebooks/
 │   └── factor_history_analysis.ipynb  # Visualisation of GA/HJ optimisation runs
 ├── requirements.txt
@@ -70,16 +73,59 @@ ls -lh fortran/bin/powerworld
 
 ### 3. Ensure input data is in place
 
-The following files must be present under `data/raw/`:
+All input files live in a **single shared directory** `data/raw/`.  There is no
+separate folder per region — the Fortran binary always reads from `./data/raw/`
+and constructs region-specific file names automatically.
 
-- `countrystats.dat` — base capacities per technology and region
-- `wwssupworld.<REGION>` (e.g. `wwssupworld.UNITED-STATES`) — hourly supply
-  profiles (~470 MB)
-- `loadreg.COUNTRY2030GW` — hourly load profiles
-- Various supporting files referenced by `powerworld.f`
+#### Shared files (one copy covers all regions)
 
-Path variables inside `powerworld.f` (around line 1050) must point to this
-directory.  For a layout rooted in the repo:
+| File | Contents |
+|------|----------|
+| `countrystats.dat` | Base installed capacities, storage, and statistics for all 150 countries / 24+ regions |
+| `loadreg.COUNTRY2030GW` | Hourly electricity demand (GW) for all countries — one row per country |
+| `heatcooldd.dat` | Heating/cooling degree days (used for thermal load calculations) |
+| `heatfrac.dat` | Monthly heat/cold load fractions |
+| `baseline_results.<REGION>.dat` | Published factor values per region used as GA warm-start (optional, e.g. `baseline_results.UNITED-STATES.dat`) |
+
+#### Per-region files (one set per region you want to run)
+
+**Supply file** — always required:
+
+| File | Contents |
+|------|----------|
+| `wwssupworld.UNITED-STATES` | Hourly WWS supply profiles for the US (~470 MB) |
+| `wwssupworld.EUROPE` | Same for Europe |
+| `wwssupworld.CHINA` | Same for China |
+| … | Named `wwssupworld.<REGION>` — must match the `GRIDUSE` identifier in `powerworld.f` |
+
+**Load file** — most regions share `loadreg.COUNTRY2030GW`, but a few need their
+own:
+
+| Region | Load file |
+|--------|-----------|
+| `UNITED-STATES`, `CHINA`, `INDIA`, `AFRICA`, `CANADA`, `AUSTRALIA`, `SOUTH-AMERICA`, `JAPAN`, `MIDEAST`, `RUSSIA`, `SOUTHEAST-ASIA`, and most others | `loadreg.COUNTRY2030GW` ← already present |
+| `EUROPE` | **`loadreg.EUROPE`** must be added |
+| `ICELAND` | **`loadreg.ICELAND`** must be added |
+| `NORDEN`, `NORDENSWEGER`, `NODESWGENEBELU` | Region-specific load file |
+
+This is set internally by `powerworld.f`; **no file-path edits to `powerworld.f`
+are needed** — it constructs the correct filename automatically from `GRIDUSE`.
+
+**Baseline file** (optional, but strongly recommended as GA warm-start):
+
+Name these files `baseline_results.<REGION>.dat` and place them in `data/raw/`.
+The SLURM script auto-selects the matching file per region:
+
+```
+data/raw/baseline_results.UNITED-STATES.dat
+data/raw/baseline_results.EUROPE.dat
+data/raw/baseline_results.CHINA.dat
+```
+
+If no baseline file is found for a region, the workflow falls back to running the
+Python LP phase (requires Gurobi).
+
+Path variables inside `powerworld.f` (around line 1050) must point to `data/raw/`:
 
 ```fortran
       PATHHOME = './data/raw/'
@@ -97,27 +143,31 @@ directory.  For a layout rooted in the repo:
 
 ```bash
 source .venv/bin/activate
-python -m scripts.run_full_workflow [OPTIONS]
+python -m scripts.run_full_workflow --region UNITED-STATES [OPTIONS]
 ```
+
+`--region` defaults to `UNITED-STATES` if omitted.  Supply any valid `GRIDUSE`
+name from `powerworld.f` (e.g. `CHINA`, `EUROPE`, `INDIA`) to run a different
+region.
 
 This does everything automatically:
 
-1. Solves the Pyomo LP, producing `data/results_python/summary.dat`
+1. Solves the Pyomo LP, producing `data/results_python/<REGION>/summary.dat`
    *(skipped when `--baseline-start` is used)*
-2. Converts LP capacities into `data/results_python/fortran_factors.dat` (all 37
-   parameters; LP values for the 7 capacity factors, Fortran CONUS defaults for
-   the other 30) *(or loads factors from a baseline file)*
-3. Copies the factor file to `fortran/fortran_factors.dat` and `data/raw/fortran_factors.dat`
-4. Runs the Fortran executable
+2. Converts LP capacities into `data/results_python/<REGION>/fortran_factors.dat`
+   (all 37 parameters; LP values for the 7 capacity factors, Fortran CONUS
+   defaults for the other 30) *(or loads factors from a baseline file)*
+3. Copies the factor file to `fortran/fortran_factors.dat` and
+   `data/raw/fortran_factors.dat`
+4. Runs the Fortran executable (region passed as CLI argument)
 5. If infeasible: inflates capacity factors until feasibility is achieved
 6. Runs the GA or Hooke–Jeeves optimiser to minimise cost while maintaining
    feasibility
 
-Results are saved to:
-- `data/results_verification/factor_history.log` — full trial-by-trial log
-- `data/results_verification/genetic_factors.dat` (GA) or
-  `data/results_verification/hooke_jeeves_factors.dat` (HJ) — best factors found
-- `fortran/fortran_factors.dat` — final factors ready for production runs
+Results are saved to `data/results_verification/<REGION>/`:
+- `factor_history.log` — full trial-by-trial log
+- `genetic_factors.dat` (GA) or `hooke_jeeves_factors.dat` (HJ) — best factors
+- `fortran_stdout.log`, `fortran_stderr.log` — Fortran output
 
 ---
 
@@ -192,6 +242,7 @@ variables).  Override with `--hj-lock` if you want different locking.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--region REGION` | `UNITED-STATES` | Grid region to simulate (must match a `GRIDUSE` name in `powerworld.f`) |
 | `--parallel-evals N` | 1 | Parallel Fortran evaluations per generation |
 | `--optimizer {hj,ga}` | `hj` | Hooke–Jeeves or genetic algorithm |
 | `--hj-direction {inc,dec,both}` | `both` | Restrict perturbations |
@@ -240,14 +291,16 @@ evaluations if you want maximum utilisation — the Python overhead is minimal.
 
 ### Warm-starting from baseline results
 
-If you have results from a previous publication in `data/raw/baseline_results.dat`,
-you can skip the LP step and use those factors as the initial guess.  This is
-typically **much faster** because the baseline is already close to feasible,
-requiring fewer (or zero) inflation steps before the GA starts.
+If you have results from a previous publication, you can skip the LP step and
+use those factors as the initial guess.  This is typically **much faster**
+because the baseline is already close to feasible, requiring fewer (or zero)
+inflation steps before the GA starts.  Name the file
+`baseline_results.<REGION>.dat` (e.g. `baseline_results.UNITED-STATES.dat`).
 
 ```bash
 python -m scripts.run_full_workflow \
-    --baseline-start data/raw/baseline_results.dat \
+    --region UNITED-STATES \
+    --baseline-start data/raw/baseline_results.UNITED-STATES.dat \
     --optimizer ga \
     --parallel-evals 36 \
     --ga-population 36 \
@@ -260,9 +313,13 @@ defaults from `PARAM_REGISTRY`.
 
 ### Recommended GA run (all 37 parameters, 38 CPUs)
 
+Run a single region (e.g. `EUROPE`) from a baseline warm-start:
+
 ```bash
 source .venv/bin/activate
 python -m scripts.run_full_workflow \
+    --region EUROPE \
+    --baseline-start data/raw/baseline_results.EUROPE.dat \
     --optimizer ga \
     --parallel-evals 36 \
     --ga-population 36 \
@@ -273,6 +330,10 @@ python -m scripts.run_full_workflow \
     --ga-mutation-cooling 0.985 \
     --ga-magnitude-damping 0.5
 ```
+
+Results land in `data/results_verification/EUROPE/`.  Omit `--region` (or set it
+to `UNITED-STATES`) to reproduce the original CONUS run — results go to
+`data/results_verification/UNITED-STATES/`.
 
 **Why these numbers:**
 - **Population 36**: With 35 active parameters, the rule of thumb is population
@@ -296,7 +357,8 @@ There is no single rule for "enough generations", but these heuristics help:
 1. **Monitor the log**: Plot cost vs trial using the notebook or:
    ```python
    from scripts.factor_history_tools import parse_factor_history, records_to_dataframe
-   df = records_to_dataframe(parse_factor_history(Path("data/results_verification/factor_history.log")))
+   df = records_to_dataframe(parse_factor_history(
+       Path("data/results_verification/UNITED-STATES/factor_history.log")))
    # Check last 5 generations for improvement
    ```
 2. **Cost plateau**: If the best feasible cost hasn't improved by > 0.1% in the
@@ -353,24 +415,91 @@ python -m scripts.run_full_workflow \
 
 ---
 
+---
+
+## Multi-region runs on a SLURM cluster
+
+Each region is an independent GA optimisation and maps naturally to a SLURM job
+array: one task per region, each task using multiple CPUs for intra-GA
+parallelism.
+
+### What you need before adding a new region
+
+1. **Supply file** — place `data/raw/wwssupworld.<REGION>` on the cluster.
+   This is the only truly region-specific raw input file (~470 MB each).
+2. **`countrystats.dat`** — already covers all 150 countries; no changes needed.
+3. **`loadreg.COUNTRY2030GW`** — already contains all countries; verify your
+   region's load row is present.
+4. **Recompile the Fortran binary** — the binary now reads the region from CLI
+   argument 1 (backward-compatible; defaults to `UNITED-STATES` if no arg):
+   ```bash
+   gfortran -O2 -mcmodel=large -fdefault-real-8 -fdefault-double-8 \
+       fortran/src/powerworld.f -o fortran/bin/powerworld
+   ```
+
+### SLURM job array
+
+Edit `scripts/run_regions_slurm.sh` — the `CONFIG` block at the top:
+
+```bash
+REGIONS=(
+    "UNITED-STATES"
+    "EUROPE"
+    "CHINA"
+    "INDIA"
+    # add more as needed
+)
+PARALLEL_EVALS=36          # must equal --cpus-per-task in the SLURM header
+GA_POPULATION=36
+GA_GENERATIONS=80
+BASELINE_DIR="data/raw"   # looks for baseline_results.<REGION>.dat; "" = always run LP
+PYTHON_ENV_SETUP="conda activate loadmatch"
+REPO_ROOT="$HOME/loadmatch-python"
+```
+
+Also update the `--array` directive to match `N_REGIONS - 1`:
+
+```bash
+#SBATCH --array=0-3%4   # 4 regions, max 4 concurrent
+```
+
+Submit with:
+
+```bash
+sbatch scripts/run_regions_slurm.sh
+```
+
+Each task writes results to `data/results_verification/<REGION>/` and LP
+outputs to `data/results_python/<REGION>/`, so runs never overwrite each other.
+
+### Analysing results from a specific region
+
+In the notebook, change the `REGION` variable in the second cell:
+
+```python
+REGION = "EUROPE"   # reads data/results_verification/EUROPE/factor_history.log
+```
+
+---
+
 ## Running components individually
 
 ### Solve the LP only
 
 ```bash
 source .venv/bin/activate
-python -m scripts.run_python_model
+python -m scripts.run_python_model   # defaults to UNITED-STATES
 ```
 
-Produces `data/results_python/summary.dat`.
+Produces `data/results_python/UNITED-STATES/summary.dat`.
 
 ### Export Fortran factors only
 
 ```bash
 python -m scripts.export_fortran_factors \
-    --region UNITED-STATES \
-    --summary data/results_python/summary.dat \
-    --output data/results_python/fortran_factors.dat
+    --region EUROPE \
+    --summary data/results_python/EUROPE/summary.dat \
+    --output data/results_python/EUROPE/fortran_factors.dat
 ```
 
 The output file contains all 37 parameters (LP values for the 7 capacity factors,
@@ -380,10 +509,11 @@ CONUS defaults for the rest).
 
 ```bash
 cd /path/to/loadmatch-python
-./fortran/bin/powerworld
+./fortran/bin/powerworld EUROPE   # pass region as argument (default: UNITED-STATES)
 ```
 
-The executable reads `fortran_factors.dat` from the `PATHHOME` directory.
+The executable reads `fortran_factors.dat` from the `PATHHOME` directory
+(`data/raw/`).  The region argument sets `GRIDUSE` inside the simulation.
 
 ---
 
@@ -393,14 +523,18 @@ The workflow logs every trial to `data/results_verification/factor_history.log`.
 
 ### On your local machine
 
-1. Copy the log and baseline file from the server:
+1. Copy the region's result folder from the server:
 
    ```bash
-   scp <user>@<server>:/path/to/repo/data/results_verification/factor_history.log \
-       data/results_verification/
+   scp -r <user>@<server>:/path/to/repo/data/results_verification/EUROPE/ \
+       data/results_verification/EUROPE/
    ```
 
-2. Open the analysis notebook (`notebooks/factor_history_analysis.ipynb`) which
+2. In `notebooks/factor_history_analysis.ipynb`, set `REGION = "EUROPE"` in the
+   second cell.  The notebook reads from `data/results_verification/EUROPE/` and
+   saves figures there.
+
+3. Open the analysis notebook (`notebooks/factor_history_analysis.ipynb`) which
    produces the following publication-ready figures:
 
    | Figure | Content |

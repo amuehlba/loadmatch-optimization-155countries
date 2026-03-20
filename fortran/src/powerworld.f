@@ -596,6 +596,7 @@ C
      1              GRIDCOUN,NAMHTREG, NH,       NAMEORIG,  NAMORIGGR,
      1              NAMELOAD,LOADNAME
       CHARACTER(14) FACREGION
+      CHARACTER(14) GRIDARG
 C
 C HDDMON = HEATING DEGREE DAYS PER MONTH (F) CONUS AVERAGE 1949-2011 
 C        = DEVIATIONS BELOW MEAN DAILY TEMPERATURE OF 65 F SUMMED OVER 
@@ -1217,6 +1218,11 @@ C      GRIDUSE = 'SOUTHEAST-ASIA'
 C      GRIDUSE = 'SOUTH-KOREA'
 C      GRIDUSE = 'TAIWAN'
        GRIDUSE = 'UNITED-STATES'
+C      Override GRIDUSE from command-line argument 1 (for automated multi-region runs).
+C      If no argument is provided the default 'UNITED-STATES' is kept (backward compatible).
+       GRIDARG = ' '
+       CALL GET_COMMAND_ARGUMENT(1, GRIDARG)
+       IF (GRIDARG.NE.' ') GRIDUSE = GRIDARG
 C
 C *****************************************************************************
 C           24 GRID REGIONS USED IN 143- AND 145-COUNTRY ROADMAP PAPERS
@@ -1722,7 +1728,7 @@ C       FACSHT     = 1.0
        FLDISELEC  = 0.3
        HCDDADD    = 1.
 
-       FACREGION = 'UNITED-STATES'
+       FACREGION = GRIDUSE
        CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
      1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
      2    FACUTILPV, CSPTURBFAC, FACSHT,

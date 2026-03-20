@@ -13,20 +13,42 @@ from typing import Dict, Sequence, List, Tuple
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
 
-LP_SUMMARY = Path("data/results_python/summary.dat")
-FACTOR_RESULT = Path("data/results_python/fortran_factors.dat")
-FACTOR_DEST = Path("fortran/fortran_factors.dat")
-FACTOR_PATHHOME = Path("data/raw/fortran_factors.dat")
-FACTOR_PATHS = [FACTOR_RESULT, FACTOR_DEST, FACTOR_PATHHOME]
 MIN_FACTOR = 0.05
 FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
 WORKSPACE_BASE = Path("data/tmp_workspaces")
-RESULTS_DIR = Path("data/results_verification")
-FORTRAN_LOG = RESULTS_DIR / "fortran_stdout.log"
-FORTRAN_ERR = RESULTS_DIR / "fortran_stderr.log"
-FORTRAN_OUT = RESULTS_DIR / "fortran_last_run.out"
-HISTORY_FILE = RESULTS_DIR / "factor_history.log"
+_DEFAULT_REGION = "UNITED-STATES"
+
+
+def _region_paths(region: str):
+    """Return per-region output paths.  Every region gets its own sub-folder."""
+    lp_dir = Path("data/results_python") / region
+    results_dir = Path("data/results_verification") / region
+    return dict(
+        lp_summary=lp_dir / "summary.dat",
+        factor_result=lp_dir / "fortran_factors.dat",
+        factor_dest=Path("fortran/fortran_factors.dat"),
+        factor_pathhome=Path("data/raw/fortran_factors.dat"),
+        results_dir=results_dir,
+        fortran_log=results_dir / "fortran_stdout.log",
+        fortran_err=results_dir / "fortran_stderr.log",
+        fortran_out=results_dir / "fortran_last_run.out",
+        history_file=results_dir / "factor_history.log",
+    )
+
+
+# Module-level defaults kept for backward compatibility (US region).
+_paths = _region_paths(_DEFAULT_REGION)
+LP_SUMMARY = _paths["lp_summary"]
+FACTOR_RESULT = _paths["factor_result"]
+FACTOR_DEST = _paths["factor_dest"]
+FACTOR_PATHHOME = _paths["factor_pathhome"]
+FACTOR_PATHS = [FACTOR_RESULT, FACTOR_DEST, FACTOR_PATHHOME]
+RESULTS_DIR = _paths["results_dir"]
+FORTRAN_LOG = _paths["fortran_log"]
+FORTRAN_ERR = _paths["fortran_err"]
+FORTRAN_OUT = _paths["fortran_out"]
+HISTORY_FILE = _paths["history_file"]
 
 # ---------------------------------------------------------------------------
 # Parameter registry: every tunable Fortran parameter with CONUS defaults.
@@ -249,30 +271,40 @@ ANNUAL_COST_PATTERN = re.compile(
 # Fortran I/O helpers
 # ---------------------------------------------------------------------------
 
-def run_fortran():
+def run_fortran(region=_DEFAULT_REGION, paths=None):
+    if paths is None:
+        paths = _region_paths(region)
+    cmd = [str(FORTRAN_EXE)]
+    if region != _DEFAULT_REGION:
+        cmd.append(region)
     result = subprocess.run(
-        [str(FORTRAN_EXE)],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
     )
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    FORTRAN_LOG.write_text(result.stdout)
-    FORTRAN_ERR.write_text(result.stderr)
+    paths["results_dir"].mkdir(parents=True, exist_ok=True)
+    paths["fortran_log"].write_text(result.stdout)
+    paths["fortran_err"].write_text(result.stderr)
     combined = result.stdout
     if result.stderr:
         combined += "\n----- STDERR -----\n" + result.stderr
-    FORTRAN_OUT.write_text(combined)
+    paths["fortran_out"].write_text(combined)
 
     if result.returncode != 0:
         raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
     return result.stdout
 
 
-def write_factor_files(factors):
-    for path in FACTOR_PATHS:
+def write_factor_files(factors, paths=None):
+    factor_paths = [
+        paths["factor_result"],
+        paths["factor_dest"],
+        paths["factor_pathhome"],
+    ] if paths else FACTOR_PATHS
+    for path in factor_paths:
         write_dat(factors, path)
-    _verify_factor_files(factors)
+    _verify_factor_files(factors, factor_paths)
 
 
 def _read_factor_file(path: Path) -> Dict[str, float]:
@@ -282,9 +314,11 @@ def _read_factor_file(path: Path) -> Dict[str, float]:
     return {k.lower(): float(v) for k, v in data.items()}
 
 
-def _verify_factor_files(factors: Dict[str, float]):
+def _verify_factor_files(factors: Dict[str, float], factor_paths=None):
+    if factor_paths is None:
+        factor_paths = FACTOR_PATHS
     expected = {k.lower(): float(v) for k, v in factors.items()}
-    for path in FACTOR_PATHS:
+    for path in factor_paths:
         data = _read_factor_file(path)
         missing = [k for k in expected if k not in data]
         if missing:
@@ -307,7 +341,9 @@ def check_feasibility(fortran_output):
         return False
     return True
 
-def log_candidate(factors, feasible, cost, label="candidate"):
+def log_candidate(factors, feasible, cost, label="candidate", history_file=None):
+    if history_file is None:
+        history_file = HISTORY_FILE
     lines = [
         "LABEL: {}".format(label),
         "FEASIBLE: {}".format(feasible),
@@ -317,8 +353,8 @@ def log_candidate(factors, feasible, cost, label="candidate"):
         "{} = {:.10f}".format(k, float(factors.get(k, 0.0))) for k in FACTOR_KEYS
     )
     lines.append("")
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with HISTORY_FILE.open("a") as handle:
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    with history_file.open("a") as handle:
         handle.write("\n".join(lines))
 
 
@@ -332,12 +368,14 @@ def parse_cost(stdout):
         return float("inf")
 
 
-def evaluate_factors(factors, label="candidate"):
-    write_factor_files(factors)
-    stdout = run_fortran()
+def evaluate_factors(factors, label="candidate", region=_DEFAULT_REGION, paths=None):
+    if paths is None:
+        paths = _region_paths(region)
+    write_factor_files(factors, paths)
+    stdout = run_fortran(region=region, paths=paths)
     feasible = check_feasibility(stdout)
     cost = parse_cost(stdout)
-    log_candidate(factors, feasible, cost, label)
+    log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
     print("--- Fortran output tail ({}) ---".format(label))
     lines = stdout.strip().splitlines()
     tail = "\n".join(lines[-20:]) if lines else ""
@@ -377,7 +415,10 @@ def raise_subunity_factors(factors, step):
     return updated, changed
 
 
-def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25):
+def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25,
+                           region=_DEFAULT_REGION, paths=None):
+    if paths is None:
+        paths = _region_paths(region)
     candidate = base_factors.copy()
     step = initial_step
 
@@ -385,7 +426,7 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     for attempt in range(1, max_attempts + 1):
         candidate, changed = raise_subunity_factors(candidate, step)
         label = "inflate-subunity{}".format(attempt)
-        feasible, cost, _ = evaluate_factors(candidate, label=label)
+        feasible, cost, _ = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
             return candidate, cost
         if not changed:
@@ -397,7 +438,7 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     for attempt in range(1, max_attempts + 1):
         candidate = inflate_factors(candidate, step)
         label = "inflate-step{}".format(attempt)
-        feasible, cost, _ = evaluate_factors(candidate, label=label)
+        feasible, cost, _ = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
             return candidate, cost
         step *= growth
@@ -429,12 +470,15 @@ def prepare_workspace():
     return workspace_path, data_raw
 
 
-def run_fortran_worker(label, factors):
+def run_fortran_worker(label, factors, region=_DEFAULT_REGION):
     workspace, data_raw = prepare_workspace()
     try:
         write_dat(factors, data_raw / "fortran_factors.dat")
+        cmd = [str(FORTRAN_EXE)]
+        if region != _DEFAULT_REGION:
+            cmd.append(region)
         result = subprocess.run(
-            [str(FORTRAN_EXE)],
+            cmd,
             cwd=str(workspace),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -464,7 +508,11 @@ def hooke_jeeves_search(
     parallel_evals=1,
     direction="both",
     locked_factors=None,
+    region=_DEFAULT_REGION,
+    paths=None,
 ):
+    if paths is None:
+        paths = _region_paths(region)
     step = initial_step
     candidate = feasible_factors.copy()
     best_cost = feasible_cost
@@ -503,10 +551,10 @@ def hooke_jeeves_search(
 
         if parallel_evals > 1:
             evaluation_results = evaluate_trials_parallel(
-                trial_specs, parallel_evals
+                trial_specs, parallel_evals, region=region, paths=paths
             )
         else:
-            evaluation_results = evaluate_trials_sequential(trial_specs)
+            evaluation_results = evaluate_trials_sequential(trial_specs, region=region, paths=paths)
 
         for spec, result in zip(trial_specs, evaluation_results):
             feasible = result["feasible"]
@@ -531,26 +579,31 @@ def hooke_jeeves_search(
     return best_factors, best_cost
 
 
-def evaluate_trials_sequential(specs):
+def evaluate_trials_sequential(specs, region=_DEFAULT_REGION, paths=None):
+    if paths is None:
+        paths = _region_paths(region)
     results = []
     for spec in specs:
-        feasible, cost, _ = evaluate_factors(spec["factors"], label=spec["label"])
+        feasible, cost, _ = evaluate_factors(spec["factors"], label=spec["label"],
+                                             region=region, paths=paths)
         results.append({"feasible": feasible, "cost": cost})
     return results
 
 
-def evaluate_trials_parallel(specs, max_workers):
+def evaluate_trials_parallel(specs, max_workers, region=_DEFAULT_REGION, paths=None):
+    if paths is None:
+        paths = _region_paths(region)
     results = []
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
         futures = [
-            pool.submit(run_fortran_worker, spec["label"], spec["factors"])
+            pool.submit(run_fortran_worker, spec["label"], spec["factors"], region)
             for spec in specs
         ]
         for spec, future in zip(specs, futures):
             label, factors, output = future.result()
             feasible = check_feasibility(output)
             cost = parse_cost(output)
-            log_candidate(factors, feasible, cost, label)
+            log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
             lines = output.strip().splitlines()
             tail = "\n".join(lines[-20:]) if lines else ""
             print("--- Fortran output tail ({}) ---".format(label))
@@ -643,7 +696,11 @@ def genetic_search(
     mutation_cooling: float = 0.98,
     factor_scales: Dict[str, float] = None,
     magnitude_damping: float = 0.5,
+    region: str = _DEFAULT_REGION,
+    paths: dict = None,
 ) -> Tuple[Dict[str, float], float]:
+    if paths is None:
+        paths = _region_paths(region)
     locked = {f.lower() for f in locked_factors or []}
     # Merge user-supplied scales on top of category defaults
     merged_scales = DEFAULT_FACTOR_SCALES.copy()
@@ -682,9 +739,9 @@ def genetic_search(
             )
 
         if parallel_evals > 1:
-            evals = evaluate_trials_parallel(specs, parallel_evals)
+            evals = evaluate_trials_parallel(specs, parallel_evals, region=region, paths=paths)
         else:
-            evals = evaluate_trials_sequential(specs)
+            evals = evaluate_trials_sequential(specs, region=region, paths=paths)
 
         scored = []
         for spec, res in zip(specs, evals):
@@ -754,6 +811,10 @@ def run_workflow(
     ga_magnitude_damping=0.5,
     baseline_start=None,
 ):
+    paths = _region_paths(region)
+    paths["results_dir"].mkdir(parents=True, exist_ok=True)
+    paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
+
     if baseline_start:
         baseline_path = Path(baseline_start)
         if not baseline_path.exists():
@@ -761,16 +822,21 @@ def run_workflow(
         print(f"Using baseline factors from {baseline_path} (skipping LP).")
         base_factors = load_baseline_start(baseline_path)
     else:
-        run_python_model.main()
-        export_fortran_factors.main([])
-        lp_factors = read_dat(str(FACTOR_RESULT))
+        run_python_model.main(region=region, output_dir=paths["lp_summary"].parent)
+        export_fortran_factors.main([
+            "--region", region,
+            "--summary", str(paths["lp_summary"]),
+            "--output", str(paths["factor_result"]),
+        ])
+        lp_factors = read_dat(str(paths["factor_result"]))
         base_factors = _build_full_factors(lp_factors)
-    write_factor_files(base_factors)
-    stdout = run_fortran()
-    print("Fortran output written to {}".format(FORTRAN_OUT))
+    write_factor_files(base_factors, paths)
+    stdout = run_fortran(region=region, paths=paths)
+    print("Fortran output written to {}".format(paths["fortran_out"]))
     feasible_initial = check_feasibility(stdout)
     initial_cost = parse_cost(stdout)
-    log_candidate(base_factors, feasible_initial, initial_cost, label="LP")
+    log_candidate(base_factors, feasible_initial, initial_cost, label="LP",
+                  history_file=paths["history_file"])
     if feasible_initial:
         print(
             "Fortran verification succeeded with LP factors (cost {:.3f}).".format(
@@ -780,7 +846,7 @@ def run_workflow(
         return
 
     print("LP factors infeasible; inflating to obtain a feasible starting point.")
-    candidate, cost = inflate_until_feasible(base_factors)
+    candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths)
 
     if optimizer == "ga":
         print(
@@ -809,14 +875,16 @@ def run_workflow(
             mutation_cooling=ga_mutation_cooling,
             factor_scales=ga_factor_scales,
             magnitude_damping=ga_magnitude_damping,
+            region=region,
+            paths=paths,
         )
         print(
             "Genetic algorithm produced feasible factors with cost {:.3f}.".format(
                 best_cost
             )
         )
-        write_dat(best_factors, RESULTS_DIR / "genetic_factors.dat")
-        write_factor_files(best_factors)
+        write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
+        write_factor_files(best_factors, paths)
     else:
         hooke_factors, best_cost = hooke_jeeves_search(
             candidate,
@@ -828,14 +896,16 @@ def run_workflow(
             parallel_evals=parallel_evals,
             direction=hj_direction,
             locked_factors=hj_locked_factors,
+            region=region,
+            paths=paths,
         )
         print(
             "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
                 best_cost
             )
         )
-        write_dat(hooke_factors, RESULTS_DIR / "hooke_jeeves_factors.dat")
-        write_factor_files(hooke_factors)
+        write_dat(hooke_factors, paths["results_dir"] / "hooke_jeeves_factors.dat")
+        write_factor_files(hooke_factors, paths)
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +924,17 @@ def parse_args():
             "  Phase 3: Unlock all.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--region",
+        type=str,
+        default=_DEFAULT_REGION,
+        metavar="REGION",
+        help=(
+            "Grid region to simulate (default: UNITED-STATES).  "
+            "Must match a GRIDUSE name in powerworld.f, e.g. CHINA, EUROPE, INDIA.  "
+            "Results are written to data/results_verification/<REGION>/ for non-US regions."
+        ),
     )
     parser.add_argument(
         "--parallel-evals",
@@ -986,6 +1067,7 @@ def main():
     args = parse_args()
     factor_scales = _parse_factor_scales(args.ga_factor_scale)
     run_workflow(
+        region=args.region,
         parallel_evals=max(1, args.parallel_evals),
         hj_initial_step=args.hj_initial_step,
         hj_shrink=args.hj_shrink,
