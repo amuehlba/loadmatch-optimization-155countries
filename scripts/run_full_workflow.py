@@ -152,9 +152,12 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     block = m.group(1)
     result: Dict[str, float] = {}
     for key in FACTOR_KEYS:
-        # Match the first unconditional assignment: KEY = <number> (Fortran float)
+        # Match the first unconditional assignment: KEY = <number> (Fortran float).
+        # Handles both "2.32" and Fortran trailing-dot form "2." or "60."
         val_re = re.compile(
-            r"^\s+{}\s*=\s*([-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?)".format(re.escape(key)),
+            r"^\s+{}\s*=\s*([-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[Ee][-+]?\d+)?)".format(
+                re.escape(key)
+            ),
             re.MULTILINE | re.IGNORECASE,
         )
         vm = val_re.search(block)
@@ -984,7 +987,14 @@ def run_workflow(
         ])
         lp_factors = read_dat(str(paths["factor_result"]))
         base_factors = _build_full_factors(lp_factors)
-    write_factor_files(base_factors, paths)
+    if baseline_start == "defaults":
+        # Let Fortran use its hardcoded regional values — delete any stale factor
+        # file so READ_FACTOR_OVERRIDES exits early and nothing is overridden.
+        for _fp in [paths["factor_dest"], paths["factor_pathhome"]]:
+            if _fp.exists():
+                _fp.unlink()
+    else:
+        write_factor_files(base_factors, paths)
     stdout = run_fortran(region=region, paths=paths)
     print("Fortran output written to {}".format(paths["fortran_out"]))
 
