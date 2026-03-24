@@ -597,6 +597,7 @@ C
      1              NAMELOAD,LOADNAME
       CHARACTER(14) FACREGION
       CHARACTER(14) GRIDARG
+      CHARACTER(1)  IFARG
 C
 C HDDMON = HEATING DEGREE DAYS PER MONTH (F) CONUS AVERAGE 1949-2011 
 C        = DEVIATIONS BELOW MEAN DAILY TEMPERATURE OF 65 F SUMMED OVER 
@@ -1409,12 +1410,19 @@ C      IFCONUS=1, RUN IN SEQUENCE IFREWRITE=1,0
 C      MAY RUN SOLARTILT/tilt.f BEFORE RUNNING WITH IFREWRITE=2
 C
       IF (IFCONUS.EQ.1) THEN
-       IFREWRITE = 0 
+       IFREWRITE = 0
       ELSE
-C      IFREWRITE = 1 
-C      IFREWRITE = 2 
-       IFREWRITE = 3 
+C      IFREWRITE = 1
+C      IFREWRITE = 2
+       IFREWRITE = 3
       ENDIF
+C     Override IFREWRITE from command-line argument 2 (for automated preprocessing).
+C     Usage: powerworld [REGION] [1|2|3]  -- if omitted, default above is kept.
+       IFARG = ' '
+       CALL GET_COMMAND_ARGUMENT(2, IFARG)
+       IF (IFARG.EQ.'1') IFREWRITE = 1
+       IF (IFARG.EQ.'2') IFREWRITE = 2
+       IF (IFARG.EQ.'3') IFREWRITE = 3
 C
 C INITYEAR = INITIAL YEAR OF SIMULATIONS
 C
@@ -6299,7 +6307,7 @@ C
 C INPUT SUPPLY DATA
 C
        IF (IFREWRITE.EQ.3) THEN
-        OPEN(KWWS, FILE = './data/raw/wwssupworld.UNITED-STATES')
+        OPEN(KWWS, FILE = PATHHOME//'wwssupworld.'//GRIDUSE)
        ELSEIF (IFREWRITE.EQ.2) THEN
         OPEN(KWWS, FILE = PATHTEM1//'wwssupreform.dat')
        ELSEIF (IFREWRITE.EQ.1.OR.IFREWRITE.EQ.0) THEN 

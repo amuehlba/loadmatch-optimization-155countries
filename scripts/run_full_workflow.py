@@ -292,12 +292,8 @@ def load_baseline_start(path: Path) -> Dict[str, float]:
 # Fortran I/O helpers
 # ---------------------------------------------------------------------------
 
-def run_fortran(region=_DEFAULT_REGION, paths=None):
-    if paths is None:
-        paths = _region_paths(region)
-    cmd = [str(FORTRAN_EXE)]
-    if region != _DEFAULT_REGION:
-        cmd.append(region)
+def _run_fortran_raw(cmd, paths):
+    """Run a Fortran subprocess, capture stdout/stderr, write logs, return stdout."""
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -311,10 +307,73 @@ def run_fortran(region=_DEFAULT_REGION, paths=None):
     if result.stderr:
         combined += "\n----- STDERR -----\n" + result.stderr
     paths["fortran_out"].write_text(combined)
-
     if result.returncode != 0:
         raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
     return result.stdout
+
+
+def preprocess_region(region):
+    """Run the three-step preprocessing (IFREWRITE=1,2,3) for a new region.
+
+    Prerequisites in data/raw/:
+      - wwssupworld.<REGION>  (raw supply file from GATOR-GCMOM)
+
+    Steps performed:
+      1. IFREWRITE=1 : reformats wwssupworld.<REGION> → wwssupreform.dat
+      2. IFREWRITE=2 : aggregates to wwssupworld.<REGION> (compressed form)
+      3. IFREWRITE=3 : normal model run (also creates wwsmonthly/wwshourly/pkflex)
+
+    Skipped entirely if wwsmonthly.<REGION> already exists (already preprocessed).
+    Only step 1+2 are run if wwssupworld.<REGION> exists but wwsmonthly.<REGION> doesn't.
+    """
+    monthly_file  = BASE_RAW_DIR / "wwsmonthly.{}".format(region)
+    supply_agg    = BASE_RAW_DIR / "wwssupworld.{}".format(region)
+    supply_raw    = BASE_RAW_DIR / "wwssupworld.dat"
+
+    if monthly_file.exists():
+        return  # already fully preprocessed
+
+    if not supply_agg.exists():
+        # Need to run IFREWRITE=1 first to create wwssupreform.dat, then IFREWRITE=2
+        if not supply_raw.exists():
+            raise FileNotFoundError(
+                "Cannot preprocess region '{}': neither\n"
+                "  {}\n  (aggregated, from a previous IFREWRITE=2 run)\nnor\n"
+                "  {}\n  (raw supply file, rename wwssupworld.{} to this)\n"
+                "exists in data/raw/.".format(
+                    region, supply_agg, supply_raw, region
+                )
+            )
+        print("Preprocessing {}: IFREWRITE=1 (reformat raw supply) ...".format(region))
+        paths = _region_paths(region)
+        result = subprocess.run(
+            [str(FORTRAN_EXE), region, "1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("IFREWRITE=1 failed for {}:\n{}".format(region, result.stderr))
+
+        print("Preprocessing {}: IFREWRITE=2 (aggregate by region) ...".format(region))
+        result = subprocess.run(
+            [str(FORTRAN_EXE), region, "2"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("IFREWRITE=2 failed for {}:\n{}".format(region, result.stderr))
+
+    # wwssupworld.<REGION> now exists — proceed to IFREWRITE=3 (normal run)
+    # This is handled by the regular run_fortran() call; nothing more to do here.
+    print("Region '{}' supply data ready (wwssupworld.{} found).".format(region, region))
+
+
+def run_fortran(region=_DEFAULT_REGION, paths=None):
+    preprocess_region(region)
+    if paths is None:
+        paths = _region_paths(region)
+    cmd = [str(FORTRAN_EXE)]
+    if region != _DEFAULT_REGION:
+        cmd.append(region)
+    return _run_fortran_raw(cmd, paths)
 
 
 def write_factor_files(factors, paths=None):
