@@ -2,6 +2,7 @@ import argparse
 import multiprocessing
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +34,7 @@ def _region_paths(region: str):
         fortran_log=results_dir / "fortran_stdout.log",
         fortran_err=results_dir / "fortran_stderr.log",
         fortran_out=results_dir / "fortran_last_run.out",
+        fortran_baseline_out=results_dir / "fortran_baseline_run.out",
         history_file=results_dir / "factor_history.log",
         # Parsed JSON summaries (raw .out files are always kept as well)
         baseline_summary=results_dir / "baseline_summary.json",
@@ -120,6 +122,54 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
 }
 
 FACTOR_KEYS: List[str] = list(PARAM_REGISTRY.keys())
+
+_FORTRAN_SRC = Path("fortran/src/powerworld.f")
+
+
+def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
+    """Parse powerworld.f for the hardcoded default factor values of a region.
+
+    Finds the ELSEIF (GRIDUSE.EQ.'<REGION>') block and extracts the first
+    (unconditional) assignment for each key in PARAM_REGISTRY.  Any key not
+    found in the block falls back to the PARAM_REGISTRY default.
+    """
+    text = _FORTRAN_SRC.read_text()
+    # Find the block for this region up to the next ELSEIF/ENDIF at the same level
+    block_re = re.compile(
+        r"GRIDUSE\.EQ\.'{}'\s*\)(.*?)(?=ELSEIF\s*\(GRIDUSE|^\s*ENDIF)".format(
+            re.escape(region)
+        ),
+        re.DOTALL | re.IGNORECASE | re.MULTILINE,
+    )
+    m = block_re.search(text)
+    if not m:
+        print(
+            "  [WARN] No region block found for '{}' in powerworld.f; "
+            "using PARAM_REGISTRY defaults.".format(region)
+        )
+        return {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+
+    block = m.group(1)
+    result: Dict[str, float] = {}
+    for key in FACTOR_KEYS:
+        # Match the first unconditional assignment: KEY = <number> (Fortran float)
+        val_re = re.compile(
+            r"^\s+{}\s*=\s*([-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?)".format(re.escape(key)),
+            re.MULTILINE | re.IGNORECASE,
+        )
+        vm = val_re.search(block)
+        if vm:
+            result[key] = float(vm.group(1))
+        else:
+            result[key] = PARAM_REGISTRY[key][0]
+
+    found = [k for k in FACTOR_KEYS if k in result and result[k] != PARAM_REGISTRY[k][0]]
+    print(
+        "Extracted {} region-specific defaults from powerworld.f for '{}' "
+        "(keys differ from registry: {}).".format(len(found), region, found or "none")
+    )
+    return result
+
 
 # The original 7 capacity-scaling factors (used to decide what inflate_until_feasible touches)
 CAPACITY_FACTOR_KEYS = [
@@ -911,7 +961,10 @@ def run_workflow(
     else:
         print(f"  [INFO] No canonical baseline found at {_canonical_bl} — skipping baseline summary.")
 
-    if baseline_start:
+    if baseline_start == "defaults":
+        base_factors = extract_fortran_region_defaults(region)
+        print("Using Fortran hardcoded region defaults as baseline factors (skipping LP).")
+    elif baseline_start:
         baseline_path = Path(baseline_start)
         if not baseline_path.exists():
             raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
@@ -929,6 +982,24 @@ def run_workflow(
     write_factor_files(base_factors, paths)
     stdout = run_fortran(region=region, paths=paths)
     print("Fortran output written to {}".format(paths["fortran_out"]))
+
+    # Save baseline run to a dedicated file so GA evaluations don't overwrite it.
+    if baseline_start == "defaults":
+        paths["fortran_baseline_out"].write_text(stdout)
+        _parse_and_save(
+            stdout,
+            factors=base_factors,
+            region=region,
+            run_type="baseline",
+            out_path=paths["baseline_summary"],
+        )
+        print(
+            "Baseline run saved to {}.\n"
+            "Compare against data/raw/xxEGS-{} to verify correctness.".format(
+                paths["fortran_baseline_out"], region
+            )
+        )
+
     feasible_initial = check_feasibility(stdout)
     initial_cost = parse_cost(stdout)
     log_candidate(base_factors, feasible_initial, initial_cost, label="LP",
@@ -941,6 +1012,9 @@ def run_workflow(
             )
         )
         return
+    if not feasible_initial and baseline_start == "defaults":
+        print("Default baseline factors are infeasible for region '{}'; "
+              "inflating capacity factors before starting optimiser.".format(region))
 
     if feasible_initial:
         # baseline_start provided and feasible — use it directly as starting point.
@@ -1153,11 +1227,14 @@ def parse_args():
         "--baseline-start",
         type=str,
         default=None,
-        metavar="PATH",
-        help="Path to a baseline_results.dat file from a previous publication. "
-        "When provided, the LP step is skipped and the baseline factors are used "
-        "as the initial guess for the GA/HJ optimiser. "
-        "Default: %(default)s (run LP from scratch).",
+        metavar="PATH|defaults",
+        help="Starting point for the GA/HJ optimiser. Three options: "
+        "(1) omit: run LP and stop if feasible; "
+        "(2) 'defaults': use the hardcoded registry defaults (all factors=1), "
+        "run Fortran once as a region baseline, save output as data/raw/xxEGS-<REGION>, "
+        "then start the optimiser — use this for a new region with no existing baseline; "
+        "(3) PATH to a baseline_results.dat file: load factors from that file and skip LP. "
+        "Default: %(default)s.",
     )
     return parser.parse_args()
 
