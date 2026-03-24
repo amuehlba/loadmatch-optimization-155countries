@@ -135,8 +135,12 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     """
     text = _FORTRAN_SRC.read_text()
     # Find the block for this region up to the next ELSEIF/ENDIF at the same level
+    # Stop only at the next region's ELSEIF or the closing comment that marks
+    # the end of the entire region chain.  Do NOT stop at internal ENDIF blocks
+    # (e.g. IF (IMERGH2.NE.2) ... ENDIF) inside the region block.
     block_re = re.compile(
-        r"GRIDUSE\.EQ\.'{}'\s*\)(.*?)(?=ELSEIF\s*\(GRIDUSE|^\s*ENDIF)".format(
+        r"GRIDUSE\.EQ\.'{}'\s*\)(.*?)"
+        r"(?=ELSEIF\s*\(GRIDUSE\.EQ\.|C\s+ENDIF\s+GRIDUSE)".format(
             re.escape(region)
         ),
         re.DOTALL | re.IGNORECASE | re.MULTILINE,
