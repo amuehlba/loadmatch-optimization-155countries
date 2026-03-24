@@ -600,9 +600,19 @@ def prepare_workspace():
     data_raw = workspace_path / "data" / "raw"
     data_raw.mkdir(parents=True, exist_ok=True)
     for item in BASE_RAW_DIR.iterdir():
-        if item.name == "fortran_factors.dat":
+        # Skip fortran_factors.dat (written per-worker) and all Fortran OUTPUT
+        # files that the model writes during each run.  Symlinking output files
+        # causes all parallel workers to write through the same physical file,
+        # corrupting every worker's state simultaneously.
+        name = item.name
+        if name == "fortran_factors.dat":
             continue
-        target = data_raw / item.name
+        if (name.startswith("wwsmonthly.")
+                or name.startswith("wwshourly.")
+                or name.startswith("pkflex.")
+                or name == "countrydata.out"):
+            continue
+        target = data_raw / name
         if target.exists():
             continue
         if item.is_dir():
