@@ -129,12 +129,17 @@ _FORTRAN_SRC = Path("fortran/src/powerworld.f")
 def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     """Parse powerworld.f for the hardcoded default factor values of a region.
 
-    Finds the ELSEIF (GRIDUSE.EQ.'<REGION>') block and extracts the first
-    (unconditional) assignment for each key in PARAM_REGISTRY.  Any key not
-    found in the block falls back to the PARAM_REGISTRY default.
+    Finds the ELSEIF (GRIDUSE.EQ.'<REGION>') block and extracts the LAST
+    assignment for each key in PARAM_REGISTRY.  Using the last occurrence
+    mirrors Fortran's sequential execution: conditional override blocks
+    (IF (IFEGS.EQ.1), IF (IMERGH2.NE.2), etc.) appear at the end of the
+    region block and overwrite earlier assignments when active.  Since IFEGS
+    and IMERGH2 are hardcoded in powerworld.f, taking the last occurrence
+    gives the actual runtime value.  Any key not found in the block falls
+    back to the PARAM_REGISTRY default.
     """
     text = _FORTRAN_SRC.read_text()
-    # Find the block for this region up to the next ELSEIF/ENDIF at the same level
+    # Find the block for this region up to the next ELSEIF/ENDIF at the same level.
     # Stop only at the next region's ELSEIF or the closing comment that marks
     # the end of the entire region chain.  Do NOT stop at internal ENDIF blocks
     # (e.g. IF (IMERGH2.NE.2) ... ENDIF) inside the region block.
@@ -156,7 +161,9 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     block = m.group(1)
     result: Dict[str, float] = {}
     for key in FACTOR_KEYS:
-        # Match the first unconditional assignment: KEY = <number> (Fortran float).
+        # Find ALL assignments KEY = <number> and take the LAST one.
+        # This mirrors Fortran's sequential execution order: a later override
+        # (e.g. IFEGS block) wins over an earlier unconditional assignment.
         # Handles both "2.32" and Fortran trailing-dot form "2." or "60."
         val_re = re.compile(
             r"^\s+{}\s*=\s*([-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[Ee][-+]?\d+)?)".format(
@@ -164,9 +171,9 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
             ),
             re.MULTILINE | re.IGNORECASE,
         )
-        vm = val_re.search(block)
-        if vm:
-            result[key] = float(vm.group(1))
+        matches = val_re.findall(block)
+        if matches:
+            result[key] = float(matches[-1])  # last assignment wins
         else:
             result[key] = PARAM_REGISTRY[key][0]
 
