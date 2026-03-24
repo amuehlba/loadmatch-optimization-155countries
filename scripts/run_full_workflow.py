@@ -411,9 +411,14 @@ def preprocess_region(region):
         if result.returncode != 0:
             raise RuntimeError("IFREWRITE=2 failed for {}:\n{}".format(region, result.stderr))
 
-    # wwssupworld.<REGION> now exists — proceed to IFREWRITE=3 (normal run)
-    # This is handled by the regular run_fortran() call; nothing more to do here.
-    print("Region '{}' supply data ready (wwssupworld.{} found).".format(region, region))
+    # wwssupworld.<REGION> now exists — proceed to IFREWRITE=3 (normal run).
+    # wwsmonthly.*, wwshourly.*, pkflex.* will be created by that run.
+    print(
+        "Preprocessed supply file wwssupworld.{} found — skipping IFREWRITE=1,2.\n"
+        "  (wwsmonthly.{r}, wwshourly.{r}, pkflex.{r} will be created by the model run.)".format(
+            region, r=region
+        )
+    )
 
 
 def run_fortran(region=_DEFAULT_REGION, paths=None):

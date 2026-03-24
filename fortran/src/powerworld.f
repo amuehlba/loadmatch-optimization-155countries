@@ -1736,20 +1736,6 @@ C       FACSHT     = 1.0
        FLDISELEC  = 0.3
        HCDDADD    = 1.
 
-       FACREGION = GRIDUSE
-       CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
-     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
-     2    FACUTILPV, CSPTURBFAC, FACSHT,
-     3    CSPSTORGAT, MXHRDRM, BATDISCH, HCHARCSP, STORHBAT,
-     4    STORHCOLD, STORHHWAT, STORHPHS,
-     5    UGFAC, STORUGDYS, DAYH2STOR,
-     6    HPTURBRAT, DAMCAPRAT, DAYBASHYD,
-     7    COOLSTES, PHSMIN, FHEATFLX,
-     8    FCOLDFLX, FRSTORINIT, FDISTHEAT,
-     9    CPERFORM, HCDDADD, FMORTBAU,
-     A    HWFAC, FCDISCH, FCCHARG,
-     B    STORHHFC, HBTDISCH, STORHHBT,
-     C    FRCIHFLEX)
 C
 C *****************************************************************************
 C                                EAST AFRICA
@@ -3815,26 +3801,6 @@ C
        FLDISELEC  = 0.3
        HCDDADD    = 1. 
 
-       IF (IFCONUS.EQ.1) THEN
-        FACREGION = 'UNITED-STATES'
-       ELSE
-        FACREGION = GRIDUSE
-       ENDIF
-
-       CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
-     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
-     2    FACUTILPV, CSPTURBFAC, FACSHT,
-     3    CSPSTORGAT, MXHRDRM, BATDISCH, HCHARCSP, STORHBAT,
-     4    STORHCOLD, STORHHWAT, STORHPHS,
-     5    UGFAC, STORUGDYS, DAYH2STOR,
-     6    HPTURBRAT, DAMCAPRAT, DAYBASHYD,
-     7    COOLSTES, PHSMIN, FHEATFLX,
-     8    FCOLDFLX, FRSTORINIT, FDISTHEAT,
-     9    CPERFORM, HCDDADD, FMORTBAU,
-     A    HWFAC, FCDISCH, FCCHARG,
-     B    STORHHFC, HBTDISCH, STORHHBT,
-     C    FRCIHFLEX)
-
 C
 C *****************************************************************************
 C                INDIVIDUAL + COMBINATIONS OF EUROPEAN COUNTRIES 
@@ -5426,6 +5392,28 @@ C      BATDISCH   = 9.5
        HCDDADD    = 1. 
       ENDIF
 C     ENDIF GRIDUSE
+C
+C     Apply fortran_factors.dat overrides AFTER all region-specific defaults,
+C     so the factor file always wins regardless of which region is active.
+C
+       IF (IFCONUS.EQ.1) THEN
+        FACREGION = 'UNITED-STATES'
+       ELSE
+        FACREGION = GRIDUSE
+       ENDIF
+       CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
+     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
+     2    FACUTILPV, CSPTURBFAC, FACSHT,
+     3    CSPSTORGAT, MXHRDRM, BATDISCH, HCHARCSP, STORHBAT,
+     4    STORHCOLD, STORHHWAT, STORHPHS,
+     5    UGFAC, STORUGDYS, DAYH2STOR,
+     6    HPTURBRAT, DAMCAPRAT, DAYBASHYD,
+     7    COOLSTES, PHSMIN, FHEATFLX,
+     8    FCOLDFLX, FRSTORINIT, FDISTHEAT,
+     9    CPERFORM, HCDDADD, FMORTBAU,
+     A    HWFAC, FCDISCH, FCCHARG,
+     B    STORHHFC, HBTDISCH, STORHHBT,
+     C    FRCIHFLEX)
 C
 C *****************************************************************************
 C                        FIND TIME ZONE IN MIDDLE OF DOMAIN
