@@ -2,7 +2,6 @@ import argparse
 import multiprocessing
 import os
 import random
-import re
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +11,7 @@ from typing import Dict, Sequence, List, Tuple
 
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
+from scripts.parse_fortran_output import parse_and_save as _parse_and_save, _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN
 
 MIN_FACTOR = 0.05
 FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
@@ -34,6 +34,11 @@ def _region_paths(region: str):
         fortran_err=results_dir / "fortran_stderr.log",
         fortran_out=results_dir / "fortran_last_run.out",
         history_file=results_dir / "factor_history.log",
+        # Parsed JSON summaries (raw .out files are always kept as well)
+        baseline_summary=results_dir / "baseline_summary.json",
+        optimal_summary=results_dir / "optimal_summary.json",
+        # Final optimal Fortran output (consumed by plot_results.py)
+        fortran_optimal_out=results_dir / "fortran_optimal_run.out",
     )
 
 
@@ -247,24 +252,40 @@ def parse_baseline_factors(path: Path) -> Dict[str, float]:
 
 
 def load_baseline_start(path: Path) -> Dict[str, float]:
-    """Build a complete factor dict from baseline_results.dat.
+    """Build a complete factor dict from a baseline file.
 
-    Parsed values override PARAM_REGISTRY defaults.
+    Accepts two formats:
+    1. Simple KEY = VALUE format (same as fortran_factors.dat) — preferred for
+       new region files created manually.
+    2. Legacy multi-value format from the original CONUS publication
+       (e.g. 'STORHBAT BATDISCH = 4.0 0.84').
+
+    In both cases, any parameter not present in the file is filled from
+    PARAM_REGISTRY defaults.
     """
-    parsed = parse_baseline_factors(path)
-    full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-    full.update(parsed)
+    # Try the simple KEY = VALUE format first.
+    # read_dat returns a dict; check how many keys match PARAM_REGISTRY.
+    simple_raw = read_dat(str(path))
+    simple_hits = {k.upper(): float(v) for k, v in simple_raw.items()
+                   if k.upper() in PARAM_REGISTRY}
+
+    if len(simple_hits) >= 5:
+        # Looks like a plain fortran_factors.dat-style file.
+        full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+        full.update(simple_hits)
+        parsed = simple_hits
+    else:
+        # Fall back to legacy multi-value publication format.
+        parsed = parse_baseline_factors(path)
+        full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+        full.update(parsed)
+
     print(f"Loaded {len(parsed)} baseline factors from {path}")
     for k, v in sorted(parsed.items()):
         default = PARAM_REGISTRY[k][0]
         marker = "" if abs(v - default) < 1e-9 else " *"
         print(f"  {k:12s} = {v:.6f}  (default {default:.6f}){marker}")
     return full
-
-
-ANNUAL_COST_PATTERN = re.compile(
-    r"ANNUAL TOT ENERGY COST.*?=\s+([-0-9\.Ee+]+)\s+([-0-9\.Ee+]+)\s+([-0-9\.Ee+]+)"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +380,7 @@ def log_candidate(factors, feasible, cost, label="candidate", history_file=None)
 
 
 def parse_cost(stdout):
-    match = ANNUAL_COST_PATTERN.search(stdout)
+    match = _ANNUAL_COST_PATTERN.search(stdout)
     if not match:
         return float("inf")
     try:
@@ -815,6 +836,22 @@ def run_workflow(
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
     paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
 
+    # ── Parse canonical baseline output if present ────────────────────────────
+    # The file data/raw/xxEGS-<region> is the Jacobson publication baseline.
+    # It is never modified by this workflow; we only read and summarise it.
+    _canonical_bl = BASE_RAW_DIR / f"xxEGS-{region}"
+    if _canonical_bl.exists():
+        print(f"Parsing canonical baseline: {_canonical_bl.name}")
+        _parse_and_save(
+            _canonical_bl.read_text(),
+            factors=None,
+            region=region,
+            run_type="baseline",
+            out_path=paths["baseline_summary"],
+        )
+    else:
+        print(f"  [INFO] No canonical baseline found at {_canonical_bl} — skipping baseline summary.")
+
     if baseline_start:
         baseline_path = Path(baseline_start)
         if not baseline_path.exists():
@@ -837,7 +874,8 @@ def run_workflow(
     initial_cost = parse_cost(stdout)
     log_candidate(base_factors, feasible_initial, initial_cost, label="LP",
                   history_file=paths["history_file"])
-    if feasible_initial:
+    if feasible_initial and baseline_start is None:
+        # LP solution is already feasible — no further optimisation needed.
         print(
             "Fortran verification succeeded with LP factors (cost {:.3f}).".format(
                 initial_cost
@@ -845,21 +883,24 @@ def run_workflow(
         )
         return
 
-    print("LP factors infeasible; inflating to obtain a feasible starting point.")
-    candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths)
-
-    if optimizer == "ga":
+    if feasible_initial:
+        # baseline_start provided and feasible — use it directly as starting point.
         print(
-            "Genetic algorithm starting from feasible point with cost {:.3f}.".format(
-                cost
+            "Baseline feasible (cost {:.3f}). Proceeding to {} optimisation.".format(
+                initial_cost, optimizer.upper()
             )
         )
+        candidate, cost = base_factors.copy(), initial_cost
     else:
-        print(
-            "Hooke-Jeeves search starting from feasible point with cost {:.3f}.".format(
-                cost
-            )
+        print("Starting point infeasible; inflating capacity factors.")
+        candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths)
+
+    print(
+        "{} starting from feasible point (cost {:.3f}).".format(
+            "Genetic algorithm" if optimizer == "ga" else "Hooke-Jeeves", cost
         )
+    )
+
     if optimizer == "ga":
         best_factors, best_cost = genetic_search(
             candidate,
@@ -878,15 +919,10 @@ def run_workflow(
             region=region,
             paths=paths,
         )
-        print(
-            "Genetic algorithm produced feasible factors with cost {:.3f}.".format(
-                best_cost
-            )
-        )
+        print("GA produced best feasible solution (cost {:.3f}).".format(best_cost))
         write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
-        write_factor_files(best_factors, paths)
     else:
-        hooke_factors, best_cost = hooke_jeeves_search(
+        best_factors, best_cost = hooke_jeeves_search(
             candidate,
             cost,
             initial_step=hj_initial_step,
@@ -899,13 +935,30 @@ def run_workflow(
             region=region,
             paths=paths,
         )
-        print(
-            "Hooke-Jeeves search produced feasible factors with cost {:.3f}.".format(
-                best_cost
-            )
+        print("Hooke-Jeeves produced best feasible solution (cost {:.3f}).".format(best_cost))
+        write_dat(best_factors, paths["results_dir"] / "hooke_jeeves_factors.dat")
+
+    # ── Final evaluation with optimal factors ─────────────────────────────────
+    # Run Fortran once more with the best-found factors so that:
+    #   1. fortran_optimal_run.out is always present for plot_results.py
+    #   2. optimal_summary.json captures the full structured results
+    # The raw .out file and JSON are both saved; nothing is deleted.
+    print("Running final Fortran evaluation with optimal factors...")
+    write_factor_files(best_factors, paths)
+    final_stdout = run_fortran(region=region, paths=paths)
+    paths["fortran_optimal_out"].write_text(final_stdout)
+    _parse_and_save(
+        final_stdout,
+        factors=best_factors,
+        region=region,
+        run_type=f"{optimizer}_optimal",
+        out_path=paths["optimal_summary"],
+    )
+    print(
+        "Final evaluation cost: {:.3f} $B/yr  →  {}".format(
+            parse_cost(final_stdout), paths["optimal_summary"]
         )
-        write_dat(hooke_factors, paths["results_dir"] / "hooke_jeeves_factors.dat")
-        write_factor_files(hooke_factors, paths)
+    )
 
 
 # ---------------------------------------------------------------------------
