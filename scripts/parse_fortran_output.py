@@ -19,8 +19,6 @@ Public API used by run_full_workflow.py:
         out_path   = Path(".../optimal_summary.json"),
     )
 """
-from __future__ import annotations
-
 import json
 import re
 from datetime import datetime, timezone

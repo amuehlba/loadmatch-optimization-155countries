@@ -25,8 +25,6 @@ plt.show()
 ```
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
