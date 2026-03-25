@@ -24,8 +24,8 @@
 #SBATCH --time=48:00:00                   # wall-clock limit per region
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=37                 # must equal PARALLEL_EVALS below
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=24                 # must equal PARALLEL_EVALS below
+#SBATCH --mem=200G
 #SBATCH --partition=serc
 
 # ---- CONFIG -----------------------------------------------------------------
@@ -36,7 +36,7 @@ REGIONS=(
 )
 
 # Number of parallel Fortran evaluations per job (= cpus-per-task above).
-PARALLEL_EVALS=37
+PARALLEL_EVALS=24
 
 # GA settings
 GA_POPULATION=37
