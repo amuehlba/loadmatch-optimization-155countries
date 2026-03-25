@@ -59,7 +59,8 @@ REPO_ROOT="$GROUP_HOME/loadmatch-python"
 # Python environment.
 # Gurobi module only needed if --baseline-start is a file path (LP warm-start).
 # For --baseline-start defaults (used here), gurobi is not required.
-PYTHON_ENV_SETUP="module load python3 && source ${REPO_ROOT}/.venv/bin/activate"
+# The venv uses the system /usr/bin/python3 (3.10.13) — no module load needed.
+PYTHON_ENV_SETUP="source ${REPO_ROOT}/.venv/bin/activate"
 
 # ---- END CONFIG -------------------------------------------------------------
 
