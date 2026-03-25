@@ -1,5 +1,5 @@
 pyomo
-pandas
+pandas>=2.0,<3.0
 numpy
 matplotlib
 h5py

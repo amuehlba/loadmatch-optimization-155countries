@@ -170,7 +170,7 @@ def plot_factor_trajectories(
     absolute: bool = True,
     region: str = "UNITED-STATES",
     figsize: tuple = (12, 6),
-    columns: Sequence[str] | None = None,
+    columns: Optional[Sequence[str]] = None,
 ) -> plt.Axes:
     """Plot factor or capacity trajectories over trials.
 
