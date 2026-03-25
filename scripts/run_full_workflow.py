@@ -98,15 +98,15 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "DAYH2STOR":   (40.0,         "days",      "H2 storage days"),
     # --- Hydropower ---
     "HPTURBRAT":   (10.0,         "ratio",     "Hydro turbine discharge ratio"),
-    "DAMCAPRAT":   (0.583,        "ratio",     "Hydro dam capacity / annual output"),
+    "DAMCAPRAT":   (0.583,        "fixed",     "Hydro dam capacity / annual output"),
     "DAYBASHYD":   (360.0,        "days",      "Baseload hydro storage days"),
     # --- Thermal storage and demand response ---
     "COOLSTES":    (0.4,          "fraction",  "Fraction AC from CW-STES vs ice"),
-    "PHSMIN":      (0.016,        "tw",        "Min PHS nameplate capacity (TW)"),
+    "PHSMIN":      (0.016,        "fixed",     "Min PHS nameplate capacity (TW)"),
     "FHEATFLX":    (0.15,         "fraction",  "Flexible heat load fraction"),
     "FCOLDFLX":    (0.15,         "fraction",  "Flexible cold load fraction"),
-    "FRSTORINIT":  (0.5,          "fraction",  "Initial storage fill fraction"),
-    "FDISTHEAT":   (0.2,          "fraction",  "District heating fraction"),
+    "FRSTORINIT":  (0.5,          "fixed",     "Initial storage fill fraction"),
+    "FDISTHEAT":   (0.2,          "fixed",     "District heating fraction"),
     # --- Heat pump and health ---
     "CPERFORM":    (4.0,          "cop",       "Heat pump COP (kWh-th/kWh-el)"),
     "HCDDADD":     (1.0,          "fixed",     "HDD/CDD daily minimum (numerical safeguard)"),
@@ -122,7 +122,7 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "FRCIHFLEX":   (0.5,          "fraction",  "Flexible industrial heat fraction"),
 }
 
-FACTOR_KEYS: List[str] = list(PARAM_REGISTRY.keys())
+FACTOR_KEYS: List[str] = [k for k, (_, cat, _) in PARAM_REGISTRY.items() if cat != "fixed"]
 
 _FORTRAN_SRC = Path("fortran/src/powerworld.f")
 

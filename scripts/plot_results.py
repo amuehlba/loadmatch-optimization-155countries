@@ -1531,7 +1531,7 @@ def _load_fortran_costs(region, save_dir, repo_root, best_row):
     Missing files → None values with a printed warning.
     """
     optimal_out  = save_dir / "fortran_optimal_run.out"
-    baseline_out = repo_root / "data" / "raw" / f"xxEGS-{region}"
+    baseline_out = repo_root / "data" / "raw" / f"xxEGS.{region}"
 
     opt_costs, opt_energy = {}, None
     bl_costs,  bl_energy  = {}, None
