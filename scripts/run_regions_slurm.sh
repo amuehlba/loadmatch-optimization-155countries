@@ -21,11 +21,11 @@
 #SBATCH --output=logs/slurm_%A_%a.out      # %A = job id, %a = array index
 #SBATCH --error=logs/slurm_%A_%a.err
 #SBATCH --array=0-1                        # 2 regions: index 0 and 1
-#SBATCH --time=3:00:00                    # wall-clock limit per region
+#SBATCH --time=48:00:00                   # wall-clock limit per region
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=37                 # must equal PARALLEL_EVALS below
-#SBATCH --mem=32G
+#SBATCH --mem=128G
 #SBATCH --partition=serc
 
 # ---- CONFIG -----------------------------------------------------------------
