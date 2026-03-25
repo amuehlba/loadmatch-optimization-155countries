@@ -19,3 +19,5 @@ fortran/bin/
 data/*
 
 fortran/fortran_factors.dat
+
+logs/*

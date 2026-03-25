@@ -13,6 +13,7 @@ from typing import Dict, Sequence, List, Tuple
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
 from scripts.parse_fortran_output import parse_and_save as _parse_and_save, _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN
+import scripts.plot_results as _plot_results
 
 MIN_FACTOR = 0.05
 FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
@@ -974,21 +975,26 @@ def run_workflow(
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
     paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
 
+    # ── Clear factor history so each run starts fresh ─────────────────────────
+    if paths["history_file"].exists():
+        paths["history_file"].unlink()
+        print("Cleared previous factor history: {}".format(paths["history_file"]))
+
     # ── Parse canonical baseline output if present ────────────────────────────
-    # The file data/raw/xxEGS-<region> is the Jacobson publication baseline.
+    # The file data/raw/xxEGS.<region> is the Jacobson publication baseline.
     # It is never modified by this workflow; we only read and summarise it.
-    _canonical_bl = BASE_RAW_DIR / f"xxEGS-{region}"
+    _canonical_bl = BASE_RAW_DIR / "xxEGS.{}".format(region)
     if _canonical_bl.exists():
         print(f"Parsing canonical baseline: {_canonical_bl.name}")
         _parse_and_save(
             _canonical_bl.read_text(),
             factors=None,
             region=region,
-            run_type="baseline",
-            out_path=paths["baseline_summary"],
+            run_type="canonical_baseline",
+            out_path=paths["results_dir"] / "canonical_baseline_summary.json",
         )
     else:
-        print(f"  [INFO] No canonical baseline found at {_canonical_bl} — skipping baseline summary.")
+        print(f"  [INFO] No canonical baseline found at {_canonical_bl} — skipping.")
 
     if baseline_start == "defaults":
         base_factors = extract_fortran_region_defaults(region)
@@ -1016,25 +1022,26 @@ def run_workflow(
                 _fp.unlink()
     else:
         write_factor_files(base_factors, paths)
-    stdout = run_fortran(region=region, paths=paths)
-    print("Fortran output written to {}".format(paths["fortran_out"]))
+    # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
+    # so that fortran_last_run.out is reserved for the final optimal evaluation.
+    baseline_paths = dict(paths)
+    baseline_paths["fortran_out"] = paths["fortran_baseline_out"]
+    stdout = run_fortran(region=region, paths=baseline_paths)
+    print("Baseline Fortran output written to {}".format(paths["fortran_baseline_out"]))
 
-    # Save baseline run to a dedicated file so GA evaluations don't overwrite it.
-    if baseline_start == "defaults":
-        paths["fortran_baseline_out"].write_text(stdout)
-        _parse_and_save(
-            stdout,
-            factors=base_factors,
-            region=region,
-            run_type="baseline",
-            out_path=paths["baseline_summary"],
+    # Parse and save the baseline summary for all warm-start modes.
+    _parse_and_save(
+        stdout,
+        factors=base_factors,
+        region=region,
+        run_type="baseline",
+        out_path=paths["baseline_summary"],
+    )
+    print(
+        "Compare {} against data/raw/xxEGS.{} to verify correctness.".format(
+            paths["fortran_baseline_out"], region
         )
-        print(
-            "Baseline run saved to {}.\n"
-            "Compare against data/raw/xxEGS-{} to verify correctness.".format(
-                paths["fortran_baseline_out"], region
-            )
-        )
+    )
 
     feasible_initial = check_feasibility(stdout)
     initial_cost = parse_cost(stdout)
@@ -1128,6 +1135,14 @@ def run_workflow(
             parse_cost(final_stdout), paths["optimal_summary"]
         )
     )
+
+    # ── Generate plots ────────────────────────────────────────────────────────
+    print("Generating plots for region {}...".format(region))
+    try:
+        _plot_results.main(region=region)
+        print("Plots saved to {}".format(paths["results_dir"]))
+    except Exception as exc:
+        print("  [WARN] Plot generation failed: {}".format(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -1267,7 +1282,7 @@ def parse_args():
         help="Starting point for the GA/HJ optimiser. Three options: "
         "(1) omit: run LP and stop if feasible; "
         "(2) 'defaults': use the hardcoded registry defaults (all factors=1), "
-        "run Fortran once as a region baseline, save output as data/raw/xxEGS-<REGION>, "
+        "run Fortran once as a region baseline, save output as data/raw/xxEGS.<REGION>, "
         "then start the optimiser — use this for a new region with no existing baseline; "
         "(3) PATH to a baseline_results.dat file: load factors from that file and skip LP. "
         "Default: %(default)s.",

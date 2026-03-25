@@ -1575,12 +1575,13 @@ def _load_fortran_costs(region, save_dir, repo_root, best_row):
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-def main():
+def main(region=None):
     parser = argparse.ArgumentParser(description="Generate LoadMatch publication figures.")
     parser.add_argument("--region", default="UNITED-STATES",
                         help="Region name (default: UNITED-STATES)")
     args = parser.parse_args()
-    region = args.region
+    if region is None:
+        region = args.region
 
     print(f"Region    : {region}")
     print(f"Repo root : {REPO_ROOT}")
