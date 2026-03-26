@@ -311,8 +311,9 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
                                ls=":", lw=1.2, alpha=0.9)
         ax.set_title(panel_title, fontsize=11, fontweight="bold")
         ax.set_xlabel("Generation")
-        ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-                  frameon=False, fontsize=7, ncol=1)
+        if ax.get_lines():
+            ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                      frameon=False, fontsize=7, ncol=1)
         ax.set_xlim(1, n_gens)
     fig.suptitle("Non-capacity parameter trajectories (best feasible per generation)\n"
                  "Dotted lines = baseline values", fontsize=13, fontweight="bold")
@@ -1168,7 +1169,7 @@ def _sankey_ribbon(ax, x0, x1, ly_bot, ly_top, ry_bot, ry_top, color, alpha=0.40
     ax.fill_between(x_arr, bot, top, color=color, alpha=alpha, lw=0)
 
 
-def fig13_sankey(out_path, save_dir, label="baseline scenario",
+def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
                  filename="fig13_sankey_energy_flow"):
     """
     3-tier Sankey: Generation → Storage intermediary → End uses & losses.
@@ -1475,7 +1476,7 @@ def fig13_sankey(out_path, save_dir, label="baseline scenario",
 
     ax.text(0.5 * (x_sl + x_dr + bar_w),
             1.07 * src_h,
-            f"Energy flow: {label} (TWh/year)",
+            f"Energy flow: {scenario_label} (TWh/year)",
             ha="center", va="bottom", fontsize=14, fontweight="bold")
 
     ax.text(x_sr + lpad, src_h * 1.01,
@@ -1714,13 +1715,13 @@ def main(region=None):
 
     _try_fig("Fig 13a — Energy flow Sankey (baseline)",
              fig13_sankey, baseline_out, save_dir,
-             label="baseline scenario",
+             scenario_label="baseline scenario",
              filename="fig13a_sankey_energy_flow_baseline")
 
     optimal_out = save_dir / "fortran_optimal_run.out"
     _try_fig("Fig 13b — Energy flow Sankey (GA-optimal)",
              fig13_sankey, optimal_out, save_dir,
-             label="GA-optimised scenario",
+             scenario_label="GA-optimised scenario",
              filename="fig13b_sankey_energy_flow_optimal")
 
     print(f"\nDone. All figures in: {save_dir}")
