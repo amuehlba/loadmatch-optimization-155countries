@@ -13,6 +13,8 @@
 #   squeue -u $USER
 #   tail -f logs/slurm_<jobid>_0.out          # UNITED-STATES
 #   tail -f logs/slurm_<jobid>_1.out          # CANADA
+#   tail -f logs/slurm_<jobid>_2.out          # EUROPE
+#   tail -f logs/slurm_<jobid>_3.out          # CHINA
 #   tail -f data/results_<region>/factor_history.log
 # ============================================================================
 
@@ -20,7 +22,7 @@
 #SBATCH --job-name=loadmatch-ga-regions
 #SBATCH --output=logs/slurm_%A_%a.out      # %A = job id, %a = array index
 #SBATCH --error=logs/slurm_%A_%a.err
-#SBATCH --array=0-1                        # 2 regions: index 0 and 1
+#SBATCH --array=0-3                        # 4 regions: index 0-3
 #SBATCH --time=48:00:00                   # wall-clock limit per region
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -33,6 +35,8 @@
 REGIONS=(
     "UNITED-STATES"
     "CANADA"
+    "EUROPE"
+    "CHINA"
 )
 
 # Number of parallel Fortran evaluations per job (= cpus-per-task above).
