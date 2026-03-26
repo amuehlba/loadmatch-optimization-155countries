@@ -101,10 +101,10 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "DAMCAPRAT":   (0.583,        "fixed",     "Hydro dam capacity / annual output"),
     "DAYBASHYD":   (360.0,        "days",      "Baseload hydro storage days"),
     # --- Thermal storage and demand response ---
-    "COOLSTES":    (0.4,          "fraction",  "Fraction AC from CW-STES vs ice"),
+    "COOLSTES":    (0.4,          "fixed",     "Fraction AC from CW-STES vs ice"),
     "PHSMIN":      (0.016,        "fixed",     "Min PHS nameplate capacity (TW)"),
-    "FHEATFLX":    (0.15,         "fraction",  "Flexible heat load fraction"),
-    "FCOLDFLX":    (0.15,         "fraction",  "Flexible cold load fraction"),
+    "FHEATFLX":    (0.15,         "fixed",     "Flexible heat load fraction"),
+    "FCOLDFLX":    (0.15,         "fixed",     "Flexible cold load fraction"),
     "FRSTORINIT":  (0.5,          "fixed",     "Initial storage fill fraction"),
     "FDISTHEAT":   (0.2,          "fixed",     "District heating fraction"),
     # --- Heat pump and health ---
@@ -119,7 +119,7 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "HBTDISCH":    (0.0,          "tw",        "Heat battery discharge rate (TW)"),
     "STORHHBT":    (15.0,         "hours",     "Heat battery storage hours"),
     # --- Industrial heat flexibility ---
-    "FRCIHFLEX":   (0.5,          "fraction",  "Flexible industrial heat fraction"),
+    "FRCIHFLEX":   (0.5,          "fixed",     "Flexible industrial heat fraction"),
 }
 
 FACTOR_KEYS: List[str] = [k for k, (_, cat, _) in PARAM_REGISTRY.items() if cat != "fixed"]

@@ -250,15 +250,16 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
         "cspturbfac": "CSP",
         "facsht":     "Solar thermal",
     }
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    fig, ax = plt.subplots(figsize=(10, 4.5))
     for col, label in CAP_LABELS.items():
         ax.plot(df_best["gen"], df_best[col], lw=1.4, label=label)
         bval = baseline_factors.get(col.upper())
         if bval is not None:
-            ax.axhline(bval, color=ax.get_lines()[-1].get_color(), ls=":", lw=0.8, alpha=0.5)
+            ax.axhline(bval, color=ax.get_lines()[-1].get_color(), ls=":", lw=1.5, alpha=0.9)
     ax.set_xlabel("Generation")
     ax.set_ylabel("Scaling factor (–)")
-    ax.legend(loc="upper right", ncol=2)
+    ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+              frameon=False, ncol=1)
     ax.set_title("Capacity-factor trajectories (best feasible per generation)")
     ax.set_ylim(bottom=0)
     ax.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
@@ -299,7 +300,7 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
             "mxhrdrm": "Max DR shift (h)",
         },
     }
-    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig, axes = plt.subplots(3, 2, figsize=(18, 12))
     for ax, (panel_title, param_dict) in zip(axes.flatten(), PANEL_GROUPS.items()):
         for col, label in param_dict.items():
             if col in df_best.columns:
@@ -307,10 +308,11 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
                 bval = baseline_factors.get(col.upper())
                 if bval is not None:
                     ax.axhline(bval, color=ax.get_lines()[-1].get_color(),
-                               ls=":", lw=0.7, alpha=0.5)
+                               ls=":", lw=1.2, alpha=0.9)
         ax.set_title(panel_title, fontsize=11, fontweight="bold")
         ax.set_xlabel("Generation")
-        ax.legend(loc="best", fontsize=7, ncol=2 if len(param_dict) > 3 else 1)
+        ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                  frameon=False, fontsize=7, ncol=1)
         ax.set_xlim(1, n_gens)
     fig.suptitle("Non-capacity parameter trajectories (best feasible per generation)\n"
                  "Dotted lines = baseline values", fontsize=13, fontweight="bold")
@@ -322,30 +324,50 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fig4_baseline_vs_ga(df_compare, save_dir):
-    active = df_compare[~df_compare["Locked"]].copy()
-    active["bl_norm"] = 1.0
-    active["ga_norm"] = active["GA optimal"] / active["Baseline"].replace(0, np.nan)
-    zero_bl = active["Baseline"].abs() < 1e-12
-    active.loc[zero_bl, "ga_norm"] = np.nan
+    df = df_compare.copy()
+    df["bl_norm"] = 1.0
+    df["ga_norm"] = df["GA optimal"] / df["Baseline"].replace(0, np.nan)
+    zero_bl = df["Baseline"].abs() < 1e-12
+    df.loc[zero_bl, "ga_norm"] = np.nan
 
-    fig, ax = plt.subplots(figsize=(9, 10))
-    y = np.arange(len(active))
+    fig, ax = plt.subplots(figsize=(9, max(8, len(df) * 0.28)))
+    y = np.arange(len(df))
     h = 0.35
-    ax.barh(y + h/2, active["bl_norm"], h, color="steelblue", edgecolor="black",
-            lw=0.4, label="Baseline", alpha=0.8)
-    ga_vals = active["ga_norm"].fillna(0).values
-    colours = ["coral" if v <= 1.0 else "salmon" for v in ga_vals]
-    ax.barh(y - h/2, ga_vals, h, color=colours, edgecolor="black",
-            lw=0.4, label="GA optimised", alpha=0.8)
+    for i, (_, r) in enumerate(df.iterrows()):
+        alpha_bl = 0.35 if r["Locked"] else 0.8
+        alpha_ga = 0.35 if r["Locked"] else 0.8
+        ax.barh(i + h/2, 1.0, h, color="steelblue", edgecolor="black",
+                lw=0.4, alpha=alpha_bl,
+                label="Baseline" if i == 0 else "_")
+        ga_v = r["ga_norm"] if not np.isnan(r["ga_norm"]) else 0
+        col = "lightgray" if r["Locked"] else ("coral" if ga_v <= 1.0 else "salmon")
+        ax.barh(i - h/2, ga_v, h, color=col, edgecolor="black",
+                lw=0.4, alpha=alpha_ga,
+                label="GA optimised" if i == 0 else
+                      ("Fixed (not optimised)" if r["Locked"] and i == next(
+                          (j for j, (_, rr) in enumerate(df.iterrows()) if rr["Locked"]), -1)
+                       else "_"))
     ax.axvline(1.0, color="black", ls="--", lw=0.8, alpha=0.5)
     ax.set_yticks(y)
-    ax.set_yticklabels([f"{r['Parameter']}  ({r['Category']})" for _, r in active.iterrows()],
-                       fontsize=8)
+    ax.set_yticklabels(
+        [f"{r['Parameter']}  ({r['Category']})" + ("  [fixed]" if r["Locked"] else "")
+         for _, r in df.iterrows()],
+        fontsize=7.5)
     ax.set_xlabel("Ratio to baseline value")
-    ax.set_title("Parameter values: GA-optimised / baseline\n(1.0 = unchanged from baseline)")
-    ax.legend(loc="upper right")
+    ax.set_title("Parameter values: GA-optimised / baseline\n"
+                 "(1.0 = unchanged; gray = fixed, not optimised)")
+    ax.legend(
+        handles=[
+            Patch(facecolor="steelblue", alpha=0.8, label="Baseline"),
+            Patch(facecolor="coral",     alpha=0.8, label="GA optimised"),
+            Patch(facecolor="lightgray", alpha=0.8, label="Fixed (not optimised)"),
+        ],
+        bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0, frameon=False, ncol=1)
     ax.invert_yaxis()
-    for i, (_, r) in enumerate(active.iterrows()):
+    ga_vals = df["ga_norm"].fillna(0).values
+    for i, (_, r) in enumerate(df.iterrows()):
+        if r["Locked"]:
+            continue
         ga_str = f"{r['GA optimal']:.3g}"
         pct = r["Change vs baseline (%)"]
         ax.annotate(f"{ga_str}  ({pct:+.0f}%)",
@@ -415,7 +437,8 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     ax_b.set_ylabel("Total capacity (GW)")
     ax_b.set_xticks(x)
     ax_b.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
-    ax_b.legend(loc="upper left", ncol=2, fontsize=7)
+    ax_b.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0,
+                frameon=False, ncol=1, fontsize=7)
     ax_b.set_ylim(bottom=0)
     ax_b2 = ax_b.twinx()
     costs_ms = [ms[1].get("cost_mn_bil_per_year", float("inf")) for ms in milestones]
@@ -439,11 +462,12 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
             (line,) = ax_c.plot(df_best["gen"], df_best[col], lw=1.4, label=label)
             bval = baseline_factors.get(col.upper())
             if bval is not None:
-                ax_c.axhline(bval, color=line.get_color(), ls=":", lw=0.9, alpha=0.6)
+                ax_c.axhline(bval, color=line.get_color(), ls=":", lw=1.5, alpha=0.9)
     ax_c.set_xlabel("Generation")
     ax_c.set_ylabel("Power capacity (TW)")
     ax_c.set_title("C)", loc="left", fontweight="bold")
-    ax_c.legend(fontsize=8, loc="upper right")
+    ax_c.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                frameon=False, fontsize=8, ncol=1)
     ax_c.set_xlim(1, n_gens)
     ax_c.set_ylim(bottom=0)
     ax_c.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
@@ -462,7 +486,7 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
             bval_e = (baseline_factors.get(col_pow.upper(), PARAM_REGISTRY[col_pow.upper()][0]) *
                       baseline_factors.get(col_dur.upper(), PARAM_REGISTRY[col_dur.upper()][0]) * scale)
             if bval_e > 0:
-                ax_d.axhline(bval_e, color=line.get_color(), ls=":", lw=0.9, alpha=0.6)
+                ax_d.axhline(bval_e, color=line.get_color(), ls=":", lw=1.5, alpha=0.9)
     ax_d.set_xlabel("Generation")
     ax_d.set_ylabel("Energy capacity (TWh)")
     ax_d.set_xlim(1, n_gens)
@@ -475,13 +499,14 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
                                   label="H\u2082 FC stor. (h)")
         bl_hfc = baseline_factors.get("STORHHFC", PARAM_REGISTRY["STORHHFC"][0])
         if bl_hfc > 0:
-            ax_d2.axhline(bl_hfc, color="gray", ls=":", lw=0.9, alpha=0.5)
+            ax_d2.axhline(bl_hfc, color="gray", ls=":", lw=1.5, alpha=0.9)
         ax_d2.set_ylabel("H\u2082 FC storage duration (h)", color="gray")
         ax_d2.tick_params(axis="y", labelcolor="gray")
         ax_d2.set_ylim(bottom=0)
     h1, l1 = ax_d.get_legend_handles_labels()
     h2, l2 = ax_d2.get_legend_handles_labels()
-    ax_d.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper right")
+    ax_d.legend(h1 + h2, l1 + l2, bbox_to_anchor=(1.08, 1), loc="upper left",
+                borderaxespad=0, frameon=False, fontsize=8, ncol=1)
     ax_d.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
                   fontsize=8, va="top", color="gray")
 
@@ -580,7 +605,6 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel(ylabel)
         ax.set_title(title, loc="left", fontweight="bold")
-        ax.legend(fontsize=8)
         ax.set_ylim(bottom=0)
         for i, (bv, gv) in enumerate(zip(bl_vals, ga_vals)):
             if bv > 1e-9:
@@ -606,6 +630,14 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
     ax3.set_xticklabels(se_labels + ["H\u2082 FC (h)"], rotation=35, ha="right", fontsize=8)
     ax3.set_xlim(-0.6, x_hfc + 0.6)
 
+    # Single shared legend beneath all subplots
+    leg_handles = [
+        Patch(facecolor=col_bl, alpha=0.85, edgecolor="black", lw=0.5, label="Baseline"),
+        Patch(facecolor=col_ga, alpha=0.85, edgecolor="black", lw=0.5, label="GA optimal"),
+    ]
+    fig.legend(handles=leg_handles, loc="lower center", ncol=2, frameon=False,
+               fontsize=10, bbox_to_anchor=(0.5, -0.02))
+
     fig.suptitle("GA-optimal vs baseline: generation and storage capacities",
                  fontsize=13, fontweight="bold")
     _save(fig, "fig7_capacity_comparison", save_dir)
@@ -615,7 +647,8 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
 # Figure 8 — Land area demand
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig8_land_area(best_row, baseline_factors, save_dir):
+def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES"):
+    region_label = region.replace("-", " ").title()
     def _ga(col):
         return float(best_row[col]) if col in best_row.index else PARAM_REGISTRY[col.upper()][0]
     def _bl(key):
@@ -656,30 +689,31 @@ def fig8_land_area(best_row, baseline_factors, save_dir):
     w = 0.38
     x = np.arange(len(labels))
 
-    # A) Per-technology (% of US land)
+    # A) Per-technology (% of land area)
+    seen_lt = set()
     for xi, (lbl, bla, gaa, lt) in enumerate(zip(labels, bl_areas, ga_areas, ltype)):
         color = LAND_TYPE_COLORS[lt]
         ax_a.bar(xi - w/2, bla / US_LAND_AREA_KM2 * 100, w, color=color,
-                 alpha=0.5, edgecolor="black", lw=0.5, label=lt)
+                 alpha=0.5, edgecolor="black", lw=0.5,
+                 label=lt.capitalize() if lt not in seen_lt else "_")
         ax_a.bar(xi + w/2, gaa / US_LAND_AREA_KM2 * 100, w, color=color,
                  alpha=0.95, edgecolor="black", lw=0.5)
+        seen_lt.add(lt)
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
-    ax_a.set_ylabel("Land area (% of US land)")
-    ax_a.set_title("A)  Per-technology land use (% of US land)", loc="left", fontweight="bold")
-    seen = set()
-    handles = []
-    for lt, c in LAND_TYPE_COLORS.items():
-        if lt in ltype and lt not in seen:
-            handles.append(Patch(facecolor=c, label=lt.capitalize()))
-            seen.add(lt)
-    handles += [
-        Patch(facecolor="gray", alpha=0.5, edgecolor="black", lw=0.5, label="Baseline"),
+    ax_a.set_ylabel(f"Land area (% of {region_label} land)")
+    ax_a.set_title(f"A)  Per-technology land use (% of {region_label} land)",
+                   loc="left", fontweight="bold")
+    land_type_handles = [h for h in ax_a.get_legend_handles_labels()[0]]
+    land_type_handles += [
+        Patch(facecolor="gray", alpha=0.5,  edgecolor="black", lw=0.5, label="Baseline"),
         Patch(facecolor="gray", alpha=0.95, edgecolor="black", lw=0.5, label="GA optimal"),
     ]
-    ax_a.legend(handles=handles, fontsize=8, loc="upper right")
+    ax_a.legend(handles=land_type_handles,
+                bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                frameon=False, fontsize=8, ncol=1)
 
-    # B) Stacked totals (% of US land) — footprint only (LANDALLTECH convention)
+    # B) Stacked totals (% of land area) — footprint only (LANDALLTECH convention)
     stacks = [
         ("Fixed infra", FIXED_TOTAL_KM2, FIXED_TOTAL_KM2, "#A0A0A0"),
         ("Utility PV",
@@ -702,8 +736,9 @@ def fig8_land_area(best_row, baseline_factors, save_dir):
         bot_g += gv
     ax_b.set_xticks([0, 1])
     ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
-    ax_b.set_ylabel("Land footprint (% of US land)")
-    ax_b.set_title("B)  Total LANDALLTECH footprint (% of US land)", loc="left", fontweight="bold")
+    ax_b.set_ylabel(f"Land footprint (% of {region_label} land)")
+    ax_b.set_title(f"B)  Total LANDALLTECH footprint (% of {region_label} land)",
+                   loc="left", fontweight="bold")
     ax_b.annotate(f"BL: {bl_total/US_LAND_AREA_KM2*100:.2f}%\n({bl_total:,.0f} km²)",
                   xy=(0, bl_total/US_LAND_AREA_KM2*100), xytext=(0.15, 0.2),
                   textcoords=("axes fraction", "axes fraction"),
@@ -712,9 +747,10 @@ def fig8_land_area(best_row, baseline_factors, save_dir):
                   xy=(1, ga_total/US_LAND_AREA_KM2*100), xytext=(0.75, 0.2),
                   textcoords=("axes fraction", "axes fraction"),
                   ha="left", fontsize=9)
-    ax_b.legend(fontsize=8, loc="upper right")
+    ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                frameon=False, fontsize=8, ncol=1)
 
-    fig.suptitle("Land area demand: baseline vs GA-optimal (LANDALLTECH convention)",
+    fig.suptitle(f"Land area demand: baseline vs GA-optimal (LANDALLTECH convention)",
                  fontsize=12, fontweight="bold")
     _save(fig, "fig8_area_comparison", save_dir)
 
@@ -753,8 +789,8 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
         if bv > 1e-3:
             pct = 100 * (ov - bv) / bv
             ax_a.annotate(f"{'+' if pct>=0 else ''}{pct:.1f}%",
-                          xy=(i + w/2, ov), xytext=(0, 3), textcoords="offset points",
-                          ha="center", va="bottom", fontsize=7, color="dimgray")
+                          xy=(i + w/2, ov), xytext=(4, 3), textcoords="offset points",
+                          ha="left", va="bottom", fontsize=6, color="dimgray")
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(groups, rotation=30, ha="right", fontsize=9)
     ax_a.set_ylabel(r"Annual cost (\$BIL yr$^{-1}$)")
@@ -765,7 +801,9 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
         + [Patch(facecolor="gray", alpha=0.55, edgecolor="black", lw=0.5, label="Baseline"),
            Patch(facecolor="gray", alpha=0.95, edgecolor="black", lw=0.5, label="GA optimal")]
     )
-    ax_a.legend(handles=legend_elems, fontsize=8, loc="upper right", ncol=2)
+    ax_a.legend(handles=legend_elems,
+                bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                frameon=False, fontsize=8, ncol=1)
 
     bot = np.zeros(2)
     for g, c in zip(groups, colors):
@@ -777,6 +815,7 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
         ax_b.annotate(f"${tot:.1f}B/yr", xy=(xi, tot), xytext=(0, 6),
                       textcoords="offset points", ha="center", va="bottom",
                       fontsize=10, fontweight="bold")
+    ax_b.set_ylim(0, max(bl_sum, opt_sum) * 1.18)
     ax_b.annotate(f"Savings: ${savings:.1f}B/yr\n({100*savings/bl_sum:.1f}%)",
                   xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top",
                   fontsize=9, color="dimgray",
@@ -785,7 +824,8 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
     ax_b.set_ylabel(r"Annual system cost (\$BIL yr$^{-1}$)")
     ax_b.set_title("B)  Total cost by category", loc="left", fontweight="bold")
-    ax_b.legend(fontsize=8, loc="lower right")
+    ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+                frameon=False, fontsize=8, ncol=1)
 
     fig.suptitle("Annual system cost: GA-optimised vs baseline",
                  fontsize=12, fontweight="bold")
@@ -850,7 +890,8 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
     ax_a.legend(
         handles=[Patch(facecolor=c, label=g, edgecolor="white", lw=0.4)
                  for g, _, c in reversed(STACK_ORDER)],
-        fontsize=8, loc="upper left", ncol=2)
+        fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left",
+        borderaxespad=0, frameon=False, ncol=1)
 
     # B) Wind% vs Solar% scatter with iso-lines
     def _wind_solar_shares(cap, total):
@@ -881,7 +922,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
     ax_b.text(2, y_max * 0.97, "Wind+Solar\nshare of total",
               ha="left", va="top", fontsize=7, color="gray", style="italic")
 
-    annot_offsets = [(5, 5), (5, -14), (5, 5)]
+    annot_offsets = [(5, 8), (5, 8), (5, 8)]
     for (label, cap, total, marker, color, ms), (dx, dy) in zip(pts_scatter, annot_offsets):
         w_, s_ = _wind_solar_shares(cap, total)
         ax_b.scatter(s_, w_, marker=marker, color=color, s=ms,
@@ -933,8 +974,8 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
               fontsize=12, fontweight="bold", color="#FF9900")
 
     for label, cap, marker, color, ms, (dx, dy) in [
-        ("Baseline 2050",   bl_cap_2050, "s", "steelblue", 90, ( 8, -16)),
-        ("GA optimal 2050", ga_cap_2050, "^", "coral",     90, ( 8,   8)),
+        ("Baseline 2050",   bl_cap_2050, "s", "steelblue", 90, ( 8,  8)),
+        ("GA optimal 2050", ga_cap_2050, "^", "coral",     90, ( 8,  8)),
     ]:
         wind_  = cap.get("onshore_wind", 0) + cap.get("offshore_wind", 0)
         solar_ = (cap.get("res_pv", 0) + cap.get("com_pv", 0) +
@@ -948,7 +989,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
             f"{label}\nW {wind_/tot_*100:.1f}%  S {solar_/tot_*100:.1f}%  "
             f"Wat {water_/tot_*100:.1f}%",
             xy=(xp, yp), xytext=(dx, dy), textcoords="offset points", fontsize=7.5,
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8, lw=0),
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.8, lw=0),
             arrowprops=dict(arrowstyle="-", color="gray", lw=0.6),
         )
 
@@ -1087,7 +1128,7 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
             g = sorted_groups[xi - 1]
             d = deltas[g]
             sign = "−" if d < 0 else "+"
-            ax.text(xi, top + 1 if d >= 0 else bot - 1,
+            ax.text(xi, top + 1 if d >= 0 else bot - 4,
                     f"{sign}${abs(d):.1f}B",
                     ha="center", va="bottom" if d >= 0 else "top",
                     fontsize=8, color="tab:green" if d < 0 else "tab:red")
@@ -1107,7 +1148,8 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
         Patch(facecolor="tab:green", label="Cost reduction"),
         Patch(facecolor="tab:red",   label="Cost increase"),
         Patch(facecolor="coral",     label="GA optimal total"),
-    ], fontsize=9, loc="upper right")
+    ], fontsize=9, bbox_to_anchor=(1.01, 1), loc="upper left",
+       borderaxespad=0, frameon=False, ncol=1)
 
     _save(fig, "fig12_cost_waterfall", save_dir)
 
@@ -1126,7 +1168,8 @@ def _sankey_ribbon(ax, x0, x1, ly_bot, ly_top, ry_bot, ry_top, color, alpha=0.40
     ax.fill_between(x_arr, bot, top, color=color, alpha=alpha, lw=0)
 
 
-def fig13_sankey(bl_out_path, save_dir):
+def fig13_sankey(out_path, save_dir, label="baseline scenario",
+                 filename="fig13_sankey_energy_flow"):
     """
     3-tier Sankey: Generation → Storage intermediary → End uses & losses.
 
@@ -1140,8 +1183,10 @@ def fig13_sankey(bl_out_path, save_dir):
     Electrical storage throughput is estimated assuming 90 % round-trip efficiency
     for battery+PHS; H₂ throughput is read directly from the output file.
     """
+    # keep old positional arg name working
+    bl_out_path = out_path
     if not bl_out_path.exists():
-        _skip("Fig 13", f"baseline output not found: {bl_out_path}")
+        _skip("Fig 13", f"output not found: {bl_out_path}")
         return
 
     text = bl_out_path.read_text()
@@ -1430,7 +1475,7 @@ def fig13_sankey(bl_out_path, save_dir):
 
     ax.text(0.5 * (x_sl + x_dr + bar_w),
             1.07 * src_h,
-            "Energy flow: baseline scenario (TWh/year)",
+            f"Energy flow: {label} (TWh/year)",
             ha="center", va="bottom", fontsize=14, fontweight="bold")
 
     ax.text(x_sr + lpad, src_h * 1.01,
@@ -1452,7 +1497,7 @@ def fig13_sankey(bl_out_path, save_dir):
             ha="left", va="center", fontsize=7, color="#333",
             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, lw=0.5))
 
-    _save(fig, "fig13_sankey_energy_flow", save_dir)
+    _save(fig, filename, save_dir)
     print(f"  Thermal storage: in={therm_in:,.0f} TWh  out={therm_out:,.0f} TWh  "
           f"losses={therm_stor_losses:,.0f} TWh")
     print(f"  Elec. storage:   in={elec_in:,.0f} TWh  out={elec_out:,.0f} TWh  "
@@ -1611,14 +1656,11 @@ def main(region=None):
         return baseline_factors.get(key, PARAM_REGISTRY[key][0])
 
     rows = []
-    for key in FACTOR_KEYS:
-        default_val = PARAM_REGISTRY[key][0]
-        category    = PARAM_REGISTRY[key][1]
-        desc        = PARAM_REGISTRY[key][2]
-        col         = key.lower()
-        ga_val      = _ga(col)
-        bl_val      = _bl(key)
-        locked      = key in DEFAULT_LOCKED
+    for key, (default_val, category, desc) in PARAM_REGISTRY.items():
+        col    = key.lower()
+        locked = category == "fixed"
+        ga_val = default_val if locked else _ga(col)
+        bl_val = _bl(key)
         rows.append({
             "Parameter": key, "Category": category, "Default": default_val,
             "Baseline": bl_val, "GA optimal": ga_val,
@@ -1655,7 +1697,7 @@ def main(region=None):
              fig7_capacity_comparison, best_row, baseline_factors, save_dir)
 
     _try_fig("Fig  8 — Land area demand",
-             fig8_land_area, best_row, baseline_factors, save_dir)
+             fig8_land_area, best_row, baseline_factors, save_dir, region=region)
 
     _try_fig("Fig  9 — Cost breakdown",
              fig9_cost_breakdown, bl_costs, opt_costs, bl_energy, opt_energy,
@@ -1670,8 +1712,16 @@ def main(region=None):
     _try_fig("Fig 12 — Cost waterfall",
              fig12_cost_waterfall, bl_costs, opt_costs, bl_energy, opt_energy, save_dir)
 
-    _try_fig("Fig 13 — Energy flow Sankey",
-             fig13_sankey, baseline_out, save_dir)
+    _try_fig("Fig 13a — Energy flow Sankey (baseline)",
+             fig13_sankey, baseline_out, save_dir,
+             label="baseline scenario",
+             filename="fig13a_sankey_energy_flow_baseline")
+
+    optimal_out = save_dir / "fortran_optimal_run.out"
+    _try_fig("Fig 13b — Energy flow Sankey (GA-optimal)",
+             fig13_sankey, optimal_out, save_dir,
+             label="GA-optimised scenario",
+             filename="fig13b_sankey_energy_flow_optimal")
 
     print(f"\nDone. All figures in: {save_dir}")
 
