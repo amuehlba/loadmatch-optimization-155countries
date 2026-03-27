@@ -44,6 +44,7 @@ from scripts.run_full_workflow import (
     CAPACITY_FACTOR_KEYS,
     DEFAULT_LOCKED,
     parse_baseline_factors,
+    load_baseline_start,
     extract_fortran_region_defaults,
 )
 
@@ -1926,13 +1927,19 @@ def main(region=None):
     print(f"Figures → {save_dir}\n")
 
     # ── Load baseline factors ─────────────────────────────────────────────────
-    baseline_path = REPO_ROOT / "data" / "raw" / "baseline_results.dat"
-    if baseline_path.exists():
-        baseline_factors = parse_baseline_factors(baseline_path)
-        print(f"Baseline factors: {len(baseline_factors)} parameters from {baseline_path.name}")
+    # Prefer region-specific file; fall back to Fortran-extracted defaults so
+    # fig2/fig4 always show the correct region's baseline, not the US file.
+    region_bl_path = REPO_ROOT / "data" / "raw" / f"baseline_results.{region}.dat"
+    legacy_bl_path = REPO_ROOT / "data" / "raw" / "baseline_results.dat"
+    if region_bl_path.exists():
+        baseline_factors = load_baseline_start(region_bl_path)
+        print(f"Baseline factors: loaded from {region_bl_path.name}")
+    elif legacy_bl_path.exists() and region == "UNITED-STATES":
+        baseline_factors = parse_baseline_factors(legacy_bl_path)
+        print(f"Baseline factors: loaded from {legacy_bl_path.name}")
     else:
-        baseline_factors = {}
-        print(f"  [WARN] baseline_results.dat not found — using registry defaults for all baselines")
+        baseline_factors = extract_fortran_region_defaults(region)
+        print(f"Baseline factors: extracted from powerworld.f for '{region}'")
 
     # ── Build comparison table (needed by Fig 4) ──────────────────────────────
     def _ga(col):
