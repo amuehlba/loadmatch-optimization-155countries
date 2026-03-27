@@ -11,6 +11,7 @@ raising an error.
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -43,6 +44,7 @@ from scripts.run_full_workflow import (
     CAPACITY_FACTOR_KEYS,
     DEFAULT_LOCKED,
     parse_baseline_factors,
+    extract_fortran_region_defaults,
 )
 
 # ── matplotlib publication defaults ───────────────────────────────────────────
@@ -1509,6 +1511,276 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Multi-region overview figures
+# ══════════════════════════════════════════════════════════════════════════════
+
+_REGION_SHORT = {
+    "UNITED-STATES": "US", "CANADA": "CA", "EUROPE": "EU", "CHINA": "CN",
+}
+_REGION_COLORS = ["#2E75B6", "#C00000", "#70AD47", "#FF9900", "#7030A0", "#00B0F0"]
+_S3_TERNARY = np.sqrt(3)
+
+
+def _rshort(region):
+    return _REGION_SHORT.get(region, region[:3])
+
+
+def _cap_shares(cap):
+    """Return (wind_frac, solar_frac, water_frac) of renewable-only total."""
+    wind  = cap.get("onshore_wind", 0) + cap.get("offshore_wind", 0)
+    solar = (cap.get("res_pv", 0) + cap.get("com_pv", 0) +
+             cap.get("utility_pv", 0) + cap.get("csp", 0))
+    water = cap.get("hydro", 0) + cap.get("wave", 0) + cap.get("tidal", 0)
+    tot = wind + solar + water
+    if tot < 1:
+        return 0., 0., 0.
+    return wind / tot, solar / tot, water / tot
+
+
+def _t2c_mod(wind, solar, water):
+    tot = wind + solar + water
+    if tot < 1e-9:
+        return 0.5, 0.0
+    w, s = wind / tot, solar / tot
+    return s + w * 0.5, w * _S3_TERNARY / 2
+
+
+def _build_cap(fac_fn):
+    return {
+        "onshore_wind":  fac_fn("faconwin")   * BASE_CAPACITIES_USA["onshore_wind"],
+        "offshore_wind": fac_fn("facoffwin")  * BASE_CAPACITIES_USA["offshore_wind"],
+        "res_pv":        fac_fn("facrespv")   * BASE_CAPACITIES_USA["res_rooftop_pv"],
+        "com_pv":        fac_fn("faccompv")   * BASE_CAPACITIES_USA["com_rooftop_pv"],
+        "utility_pv":    fac_fn("facutilpv")  * BASE_CAPACITIES_USA["utility_pv"],
+        "csp":           fac_fn("cspturbfac") * BASE_CAPACITIES_USA["csp"],
+        **FIXED_2050_MW,
+    }
+
+
+def fig_all_convergence(region_data, overview_dir):
+    """Relative cost reduction over GA generations for all regions."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    for (region, rd), color in zip(region_data.items(), _REGION_COLORS):
+        df_gen = rd["df_gen"]
+        baseline_cost = rd["baseline_cost"]
+        if baseline_cost is None or baseline_cost <= 0:
+            continue
+        valid = df_gen[df_gen["cum_best_cost"] < float("inf")].copy()
+        if valid.empty:
+            continue
+        reduction = (1 - valid["cum_best_cost"] / baseline_cost) * 100
+        ax.plot(valid["gen"], reduction, lw=2, color=color,
+                label=f"{_rshort(region)}  ({rd['optimal_cost']:.1f} → {baseline_cost:.1f} $B/yr)")
+
+    ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5)
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Cost reduction vs baseline (%)")
+    ax.set_title("GA cost convergence — all regions", fontweight="bold")
+    ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
+              frameon=False, ncol=1)
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    _save(fig, "figA1_all_regions_convergence", overview_dir)
+
+
+def fig_all_wind_solar(region_data, overview_dir):
+    """Wind vs solar share scatter for all regions (baseline + GA-optimal)."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Collect axis range
+    all_s, all_w = [], []
+    plot_pts = []
+    for (region, rd), color in zip(region_data.items(), _REGION_COLORS):
+        bl_cap  = rd["bl_cap"]
+        ga_cap  = rd["ga_cap"]
+        bl_tot  = sum(bl_cap.values())
+        ga_tot  = sum(ga_cap.values())
+        wbl, sbl, _ = _cap_shares(bl_cap)
+        wga, sga, _ = _cap_shares(ga_cap)
+        all_s += [sbl * 100, sga * 100]
+        all_w += [wbl * 100, wga * 100]
+        plot_pts.append((region, color, sbl * 100, wbl * 100, sga * 100, wga * 100))
+
+    x_max = max(all_s) * 1.15
+    y_max = max(all_w) * 1.20
+    sol_arr = np.linspace(0, x_max, 200)
+    for C in range(10, 110, 10):
+        wind_line = C - sol_arr
+        mask = (wind_line >= 0) & (wind_line <= y_max) & (sol_arr >= 0)
+        if mask.sum() > 1:
+            ax.plot(sol_arr[mask], wind_line[mask], color="lightgray", lw=0.8, zorder=1)
+            if C % 20 == 0:
+                ax.text(sol_arr[mask][0] + 2, wind_line[mask][0] * 0.98,
+                        f"{C}%", ha="right", va="center", fontsize=7, color="gray")
+
+    legend_handles = []
+    for region, color, sbl, wbl, sga, wga in plot_pts:
+        rs = _rshort(region)
+        ax.scatter(sbl, wbl, marker="s", color=color, s=80,
+                   edgecolors="black", lw=0.7, zorder=5)
+        ax.scatter(sga, wga, marker="^", color=color, s=80,
+                   edgecolors="black", lw=0.7, zorder=5)
+        ax.annotate(f"{rs}-BL", xy=(sbl, wbl), xytext=(4, 4),
+                    textcoords="offset points", fontsize=7,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.7, lw=0))
+        ax.annotate(f"{rs}-GA", xy=(sga, wga), xytext=(4, 4),
+                    textcoords="offset points", fontsize=7,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.7, lw=0))
+        legend_handles.append(Patch(facecolor=color, label=region.title()))
+
+    legend_handles += [
+        Line2D([0], [0], marker="s", color="gray", ms=7, lw=0,
+               markeredgecolor="black", label="Baseline"),
+        Line2D([0], [0], marker="^", color="gray", ms=7, lw=0,
+               markeredgecolor="black", label="GA optimal"),
+    ]
+    ax.set_xlabel("Solar share of 2050 installed capacity (%)")
+    ax.set_ylabel("Wind share of 2050 installed capacity (%)")
+    ax.set_xlim(0, x_max)
+    ax.set_ylim(0, y_max)
+    ax.set_title("Wind vs solar share — all regions", fontweight="bold")
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
+              borderaxespad=0, frameon=False, ncol=1)
+    _save(fig, "figA2_all_regions_wind_solar", overview_dir)
+
+
+def fig_all_ternary(region_data, overview_dir):
+    """Wind–Solar–Water ternary for all regions (baseline + GA-optimal)."""
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    # Draw triangle and grid
+    tri = np.array([[0, 0], [1, 0], [0.5, _S3_TERNARY / 2], [0, 0]])
+    ax.plot(tri[:, 0], tri[:, 1], "k-", lw=1.5, zorder=4)
+    for f in np.arange(0.2, 1.0, 0.2):
+        for p0, p1 in [
+            (_t2c_mod(f, 1-f, 0), _t2c_mod(f, 0, 1-f)),
+            (_t2c_mod(1-f, f, 0), _t2c_mod(0, f, 1-f)),
+            (_t2c_mod(1-f, 0, f), _t2c_mod(0, 1-f, f)),
+        ]:
+            ax.plot([p0[0], p1[0]], [p0[1], p1[1]],
+                    color="lightgray", lw=0.5, alpha=0.7, zorder=1)
+        x_w, y_w = _t2c_mod(f, 0, 1-f)
+        ax.text(x_w - 0.03, y_w, f"{int(f*100)}%", ha="right", va="center",
+                fontsize=6.5, color="#2E75B6")
+        xs, ys = _t2c_mod(1-f, f, 0)
+        ax.text(xs + 0.03, ys, f"{int(f*100)}%", ha="left", va="center",
+                fontsize=6.5, color="#FF9900")
+        ax.text(1 - f, -0.04, f"{int(f*100)}%", ha="center", va="top",
+                fontsize=6.5, color="#70AD47")
+
+    ax.text(0.5,  _S3_TERNARY/2 + 0.07, "Wind",  ha="center", va="bottom",
+            fontsize=12, fontweight="bold", color="#2E75B6")
+    ax.text(-0.06, -0.02, "Water", ha="right", va="top",
+            fontsize=12, fontweight="bold", color="#70AD47")
+    ax.text(1.06,  -0.02, "Solar", ha="left",  va="top",
+            fontsize=12, fontweight="bold", color="#FF9900")
+
+    legend_handles = []
+    for (region, rd), color in zip(region_data.items(), _REGION_COLORS):
+        rs = _rshort(region)
+        for cap, marker, lbl in [(rd["bl_cap"], "s", f"{rs}-BL"),
+                                  (rd["ga_cap"], "^", f"{rs}-GA")]:
+            wf, sf, watf = _cap_shares(cap)
+            xp, yp = _t2c_mod(wf, sf, watf)
+            ax.scatter(xp, yp, marker=marker, color=color, s=70,
+                       edgecolors="black", lw=0.7, zorder=5)
+            ax.annotate(lbl, xy=(xp, yp), xytext=(5, 4),
+                        textcoords="offset points", fontsize=7,
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.75, lw=0))
+        legend_handles.append(Patch(facecolor=color, label=region.title()))
+
+    legend_handles += [
+        Line2D([0], [0], marker="s", color="gray", ms=7, lw=0,
+               markeredgecolor="black", label="Baseline"),
+        Line2D([0], [0], marker="^", color="gray", ms=7, lw=0,
+               markeredgecolor="black", label="GA optimal"),
+    ]
+    ax.set_xlim(-0.18, 1.18)
+    ax.set_ylim(-0.12, _S3_TERNARY / 2 + 0.16)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title("Wind–Solar–Water ternary — all regions", fontweight="bold", y=1.02)
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
+              borderaxespad=0, frameon=False, ncol=1)
+    _save(fig, "figA3_all_regions_ternary", overview_dir)
+
+
+def plot_all_regions(repo_root):
+    """Load results for all available regions and generate overview figures."""
+    results_root = repo_root / "data" / "results_verification"
+    overview_dir = results_root  # save directly here, not in a region subfolder
+
+    # Collect all regions with completed results
+    region_data = {}
+    for region_dir in sorted(results_root.iterdir()):
+        if not region_dir.is_dir():
+            continue
+        log_path = region_dir / "factor_history.log"
+        if not log_path.exists():
+            continue
+        region = region_dir.name
+        print(f"\n  Loading {region} for overview figures...")
+        result = _load_ga_data(region, repo_root)
+        if result[0] is None:
+            continue
+        df_ga, df_gen, df_best, best_row, n_gens, records, save_dir = result
+
+        # Baseline cost from first log record; optimal from best GA row
+        baseline_cost = None
+        for rec in records:
+            c = rec.get("cost_mn_bil_per_year", float("inf"))
+            if c < float("inf"):
+                baseline_cost = c
+                break
+        # Also check canonical_baseline_summary.json if available
+        cbl_json = save_dir / "canonical_baseline_summary.json"
+        if cbl_json.exists():
+            try:
+                d = json.loads(cbl_json.read_text())
+                baseline_cost = d.get("cost_bn_per_yr", d.get("cost", baseline_cost))
+            except Exception:
+                pass
+
+        optimal_cost = float(best_row["cost_mn_bil_per_year"])
+
+        # Baseline and optimal capacity dicts
+        try:
+            bl_factors = extract_fortran_region_defaults(region)
+        except Exception:
+            bl_factors = {}
+
+        def _ga_fac(col):
+            return float(best_row[col]) if col in best_row.index else PARAM_REGISTRY[col.upper()][0]
+        def _bl_fac(col):
+            return bl_factors.get(col.upper(), PARAM_REGISTRY[col.upper()][0])
+
+        bl_cap = _build_cap(_bl_fac)
+        ga_cap = _build_cap(_ga_fac)
+
+        region_data[region] = {
+            "df_gen": df_gen,
+            "baseline_cost": baseline_cost,
+            "optimal_cost":  optimal_cost,
+            "bl_cap": bl_cap,
+            "ga_cap": ga_cap,
+        }
+
+    if len(region_data) < 2:
+        print(f"\n  [SKIP] Overview figures: need ≥2 regions with results "
+              f"(found {len(region_data)}).")
+        return
+
+    print(f"\n  Generating overview figures for {list(region_data.keys())}...")
+    _try_fig("FigA1 — All-region cost convergence",
+             fig_all_convergence, region_data, overview_dir)
+    _try_fig("FigA2 — All-region wind/solar scatter",
+             fig_all_wind_solar, region_data, overview_dir)
+    _try_fig("FigA3 — All-region ternary",
+             fig_all_ternary, region_data, overview_dir)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Data loading
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1723,6 +1995,9 @@ def main(region=None):
              fig13_sankey, optimal_out, save_dir,
              scenario_label="GA-optimised scenario",
              filename="fig13b_sankey_energy_flow_optimal")
+
+    # ── Overview figures across all regions ──────────────────────────────────
+    plot_all_regions(REPO_ROOT)
 
     print(f"\nDone. All figures in: {save_dir}")
 

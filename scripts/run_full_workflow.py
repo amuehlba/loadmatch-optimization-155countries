@@ -127,23 +127,35 @@ FACTOR_KEYS: List[str] = [k for k, (_, cat, _) in PARAM_REGISTRY.items() if cat 
 _FORTRAN_SRC = Path("fortran/src/powerworld.f")
 
 
-def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
-    """Parse powerworld.f for the hardcoded default factor values of a region.
+def _parse_hardcoded_int(text: str, name: str) -> int:
+    """Return the value of an active (uncommented) integer assignment in powerworld.f."""
+    # Match non-comment lines with exactly this variable name assigned
+    m = re.search(
+        r"^(?!C)\s+" + re.escape(name) + r"\s*=\s*(\d+)",
+        text,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    return int(m.group(1)) if m else 0
 
-    Finds the ELSEIF (GRIDUSE.EQ.'<REGION>') block and extracts the LAST
-    assignment for each key in PARAM_REGISTRY.  Using the last occurrence
-    mirrors Fortran's sequential execution: conditional override blocks
-    (IF (IFEGS.EQ.1), IF (IMERGH2.NE.2), etc.) appear at the end of the
-    region block and overwrite earlier assignments when active.  Since IFEGS
-    and IMERGH2 are hardcoded in powerworld.f, taking the last occurrence
-    gives the actual runtime value.  Any key not found in the block falls
-    back to the PARAM_REGISTRY default.
+
+def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
+    """Parse powerworld.f for the runtime default factor values of a region.
+
+    Correctly evaluates IF/ELSEIF/ELSE/ENDIF blocks conditioned on IMERGH2 and
+    IFEGS (both hardcoded in powerworld.f) so extracted values reflect actual
+    runtime behaviour.  Only the branch that executes at runtime contributes
+    assignments; the ELSE branch of an IF-chain is skipped when a prior branch
+    already matched.  Unknown conditionals (not on IMERGH2 or IFEGS) are
+    treated as always-active (conservative).  Any key not found falls back to
+    the PARAM_REGISTRY default.
     """
     text = _FORTRAN_SRC.read_text()
-    # Find the block for this region up to the next ELSEIF/ENDIF at the same level.
-    # Stop only at the next region's ELSEIF or the closing comment that marks
-    # the end of the entire region chain.  Do NOT stop at internal ENDIF blocks
-    # (e.g. IF (IMERGH2.NE.2) ... ENDIF) inside the region block.
+
+    # Global hardcoded control variables
+    imergh2 = _parse_hardcoded_int(text, "IMERGH2")
+    ifegs   = _parse_hardcoded_int(text, "IFEGS")
+
+    # Find the region block
     block_re = re.compile(
         r"GRIDUSE\.EQ\.'{}'\s*\)(.*?)"
         r"(?=ELSEIF\s*\(GRIDUSE\.EQ\.|C\s+ENDIF\s+GRIDUSE)".format(
@@ -160,25 +172,88 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
         return {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
 
     block = m.group(1)
-    result: Dict[str, float] = {}
-    for key in FACTOR_KEYS:
-        # Find ALL assignments KEY = <number> and take the LAST one.
-        # This mirrors Fortran's sequential execution order: a later override
-        # (e.g. IFEGS block) wins over an earlier unconditional assignment.
-        # Handles both "2.32" and Fortran trailing-dot form "2." or "60."
-        val_re = re.compile(
-            r"^\s+{}\s*=\s*([-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[Ee][-+]?\d+)?)".format(
-                re.escape(key)
-            ),
-            re.MULTILINE | re.IGNORECASE,
-        )
-        matches = val_re.findall(block)
-        if matches:
-            result[key] = float(matches[-1])  # last assignment wins
-        else:
-            result[key] = PARAM_REGISTRY[key][0]
 
-    found = [k for k in FACTOR_KEYS if k in result and result[k] != PARAM_REGISTRY[k][0]]
+    # --- branch-aware line-by-line parse ---
+    # cond_stack: list of [is_active, any_branch_matched]
+    #   is_active         – this frame's branch is currently executing
+    #   any_branch_matched – some branch in this IF-chain already matched
+    cond_stack: list = []
+
+    def _currently_active():
+        return all(frame[0] for frame in cond_stack)
+
+    # Regex for recognising known conditionals (IMERGH2 or IFEGS .EQ. N)
+    _IF_RE     = re.compile(r"IF\s*\(\s*(IMERGH2|IFEGS)\s*\.EQ\.\s*(\d+)\s*\)\s*THEN",
+                             re.IGNORECASE)
+    _ELIF_RE   = re.compile(r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.EQ\.\s*(\d+)\s*\)\s*THEN",
+                             re.IGNORECASE)
+    _ELSE_RE   = re.compile(r"^ELSE\b", re.IGNORECASE)
+    _ENDIF_RE  = re.compile(r"^ENDIF\b", re.IGNORECASE)
+    _ASSIGN_RE = re.compile(
+        r"^\s+([A-Za-z]\w*)\s*=\s*([-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[Ee][-+]?\d+)?)\s*$"
+    )
+
+    _ctrl_val = {"IMERGH2": imergh2, "IFEGS": ifegs}
+
+    result: Dict[str, float] = {}
+    _factor_set = set(FACTOR_KEYS)
+
+    for raw_line in block.splitlines():
+        stripped = raw_line.strip()
+
+        # Skip blank lines and Fortran comments
+        if not stripped or stripped.upper().startswith("C"):
+            continue
+
+        su = stripped.upper()
+
+        # IF (...) THEN on a known variable
+        mif = _IF_RE.match(su)
+        if mif:
+            var, val = mif.group(1).upper(), int(mif.group(2))
+            outer_ok = _currently_active()
+            branch_ok = outer_ok and (_ctrl_val[var] == val)
+            cond_stack.append([branch_ok, branch_ok])
+            continue
+
+        # ELSEIF (...) THEN on a known variable — must be inside an open frame
+        melif = _ELIF_RE.match(su)
+        if melif and cond_stack:
+            var, val = melif.group(1).upper(), int(melif.group(2))
+            already = cond_stack[-1][1]
+            outer_ok = all(frame[0] for frame in cond_stack[:-1])
+            branch_ok = outer_ok and (not already) and (_ctrl_val[var] == val)
+            if branch_ok:
+                cond_stack[-1][1] = True
+            cond_stack[-1][0] = branch_ok
+            continue
+
+        # ELSE — active only when no prior branch in this chain matched
+        if _ELSE_RE.match(su) and cond_stack:
+            already = cond_stack[-1][1]
+            outer_ok = all(frame[0] for frame in cond_stack[:-1])
+            cond_stack[-1][0] = outer_ok and not already
+            continue
+
+        # ENDIF — pop the innermost frame
+        if _ENDIF_RE.match(su) and cond_stack:
+            cond_stack.pop()
+            continue
+
+        # Assignment — record only when in an active context
+        if _currently_active():
+            ma = _ASSIGN_RE.match(raw_line)
+            if ma:
+                key = ma.group(1).upper()
+                if key in _factor_set:
+                    result[key] = float(ma.group(2))
+
+    # Fill any key not found in the block with the PARAM_REGISTRY default
+    for k in FACTOR_KEYS:
+        if k not in result:
+            result[k] = PARAM_REGISTRY[k][0]
+
+    found = [k for k in FACTOR_KEYS if result[k] != PARAM_REGISTRY[k][0]]
     print(
         "Extracted {} region-specific defaults from powerworld.f for '{}' "
         "(keys differ from registry: {}).".format(len(found), region, found or "none")
