@@ -3742,22 +3742,14 @@ C      GRIDLOAD   = 'CONUS2016-19'
        DAMCAPRAT  = DCRNORTHAM
        FDISTHEAT  = 0.2
 
-C FRCIHFLEX = 0.5; HDISSIP=1%,2%,3%  
-C       FACONWIN   = 1.75
-C       FACOFFWIN  = 0.95
-C       FACUTILPV  = 2.3 
-C       FACRESPV   = 0.45
-C       FACCOMPV   = 0.45
-C       CSPTURBFAC = 0.5 
-C       FACSHT     = 0.
-C Testing new factors
-       FACONWIN   = 2.847665
-       FACOFFWIN  = 0.1
-       FACUTILPV  = 1.432038
-       FACRESPV   = 0.1
-       FACCOMPV   = 0.1
-       CSPTURBFAC = 4.465003
-       FACSHT     = 0.1
+C FRCIHFLEX = 0.5; HDISSIP=1%,2%,3%
+       FACONWIN   = 1.75
+       FACOFFWIN  = 0.95
+       FACUTILPV  = 2.3
+       FACRESPV   = 0.45
+       FACCOMPV   = 0.45
+       CSPTURBFAC = 0.5
+       FACSHT     = 0.
 
        IF (IMERGH2.EQ.1) THEN
         BATDISCH   = 1.15  
