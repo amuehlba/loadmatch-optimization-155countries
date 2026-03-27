@@ -417,7 +417,7 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     ax_a.set_xticklabels([str(g) for g in tick_gens])
 
     # B) Capacity evolution stacked bar at milestones
-    milestones = [("LP (initial)", records[0])]
+    milestones = [("Baseline", records[0])]
     for r in records:
         if r.get("label", "").startswith("inflate") and r.get("feasible"):
             milestones.append(("First feasible", r))
@@ -441,17 +441,14 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     ax_b.set_ylabel("Total capacity (GW)")
     ax_b.set_xticks(x)
     ax_b.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
-    ax_b.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0,
-                frameon=False, ncol=1, fontsize=7)
+    ax_b.legend(loc="upper left", fontsize=7, framealpha=0.9,
+                edgecolor="lightgray", ncol=1)
     ax_b.set_ylim(bottom=0)
     ax_b2 = ax_b.twinx()
     costs_ms = [ms[1].get("cost_mn_bil_per_year", float("inf")) for ms in milestones]
     vi = [i for i, c in enumerate(costs_ms) if c < float("inf")]
     vc = [costs_ms[i] for i in vi]
     ax_b2.plot(vi, vc, "rD-", lw=2, ms=8, zorder=10)
-    for i, c in zip(vi, vc):
-        ax_b2.annotate(f"${c:.0f}B", (i, c), textcoords="offset points",
-                       xytext=(0, 7), ha="center", fontsize=7, color="red", fontweight="bold")
     ax_b2.set_ylabel(r"Annual cost (\$B yr$^{-1}$)", color="red")
     ax_b2.tick_params(axis="y", labelcolor="red")
     ax_b.set_title("B)", loc="left", fontweight="bold")
@@ -463,10 +460,7 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     }
     for col, label in STORAGE_POWER_COLS.items():
         if col in df_best.columns:
-            (line,) = ax_c.plot(df_best["gen"], df_best[col], lw=1.4, label=label)
-            bval = baseline_factors.get(col.upper())
-            if bval is not None:
-                ax_c.axhline(bval, color=line.get_color(), ls=":", lw=1.5, alpha=0.9)
+            ax_c.plot(df_best["gen"], df_best[col], lw=1.4, label=label)
     ax_c.set_xlabel("Generation")
     ax_c.set_ylabel("Power capacity (TW)")
     ax_c.set_title("C)", loc="left", fontweight="bold")
@@ -474,8 +468,6 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
                 frameon=False, fontsize=8, ncol=1)
     ax_c.set_xlim(1, n_gens)
     ax_c.set_ylim(bottom=0)
-    ax_c.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
-                  fontsize=8, va="top", color="gray")
 
     # D) Storage energy capacity trajectories
     STORAGE_ENERGY_FNS = {
@@ -486,11 +478,7 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     for label, (col_pow, col_dur, scale) in STORAGE_ENERGY_FNS.items():
         if col_pow in df_best.columns and col_dur in df_best.columns:
             vals = df_best[col_pow] * df_best[col_dur] * scale
-            (line,) = ax_d.plot(df_best["gen"], vals, lw=1.4, label=label)
-            bval_e = (baseline_factors.get(col_pow.upper(), PARAM_REGISTRY[col_pow.upper()][0]) *
-                      baseline_factors.get(col_dur.upper(), PARAM_REGISTRY[col_dur.upper()][0]) * scale)
-            if bval_e > 0:
-                ax_d.axhline(bval_e, color=line.get_color(), ls=":", lw=1.5, alpha=0.9)
+            ax_d.plot(df_best["gen"], vals, lw=1.4, label=label)
     ax_d.set_xlabel("Generation")
     ax_d.set_ylabel("Energy capacity (TWh)")
     ax_d.set_xlim(1, n_gens)
@@ -498,12 +486,8 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     ax_d.set_title("D)", loc="left", fontweight="bold")
     ax_d2 = ax_d.twinx()
     if "storhhfc" in df_best.columns:
-        (line_hfc,) = ax_d2.plot(df_best["gen"], df_best["storhhfc"],
-                                  color="gray", ls="--", lw=1.3,
-                                  label="H\u2082 FC stor. (h)")
-        bl_hfc = baseline_factors.get("STORHHFC", PARAM_REGISTRY["STORHHFC"][0])
-        if bl_hfc > 0:
-            ax_d2.axhline(bl_hfc, color="gray", ls=":", lw=1.5, alpha=0.9)
+        ax_d2.plot(df_best["gen"], df_best["storhhfc"],
+                   color="gray", ls="--", lw=1.3, label="H\u2082 FC stor. (h)")
         ax_d2.set_ylabel("H\u2082 FC storage duration (h)", color="gray")
         ax_d2.tick_params(axis="y", labelcolor="gray")
         ax_d2.set_ylim(bottom=0)
