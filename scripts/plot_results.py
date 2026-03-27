@@ -390,7 +390,8 @@ def _to_gw(record, factor_col, base_key):
 
 def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n_gens,
                             records, save_dir):
-    fig, axes = plt.subplots(2, 2, figsize=(15, 11))
+    fig, axes = plt.subplots(2, 2, figsize=(18, 11))
+    fig.subplots_adjust(wspace=0.45)
     ax_a, ax_b = axes[0, 0], axes[0, 1]
     ax_c, ax_d = axes[1, 0], axes[1, 1]
 
@@ -441,8 +442,8 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     ax_b.set_ylabel("Total capacity (GW)")
     ax_b.set_xticks(x)
     ax_b.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
-    ax_b.legend(loc="upper left", fontsize=7, framealpha=0.9,
-                edgecolor="lightgray", ncol=1)
+    ax_b.legend(bbox_to_anchor=(1.25, 1), loc="upper left", borderaxespad=0,
+                frameon=False, ncol=1, fontsize=7)
     ax_b.set_ylim(bottom=0)
     ax_b2 = ax_b.twinx()
     costs_ms = [ms[1].get("cost_mn_bil_per_year", float("inf")) for ms in milestones]
