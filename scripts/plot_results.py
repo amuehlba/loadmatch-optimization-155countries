@@ -840,7 +840,9 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
 # Figure 10 — Generation capacity mix and ternary diagram
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig10_capacity_mix(best_row, baseline_factors, save_dir):
+def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STATES"):
+    is_us = region == "UNITED-STATES"
+
     def _ga(col):
         return float(best_row[col]) if col in best_row.index else PARAM_REGISTRY[col.upper()][0]
     def _bl(key):
@@ -857,7 +859,6 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
             **FIXED_2050_MW,
         }
 
-    FOSSIL_2020_MW = TOTAL_2020_ALL_MW - sum(CAP_2020_MW.values())
     bl_cap_2050 = _build_cap_2050(lambda k: _bl(k.upper()))
     ga_cap_2050 = _build_cap_2050(lambda k: _ga(k))
     tot_bl_2050 = sum(bl_cap_2050.values())
@@ -873,11 +874,19 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
     fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(21, 7))
 
     # A) Absolute capacity stacked bars
-    scenarios_bar = [
-        ("2020\n(incl. fossil)",  TOTAL_2020_ALL_MW, {**CAP_2020_MW, "fossil": FOSSIL_2020_MW}),
-        ("Baseline\n2050",        tot_bl_2050,        bl_cap_2050),
-        ("GA optimal\n2050",      tot_ga_2050,        ga_cap_2050),
-    ]
+    # The 2020 reference bar is US-specific data; skip it for other regions.
+    if is_us:
+        FOSSIL_2020_MW = TOTAL_2020_ALL_MW - sum(CAP_2020_MW.values())
+        scenarios_bar = [
+            ("2020\n(incl. fossil)",  TOTAL_2020_ALL_MW, {**CAP_2020_MW, "fossil": FOSSIL_2020_MW}),
+            ("Baseline\n2050",        tot_bl_2050,        bl_cap_2050),
+            ("GA optimal\n2050",      tot_ga_2050,        ga_cap_2050),
+        ]
+    else:
+        scenarios_bar = [
+            ("Baseline\n2050",   tot_bl_2050, bl_cap_2050),
+            ("GA optimal\n2050", tot_ga_2050, ga_cap_2050),
+        ]
     for xi, (_, total, cap) in enumerate(scenarios_bar):
         bot = 0.0
         for _, keys, color in STACK_ORDER:
@@ -890,6 +899,11 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
     ax_a.set_xticks(np.arange(len(scenarios_bar)))
     ax_a.set_xticklabels([s[0] for s in scenarios_bar], fontsize=10)
     ax_a.set_ylabel("Installed nameplate capacity (GW)")
+    if not is_us:
+        ax_a.annotate("Note: GW values use US reference base capacities\n"
+                      "(region-specific 2020 data not available)",
+                      xy=(0.5, 0.01), xycoords="axes fraction",
+                      ha="center", va="bottom", fontsize=7, color="gray", style="italic")
     ax_a.set_title("A)  Generation capacity mix", loc="left", fontweight="bold")
     ax_a.legend(
         handles=[Patch(facecolor=c, label=g, edgecolor="white", lw=0.4)
@@ -904,10 +918,12 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
                  cap.get("utility_pv", 0) + cap.get("csp", 0)) / total * 100
         return wind, solar
 
-    pts_scatter = [
-        ("2020",            CAP_2020_MW, TOTAL_2020_ALL_MW, "o", "black",     80),
-        ("Baseline 2050",   bl_cap_2050, tot_bl_2050,       "s", "steelblue", 90),
-        ("GA optimal 2050", ga_cap_2050, tot_ga_2050,       "^", "coral",     90),
+    pts_scatter = []
+    if is_us:
+        pts_scatter.append(("2020", CAP_2020_MW, TOTAL_2020_ALL_MW, "o", "black", 80))
+    pts_scatter += [
+        ("Baseline 2050",   bl_cap_2050, tot_bl_2050, "s", "steelblue", 90),
+        ("GA optimal 2050", ga_cap_2050, tot_ga_2050, "^", "coral",     90),
     ]
     solar_vals = [_wind_solar_shares(c, t)[1] for _, c, t, *_ in pts_scatter]
     wind_vals  = [_wind_solar_shares(c, t)[0] for _, c, t, *_ in pts_scatter]
@@ -1004,8 +1020,11 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir):
     ax_c.set_title("C)  Wind–Solar–Water ternary (2050)", loc="left", fontweight="bold")
     ax_c.legend(fontsize=8, loc="upper right", framealpha=0.9, edgecolor="lightgray")
 
-    fig.suptitle("US generation capacity mix: 2050 baseline vs GA-optimal vs 2020",
-                 fontsize=12, fontweight="bold")
+    title = (f"{region} generation capacity mix: 2050 baseline vs GA-optimal vs 2020"
+             if is_us else
+             f"{region} generation capacity mix: 2050 baseline vs GA-optimal"
+             "\n(capacities scaled by US reference base — region-specific base not available)")
+    fig.suptitle(title, fontsize=12, fontweight="bold")
     _save(fig, "fig10_capacity_mix", save_dir)
 
 
@@ -1996,7 +2015,7 @@ def main(region=None):
              best_row, save_dir)
 
     _try_fig("Fig 10 — Capacity mix and ternary",
-             fig10_capacity_mix, best_row, baseline_factors, save_dir)
+             fig10_capacity_mix, best_row, baseline_factors, save_dir, region)
 
     _try_fig("Fig 11 — Population diversity heatmap",
              fig11_diversity_heatmap, df_ga, n_gens, best_row, save_dir)
