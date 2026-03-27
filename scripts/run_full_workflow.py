@@ -13,7 +13,8 @@ from typing import Dict, Sequence, List, Tuple
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
 from scripts.parse_fortran_output import parse_and_save as _parse_and_save, _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN
-import scripts.plot_results as _plot_results
+# plot_results is imported lazily inside run_workflow() to avoid a circular
+# import (plot_results imports PARAM_REGISTRY etc. from this module).
 
 MIN_FACTOR = 0.05
 FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
@@ -1240,6 +1241,7 @@ def run_workflow(
     # ── Generate plots ────────────────────────────────────────────────────────
     print("Generating plots for region {}...".format(region))
     try:
+        import scripts.plot_results as _plot_results  # lazy to avoid circular import
         _plot_results.main(region=region)
         print("Plots saved to {}".format(paths["results_dir"]))
     except Exception as exc:
