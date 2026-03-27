@@ -1515,14 +1515,35 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
 # ══════════════════════════════════════════════════════════════════════════════
 
 _REGION_SHORT = {
-    "UNITED-STATES": "US", "CANADA": "CA", "EUROPE": "EU", "CHINA": "CN",
+    "UNITED-STATES": "US",   "CANADA":       "CA",   "EUROPE":       "EU",
+    "CHINA":         "CN",   "INDIA":        "IN",   "JAPAN":        "JP",
+    "AUSTRALIA":     "AU",   "RUSSIA":       "RU",   "SOUTHEAST-ASIA": "SEA",
+    "AFRICA-EAST":   "AFR-E","AFRICA-NORTH": "AFR-N","AFRICA-SOUTH": "AFR-S",
+    "AFRICA-WEST":   "AFR-W","MIDEAST":      "ME",   "SOUTH-KOREA":  "KR",
+    "TAIWAN":        "TW",   "PHILIPPINES":  "PH",   "NEW-ZEALAND":  "NZ",
+    "CENTRAL-AMERIC":"CAMR", "CENTRAL-ASIA": "CASA", "SOUTHAM-NW":   "SA-NW",
+    "SOUTHAM-SE":    "SA-SE","MADAGASCAR":   "MDG",  "MAURITIUS":    "MUS",
+    "ICELAND":       "ISL",  "ISRAEL":       "IL",   "JAMAICA":      "JAM",
+    "CUBA":          "CUB",  "HAITI":        "HTI",
 }
-_REGION_COLORS = ["#2E75B6", "#C00000", "#70AD47", "#FF9900", "#7030A0", "#00B0F0"]
 _S3_TERNARY = np.sqrt(3)
+
+# 32-colour palette built from tab20 (20) + 12 hand-picked from tab20b that are
+# visually distinct from the tab20 set.  Supports all 29 world regions with room
+# to spare; colours cycle if more than 32 regions are ever added.
+_PALETTE = (
+    list(plt.cm.tab20.colors) +          # indices 0-19
+    [plt.cm.tab20b.colors[i] for i in    # indices 20-31 (12 from tab20b)
+     [0, 4, 8, 12, 16, 1, 5, 9, 13, 17, 2, 6]]
+)
+
+
+def _region_color(idx):
+    return _PALETTE[idx % len(_PALETTE)]
 
 
 def _rshort(region):
-    return _REGION_SHORT.get(region, region[:3])
+    return _REGION_SHORT.get(region, region[:4])
 
 
 def _cap_shares(cap):
@@ -1559,9 +1580,12 @@ def _build_cap(fac_fn):
 
 def fig_all_convergence(region_data, overview_dir):
     """Relative cost reduction over GA generations for all regions."""
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(13, 6))
 
-    for (region, rd), color in zip(region_data.items(), _REGION_COLORS):
+    _LINESTYLES = ["-", "--", "-.", ":"]
+    for idx, (region, rd) in enumerate(region_data.items()):
+        color = _region_color(idx)
+        ls = _LINESTYLES[idx // len(_PALETTE) % len(_LINESTYLES)]
         df_gen = rd["df_gen"]
         baseline_cost = rd["baseline_cost"]
         if baseline_cost is None or baseline_cost <= 0:
@@ -1570,15 +1594,15 @@ def fig_all_convergence(region_data, overview_dir):
         if valid.empty:
             continue
         reduction = (1 - valid["cum_best_cost"] / baseline_cost) * 100
-        ax.plot(valid["gen"], reduction, lw=2, color=color,
-                label=f"{_rshort(region)}  ({rd['optimal_cost']:.1f} → {baseline_cost:.1f} $B/yr)")
+        ax.plot(valid["gen"], reduction, lw=1.8, color=color, ls=ls,
+                label=f"{_rshort(region)}  ({baseline_cost:.1f} → {rd['optimal_cost']:.1f} $B/yr)")
 
     ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5)
     ax.set_xlabel("Generation")
     ax.set_ylabel("Cost reduction vs baseline (%)")
     ax.set_title("GA cost convergence — all regions", fontweight="bold")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-              frameon=False, ncol=1)
+              frameon=False, ncol=2, fontsize=8)
     ax.set_xlim(left=1)
     ax.set_ylim(bottom=0)
     _save(fig, "figA1_all_regions_convergence", overview_dir)
@@ -1586,16 +1610,15 @@ def fig_all_convergence(region_data, overview_dir):
 
 def fig_all_wind_solar(region_data, overview_dir):
     """Wind vs solar share scatter for all regions (baseline + GA-optimal)."""
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(11, 6))
 
     # Collect axis range
     all_s, all_w = [], []
     plot_pts = []
-    for (region, rd), color in zip(region_data.items(), _REGION_COLORS):
+    for idx, (region, rd) in enumerate(region_data.items()):
+        color = _region_color(idx)
         bl_cap  = rd["bl_cap"]
         ga_cap  = rd["ga_cap"]
-        bl_tot  = sum(bl_cap.values())
-        ga_tot  = sum(ga_cap.values())
         wbl, sbl, _ = _cap_shares(bl_cap)
         wga, sga, _ = _cap_shares(ga_cap)
         all_s += [sbl * 100, sga * 100]
@@ -1609,25 +1632,18 @@ def fig_all_wind_solar(region_data, overview_dir):
         wind_line = C - sol_arr
         mask = (wind_line >= 0) & (wind_line <= y_max) & (sol_arr >= 0)
         if mask.sum() > 1:
-            ax.plot(sol_arr[mask], wind_line[mask], color="lightgray", lw=0.8, zorder=1)
-            if C % 20 == 0:
-                ax.text(sol_arr[mask][0] + 2, wind_line[mask][0] * 0.98,
-                        f"{C}%", ha="right", va="center", fontsize=7, color="gray")
+            if C == 100:
+                ax.plot(sol_arr[mask], wind_line[mask], color="#888888", lw=1.2, zorder=1)
+            else:
+                ax.plot(sol_arr[mask], wind_line[mask], color="lightgray", lw=0.8, zorder=1)
 
     legend_handles = []
-    for region, color, sbl, wbl, sga, wga in plot_pts:
-        rs = _rshort(region)
+    for idx, (region, color, sbl, wbl, sga, wga) in enumerate(plot_pts):
         ax.scatter(sbl, wbl, marker="s", color=color, s=80,
                    edgecolors="black", lw=0.7, zorder=5)
         ax.scatter(sga, wga, marker="^", color=color, s=80,
                    edgecolors="black", lw=0.7, zorder=5)
-        ax.annotate(f"{rs}-BL", xy=(sbl, wbl), xytext=(4, 4),
-                    textcoords="offset points", fontsize=7,
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.7, lw=0))
-        ax.annotate(f"{rs}-GA", xy=(sga, wga), xytext=(4, 4),
-                    textcoords="offset points", fontsize=7,
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.7, lw=0))
-        legend_handles.append(Patch(facecolor=color, label=region.title()))
+        legend_handles.append(Patch(facecolor=color, label=_rshort(region)))
 
     legend_handles += [
         Line2D([0], [0], marker="s", color="gray", ms=7, lw=0,
@@ -1641,13 +1657,13 @@ def fig_all_wind_solar(region_data, overview_dir):
     ax.set_ylim(0, y_max)
     ax.set_title("Wind vs solar share — all regions", fontweight="bold")
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
-              borderaxespad=0, frameon=False, ncol=1)
+              borderaxespad=0, frameon=False, ncol=2, fontsize=8)
     _save(fig, "figA2_all_regions_wind_solar", overview_dir)
 
 
 def fig_all_ternary(region_data, overview_dir):
     """Wind–Solar–Water ternary for all regions (baseline + GA-optimal)."""
-    fig, ax = plt.subplots(figsize=(8, 7))
+    fig, ax = plt.subplots(figsize=(11, 7))
 
     # Draw triangle and grid
     tri = np.array([[0, 0], [1, 0], [0.5, _S3_TERNARY / 2], [0, 0]])
@@ -1677,18 +1693,14 @@ def fig_all_ternary(region_data, overview_dir):
             fontsize=12, fontweight="bold", color="#FF9900")
 
     legend_handles = []
-    for (region, rd), color in zip(region_data.items(), _REGION_COLORS):
-        rs = _rshort(region)
-        for cap, marker, lbl in [(rd["bl_cap"], "s", f"{rs}-BL"),
-                                  (rd["ga_cap"], "^", f"{rs}-GA")]:
+    for idx, (region, rd) in enumerate(region_data.items()):
+        color = _region_color(idx)
+        for cap, marker in [(rd["bl_cap"], "s"), (rd["ga_cap"], "^")]:
             wf, sf, watf = _cap_shares(cap)
             xp, yp = _t2c_mod(wf, sf, watf)
             ax.scatter(xp, yp, marker=marker, color=color, s=70,
                        edgecolors="black", lw=0.7, zorder=5)
-            ax.annotate(lbl, xy=(xp, yp), xytext=(5, 4),
-                        textcoords="offset points", fontsize=7,
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.75, lw=0))
-        legend_handles.append(Patch(facecolor=color, label=region.title()))
+        legend_handles.append(Patch(facecolor=color, label=_rshort(region)))
 
     legend_handles += [
         Line2D([0], [0], marker="s", color="gray", ms=7, lw=0,
@@ -1702,7 +1714,7 @@ def fig_all_ternary(region_data, overview_dir):
     ax.axis("off")
     ax.set_title("Wind–Solar–Water ternary — all regions", fontweight="bold", y=1.02)
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
-              borderaxespad=0, frameon=False, ncol=1)
+              borderaxespad=0, frameon=False, ncol=2, fontsize=8)
     _save(fig, "figA3_all_regions_ternary", overview_dir)
 
 
