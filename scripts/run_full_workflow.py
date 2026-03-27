@@ -145,9 +145,11 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     IFEGS (both hardcoded in powerworld.f) so extracted values reflect actual
     runtime behaviour.  Only the branch that executes at runtime contributes
     assignments; the ELSE branch of an IF-chain is skipped when a prior branch
-    already matched.  Unknown conditionals (not on IMERGH2 or IFEGS) are
-    treated as always-active (conservative).  Any key not found falls back to
-    the PARAM_REGISTRY default.
+    already matched.  Unknown conditionals (not on IMERGH2 or IFEGS, e.g.
+    FRCLDEGS, IFNEWLOAD) are treated as opaque blocks whose assignments are
+    ignored — this prevents nested sub-branches from overwriting values set by
+    the enclosing recognised branch.  Any key not found falls back to the
+    PARAM_REGISTRY default.
     """
     text = _FORTRAN_SRC.read_text()
 
@@ -179,6 +181,12 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     #   any_branch_matched – some branch in this IF-chain already matched
     cond_stack: list = []
 
+    # Tracks nesting depth of IF blocks whose condition variable is NOT in
+    # _ctrl_val (e.g. FRCLDEGS, IFNEWLOAD).  These opaque blocks are skipped:
+    # we neither push a cond_stack frame nor record assignments inside them,
+    # so they cannot overwrite values set by recognised IMERGH2/IFEGS branches.
+    unrecognized_depth: int = 0
+
     def _currently_active():
         return all(frame[0] for frame in cond_stack)
 
@@ -187,6 +195,10 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
                              re.IGNORECASE)
     _ELIF_RE   = re.compile(r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.EQ\.\s*(\d+)\s*\)\s*THEN",
                              re.IGNORECASE)
+    # Plain IF(...) THEN only (not ELSEIF) — used to open unrecognized blocks
+    _ANY_PLAIN_IF_RE = re.compile(r"^IF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
+    # Any ELSEIF(...) THEN — used to detect unrecognized continuation branches
+    _ANY_ELIF_RE = re.compile(r"^ELSEIF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
     _ELSE_RE   = re.compile(r"^ELSE\b", re.IGNORECASE)
     _ENDIF_RE  = re.compile(r"^ENDIF\b", re.IGNORECASE)
     _ASSIGN_RE = re.compile(
@@ -207,9 +219,9 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
 
         su = stripped.upper()
 
-        # IF (...) THEN on a known variable
+        # IF (...) THEN on a known variable — only when not inside an opaque block
         mif = _IF_RE.match(su)
-        if mif:
+        if mif and unrecognized_depth == 0:
             var, val = mif.group(1).upper(), int(mif.group(2))
             outer_ok = _currently_active()
             branch_ok = outer_ok and (_ctrl_val[var] == val)
@@ -218,7 +230,7 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
 
         # ELSEIF (...) THEN on a known variable — must be inside an open frame
         melif = _ELIF_RE.match(su)
-        if melif and cond_stack:
+        if melif and cond_stack and unrecognized_depth == 0:
             var, val = melif.group(1).upper(), int(melif.group(2))
             already = cond_stack[-1][1]
             outer_ok = all(frame[0] for frame in cond_stack[:-1])
@@ -228,20 +240,34 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
             cond_stack[-1][0] = branch_ok
             continue
 
-        # ELSE — active only when no prior branch in this chain matched
-        if _ELSE_RE.match(su) and cond_stack:
+        # Unknown plain IF(...) THEN — opens a new opaque block
+        if _ANY_PLAIN_IF_RE.match(su):
+            unrecognized_depth += 1
+            continue
+
+        # Unknown ELSEIF(...) THEN — continuation of an opaque block, no depth change
+        if _ANY_ELIF_RE.match(su):
+            continue
+
+        # ELSE — active only when no prior branch in this chain matched,
+        # and only when we are not inside an opaque unrecognized block
+        if _ELSE_RE.match(su) and unrecognized_depth == 0 and cond_stack:
             already = cond_stack[-1][1]
             outer_ok = all(frame[0] for frame in cond_stack[:-1])
             cond_stack[-1][0] = outer_ok and not already
             continue
 
-        # ENDIF — pop the innermost frame
-        if _ENDIF_RE.match(su) and cond_stack:
-            cond_stack.pop()
+        # ENDIF — close the innermost frame (unrecognized depth first, then cond_stack)
+        if _ENDIF_RE.match(su):
+            if unrecognized_depth > 0:
+                unrecognized_depth -= 1
+            elif cond_stack:
+                cond_stack.pop()
             continue
 
-        # Assignment — record only when in an active context
-        if _currently_active():
+        # Assignment — record only when in an active context and not inside
+        # an unrecognized (opaque) conditional block
+        if unrecognized_depth == 0 and _currently_active():
             ma = _ASSIGN_RE.match(raw_line)
             if ma:
                 key = ma.group(1).upper()
