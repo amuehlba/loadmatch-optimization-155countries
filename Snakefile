@@ -75,7 +75,8 @@ def _supply_input(wildcards):
     exists, the MissingInputException will point at the region-specific path
     so the error message is immediately actionable.
     """
-    region_file = Path(f"data/raw/wwssupworld.{wildcards.region}")
+    region      = str(wildcards.region).strip()
+    region_file = Path(f"data/raw/wwssupworld.{region}")
     raw_file    = Path("data/raw/wwssupworld.dat")
     if region_file.exists():
         return str(region_file)
@@ -92,16 +93,18 @@ def _baseline_start(wildcards):
       2. Pre-computed baseline results file  (data/raw/baseline_results.REGION.dat)
       3. 'defaults'       (use Fortran hardcoded region constants)
     """
+    region = str(wildcards.region).strip()
     if LP_WARMSTART:
-        return f"data/results_python/{wildcards.region}/fortran_factors.dat"
-    candidate = Path(f"data/raw/baseline_results.{wildcards.region}.dat")
+        return f"data/results_python/{region}/fortran_factors.dat"
+    candidate = Path(f"data/raw/baseline_results.{region}.dat")
     return str(candidate) if candidate.exists() else "defaults"
 
 
 def _lp_factors(wildcards):
     """Return LP factors file as a dependency only when lp_warmstart is enabled."""
+    region = str(wildcards.region).strip()
     if LP_WARMSTART:
-        return [f"data/results_python/{wildcards.region}/fortran_factors.dat"]
+        return [f"data/results_python/{region}/fortran_factors.dat"]
     return []
 
 # ---------------------------------------------------------------------------
