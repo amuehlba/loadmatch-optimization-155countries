@@ -98,26 +98,11 @@ def _baseline_start(wildcards):
     return str(candidate) if candidate.exists() else "defaults"
 
 
-def _run_ga_inputs(wildcards):
-    """Collect all inputs required by run_ga for a given region.
-
-    Always required:
-      - Fortran binary
-      - check_inputs sentinel
-      - preprocess_supply sentinel
-
-    When lp_warmstart: true, also requires the LP factors file (produced by
-    run_lp), so that run_ga can depend on it and Snakemake schedules run_lp
-    before run_ga.
-    """
-    inputs = {
-        "binary":        "fortran/bin/powerworld",
-        "checked":       f"data/results_verification/{wildcards.region}/.check_inputs_done",
-        "preprocessed":  f"data/results_verification/{wildcards.region}/.preprocess_done",
-    }
+def _lp_factors(wildcards):
+    """Return LP factors file as a dependency only when lp_warmstart is enabled."""
     if LP_WARMSTART:
-        inputs["lp_factors"] = f"data/results_python/{wildcards.region}/fortran_factors.dat"
-    return inputs
+        return [f"data/results_python/{wildcards.region}/fortran_factors.dat"]
+    return []
 
 # ---------------------------------------------------------------------------
 # Rule: all — top-level target
@@ -303,7 +288,10 @@ rule run_ga:
     plot_region rule.
     """
     input:
-        unpack(_run_ga_inputs),
+        binary       = "fortran/bin/powerworld",
+        checked      = "data/results_verification/{region}/.check_inputs_done",
+        preprocessed = "data/results_verification/{region}/.preprocess_done",
+        lp_factors   = _lp_factors,
     output:
         summary     = "data/results_verification/{region}/optimal_summary.json",
         bl_summary  = "data/results_verification/{region}/baseline_summary.json",
