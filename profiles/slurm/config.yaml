@@ -43,5 +43,5 @@ printshellcmds: true
 # Default resources for rules that do not declare their own.
 default-resources:
   - mem_mb=8000
-  - runtime="02:00:00"
+  - runtime=120
   - threads=1

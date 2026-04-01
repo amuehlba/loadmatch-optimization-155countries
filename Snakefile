@@ -125,7 +125,7 @@ rule compile_fortran:
         compile = config.get("fortran", {}).get("compile", True),
     resources:
         mem_mb  = 4000,
-        runtime = "00:30:00",
+        runtime = 30,
     threads: 1
     run:
         if params.compile:
@@ -175,7 +175,7 @@ rule check_inputs:
         "logs/check_inputs_{region}.log",
     resources:
         mem_mb  = 512,
-        runtime = "00:05:00",
+        runtime = 5,
     threads: 1
     shell:
         """
@@ -211,7 +211,7 @@ rule preprocess_supply:
         "logs/preprocess_{region}.log",
     resources:
         mem_mb  = 8000,
-        runtime = "01:00:00",
+        runtime = 60,
     threads: 1
     shell:
         """
@@ -246,7 +246,7 @@ rule run_lp:
         "logs/run_lp_{region}.log",
     resources:
         mem_mb  = 16000,
-        runtime = "02:00:00",
+        runtime = 120,
     threads: 1
     shell:
         """
@@ -295,7 +295,7 @@ rule run_ga:
         "logs/run_ga_{region}.log",
     resources:
         mem_mb  = 200000,
-        runtime = "48:00:00",
+        runtime = 2880,
     threads: GA_PARALLEL_EVALS
     shell:
         """
@@ -335,7 +335,7 @@ rule plot_region:
         "logs/plot_region_{region}.log",
     resources:
         mem_mb  = 8000,
-        runtime = "00:30:00",
+        runtime = 30,
     threads: 1
     shell:
         """
@@ -369,7 +369,7 @@ rule plot_overview:
         "logs/plot_overview.log",
     resources:
         mem_mb  = 8000,
-        runtime = "00:15:00",
+        runtime = 15,
     threads: 1
     shell:
         """
