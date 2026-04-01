@@ -41,7 +41,7 @@ configfile: "config/workflow.yaml"
 # ---------------------------------------------------------------------------
 # Region list — override in config/workflow.yaml or via --config regions=[…]
 # ---------------------------------------------------------------------------
-REGIONS = config.get("regions", [
+REGIONS = [r.strip() for r in config.get("regions", [
     "AFRICA-EAST",   "AFRICA-NORTH", "AFRICA-SOUTH",  "AFRICA-WEST",
     "AUSTRALIA",     "CANADA",       "CENTRAL-AMERIC","CENTRAL-ASIA",
     "CHINA",         "CUBA",         "EUROPE",         "HAITI",
@@ -50,7 +50,7 @@ REGIONS = config.get("regions", [
     "NEW-ZEALAND",   "PHILIPPINES",  "RUSSIA",         "SOUTHAM-NW",
     "SOUTHAM-SE",    "SOUTHEAST-ASIA","SOUTH-KOREA",   "TAIWAN",
     "UNITED-STATES",
-])
+])]
 
 # GA hyper-parameters (overridable in config/workflow.yaml → ga: section)
 GA                 = config.get("ga", {})
