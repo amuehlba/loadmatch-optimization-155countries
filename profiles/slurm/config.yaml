@@ -14,7 +14,7 @@
 
 # SLURM submission command.  Wildcards like {wildcards.region} are expanded
 # by Snakemake before passing to sbatch.
-cluster: >
+cluster: >-
   sbatch
   --parsable
   --job-name=lm-{rule}
