@@ -68,22 +68,6 @@ LP_WARMSTART       = config.get("lp_warmstart",  False)
 # Input helpers
 # ---------------------------------------------------------------------------
 
-def _supply_input(wildcards):
-    """Return whichever supply file form exists for this region.
-
-    Snakemake evaluates this at DAG-construction time.  If neither file
-    exists, the MissingInputException will point at the region-specific path
-    so the error message is immediately actionable.
-    """
-    region      = str(wildcards.region).strip()
-    region_file = Path(f"data/raw/wwssupworld.{region}")
-    raw_file    = Path("data/raw/wwssupworld.dat")
-    if region_file.exists():
-        return str(region_file)
-    if raw_file.exists():
-        return str(raw_file)
-    return str(region_file)   # triggers MissingInputException with a clear name
-
 
 def _baseline_start(wildcards):
     """Return --baseline-start argument for run_ga.
@@ -185,7 +169,6 @@ rule check_inputs:
         loadreg        = "data/raw/loadreg.COUNTRY2030GW",
         heatcooldd     = "data/raw/heatcooldd.dat",
         heatfrac       = "data/raw/heatfrac.dat",
-        supply         = _supply_input,
     output:
         sentinel = touch("data/results_verification/{region}/.check_inputs_done"),
     log:
