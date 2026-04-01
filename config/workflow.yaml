@@ -1,0 +1,82 @@
+# ============================================================================
+# config/workflow.yaml — Snakemake workflow configuration
+#
+# All values shown here are the defaults.  Override only what you need.
+# Pass a different config at runtime with:
+#   snakemake --configfile config/my_override.yaml ...
+# or individual values with:
+#   snakemake --config ga.population=50 ...
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Regions to run.  Remove entries to run a subset.
+# To run all 29, leave this list intact.
+# ---------------------------------------------------------------------------
+regions:
+  - AFRICA-EAST
+  - AFRICA-NORTH
+  - AFRICA-SOUTH
+  - AFRICA-WEST
+  - AUSTRALIA
+  - CANADA
+  - CENTRAL-AMERIC
+  - CENTRAL-ASIA
+  - CHINA
+  - CUBA
+  - EUROPE
+  - HAITI
+  - ICELAND
+  - INDIA
+  - ISRAEL
+  - JAMAICA
+  - JAPAN
+  - MADAGASCAR
+  - MAURITIUS
+  - MIDEAST
+  - NEW-ZEALAND
+  - PHILIPPINES
+  - RUSSIA
+  - SOUTHAM-NW
+  - SOUTHAM-SE
+  - SOUTHEAST-ASIA
+  - SOUTH-KOREA
+  - TAIWAN
+  - UNITED-STATES
+
+# ---------------------------------------------------------------------------
+# GA hyper-parameters — match the values in the SLURM scripts
+# ---------------------------------------------------------------------------
+ga:
+  parallel_evals:   24     # CPUs used per region (must match SLURM cpus-per-task)
+  population:       37     # GA population size
+  generations:      50     # Number of GA generations
+  mutation_rate:    0.15   # Per-factor mutation probability
+  mutation_scale:   0.2    # Relative mutation magnitude
+  elite_frac:       0.2    # Top fraction of population preserved each generation
+  mutation_cooling: 0.985  # Per-generation decay applied to rate and scale
+
+# ---------------------------------------------------------------------------
+# LP warm-start (optional, default: false)
+#
+# When true, the Snakemake run_lp rule runs the Pyomo LP optimiser BEFORE
+# the GA and uses the LP capacity factors as the GA starting point
+# (--baseline-start data/results_python/<REGION>/fortran_factors.dat).
+#
+# Requires a working LP solver in your Python environment:
+#   - Gurobi (requires licence): pip install gurobipy
+#   - HiGHS (open-source):       pip install highspy
+#
+# When false (default), the GA starts from:
+#   1. data/raw/baseline_results.<REGION>.dat  (if it exists)
+#   2. Fortran hardcoded region defaults       (otherwise)
+# ---------------------------------------------------------------------------
+lp_warmstart: false
+
+# ---------------------------------------------------------------------------
+# Fortran compilation
+# ---------------------------------------------------------------------------
+fortran:
+  # Set compile: true to recompile the Fortran binary before running.
+  # Requires gfortran on an x86_64 Linux node (not Apple Silicon).
+  # On Sherlock, compile inside an srun session first, then set false.
+  compile: false

@@ -1,10 +1,16 @@
 #!/bin/bash
 # ============================================================================
-# run_regions_slurm.sh
+# run_regions_slurm.sh  [LEGACY — kept for backward compatibility]
 #
-# SLURM job array that runs the LoadMatch GA optimizer for a list of regions.
-# One SLURM task per region.  Each task uses PARALLEL_EVALS CPUs for
-# intra-GA parallelism (matching the --parallel-evals argument).
+# SLURM job array for a manually specified list of 4 regions (US, CA, EU, CN).
+# Each task runs python -m scripts.run_full_workflow directly, without Snakemake.
+#
+# NOTE: The preferred approach is now to use the Snakemake workflow:
+#   sbatch scripts/run_all_regions_slurm.sh   (all 29 regions)
+#   sbatch scripts/run_select_regions_slurm.sh (10 curated regions)
+# The Snakemake scripts handle dependency tracking, restarts, and plotting
+# as separate pipeline steps.  This legacy script is kept for cases where
+# Snakemake is unavailable or a manual job array is preferred.
 #
 # Usage (from repo root on Sherlock login node):
 #   sbatch scripts/run_regions_slurm.sh
@@ -15,7 +21,7 @@
 #   tail -f logs/slurm_<jobid>_1.out          # CANADA
 #   tail -f logs/slurm_<jobid>_2.out          # EUROPE
 #   tail -f logs/slurm_<jobid>_3.out          # CHINA
-#   tail -f data/results_<region>/factor_history.log
+#   tail -f data/results_verification/<region>/factor_history.log
 # ============================================================================
 
 # ---- SLURM directives -------------------------------------------------------

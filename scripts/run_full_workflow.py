@@ -1072,6 +1072,7 @@ def run_workflow(
     ga_factor_scales=None,
     ga_magnitude_damping=0.5,
     baseline_start=None,
+    generate_plots=True,
 ):
     paths = _region_paths(region)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
@@ -1239,13 +1240,17 @@ def run_workflow(
     )
 
     # ── Generate plots ────────────────────────────────────────────────────────
-    print("Generating plots for region {}...".format(region))
-    try:
-        import scripts.plot_results as _plot_results  # lazy to avoid circular import
-        _plot_results.main(region=region)
-        print("Plots saved to {}".format(paths["results_dir"]))
-    except Exception as exc:
-        print("  [WARN] Plot generation failed: {}".format(exc))
+    if generate_plots:
+        print("Generating plots for region {}...".format(region))
+        try:
+            import scripts.plot_results as _plot_results  # lazy to avoid circular import
+            _plot_results.main(region=region)
+            print("Plots saved to {}".format(paths["results_dir"]))
+        except Exception as exc:
+            print("  [WARN] Plot generation failed: {}".format(exc))
+    else:
+        print("Skipping plot generation (--no-plots). "
+              "Run 'python -m scripts.plot_results --region {}' separately.".format(region))
 
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1395,31 @@ def parse_args():
         "(3) PATH to a baseline_results.dat file: load factors from that file and skip LP. "
         "Default: %(default)s.",
     )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        default=False,
+        help="Skip figure generation after the GA run. "
+             "Useful when plots are handled as a separate Snakemake rule. "
+             "Run 'python -m scripts.plot_results --region REGION' to generate figures later.",
+    )
+    parser.add_argument(
+        "--preprocess-only",
+        action="store_true",
+        default=False,
+        help="Run supply-file preprocessing (IFREWRITE=1,2) for the region and exit. "
+             "If data/raw/wwssupworld.<REGION> already exists the step is a no-op. "
+             "Used by the Snakemake preprocess_supply rule.",
+    )
+    parser.add_argument(
+        "--run-lp-only",
+        action="store_true",
+        default=False,
+        help="Run the LP optimisation and export factors to "
+             "data/results_python/<REGION>/fortran_factors.dat, then exit. "
+             "Requires a working LP solver (Gurobi/HiGHS). "
+             "Used by the Snakemake run_lp rule.",
+    )
     return parser.parse_args()
 
 def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
@@ -1408,6 +1438,30 @@ def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
 
 def main():
     args = parse_args()
+
+    # ── Early-exit modes used by Snakemake rules ──────────────────────────────
+
+    if args.preprocess_only:
+        # Run IFREWRITE=1,2 if wwssupworld.<REGION> is missing; otherwise no-op.
+        # The Snakemake preprocess_supply rule touches the sentinel on success.
+        preprocess_region(args.region)
+        return
+
+    if args.run_lp_only:
+        # Run LP optimisation + factor export, then exit.
+        # Output: data/results_python/<REGION>/fortran_factors.dat
+        paths = _region_paths(args.region)
+        paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
+        run_python_model.main(region=args.region, output_dir=paths["lp_summary"].parent)
+        export_fortran_factors.main([
+            "--region",  args.region,
+            "--summary", str(paths["lp_summary"]),
+            "--output",  str(paths["factor_result"]),
+        ])
+        print(f"LP factors written to: {paths['factor_result']}")
+        return
+
+    # ── Normal GA/HJ workflow ─────────────────────────────────────────────────
     factor_scales = _parse_factor_scales(args.ga_factor_scale)
     run_workflow(
         region=args.region,
@@ -1428,6 +1482,7 @@ def main():
         ga_factor_scales=factor_scales,
         ga_magnitude_damping=args.ga_magnitude_damping,
         baseline_start=args.baseline_start,
+        generate_plots=not args.no_plots,
     )
 
 

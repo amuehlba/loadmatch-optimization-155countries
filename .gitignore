@@ -21,3 +21,10 @@ data/*
 fortran/fortran_factors.dat
 
 logs/*
+
+.claude/
+
+.snakemake/
+
+# Gurobi auto-generated log (recreated on each LP run)
+gurobi.log

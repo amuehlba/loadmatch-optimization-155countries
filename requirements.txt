@@ -2,5 +2,9 @@ pyomo
 pandas>=2.0,<3.0
 numpy
 matplotlib
+seaborn
 h5py
 pytest
+# Workflow orchestration
+snakemake>=7.0,<8.0
+pulp==2.7.0        # snakemake 7.x requires pulp 2.7; pulp 2.8+ removed list_solvers

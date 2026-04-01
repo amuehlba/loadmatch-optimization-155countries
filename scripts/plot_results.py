@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")   # headless backend — works on HPC nodes without a display
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.patches import Patch
@@ -48,17 +49,34 @@ from scripts.run_full_workflow import (
     extract_fortran_region_defaults,
 )
 
-# ── matplotlib publication defaults ───────────────────────────────────────────
-plt.rcParams.update({
-    "figure.dpi": 150,
-    "savefig.dpi": 300,
-    "font.size": 10,
-    "axes.titlesize": 12,
-    "axes.labelsize": 11,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
-    "figure.constrained_layout.use": True,
+# ── matplotlib publication defaults (SKILL.md spec) ───────────────────────────
+OKABE_ITO = [
+    "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+    "#0072B2", "#D55E00", "#CC79A7", "#000000",
+]
+
+mpl.rcParams.update({
+    "font.family":       "sans-serif",
+    "font.sans-serif":   ["Helvetica", "Arial", "DejaVu Sans"],
+    "font.size":         8,
+    "axes.titlesize":    9,
+    "axes.labelsize":    8,
+    "xtick.labelsize":   7,
+    "ytick.labelsize":   7,
+    "legend.fontsize":   7,
+    "figure.titlesize":  10,
+    "lines.linewidth":   1.5,
+    "lines.markersize":  4,
+    "axes.linewidth":    0.8,
+    "xtick.major.width": 0.8,
+    "ytick.major.width": 0.8,
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
+    "axes.grid":         True,
+    "grid.linewidth":    0.4,
+    "grid.alpha":        0.4,
+    "savefig.dpi":       300,
+    "figure.dpi":        150,
 })
 
 
@@ -67,6 +85,7 @@ plt.rcParams.update({
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _save(fig, stem, save_dir):
+    fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(save_dir / f"{stem}.{ext}", bbox_inches="tight")
     plt.close(fig)
@@ -275,35 +294,31 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
+    # Only optimised (non-fixed) parameters; fixed-category params are excluded.
     PANEL_GROUPS = {
-        "(a) Storage duration (hours)": {
+        "A)  Storage duration (hours)": {
             "storhbat": "Battery", "storhphs": "PHS", "storhcold": "Cold TES",
             "storhhwat": "Hot-water TES", "hcharcsp": "CSP charge",
             "storhhfc": "H$_2$ elec.", "storhhbt": "Heat battery",
         },
-        "(b) Storage duration (days)": {
+        "B)  Storage duration (days)": {
             "storugdys": "UTES seasonal", "dayh2stor": "H$_2$ storage",
             "daybashyd": "Baseload hydro",
         },
-        "(c) Power rates (TW)": {
+        "C)  Power rates (TW)": {
             "batdisch": "Battery disch.", "fcdisch": "H$_2$ FC disch.",
-            "fccharg": "Electrolyser", "hbtdisch": "Heat bat. disch.", "phsmin": "PHS minimum",
+            "fccharg": "Electrolyser", "hbtdisch": "Heat bat. disch.",
         },
-        "(d) Fractions (0–1)": {
-            "coolstes": "AC from CW-STES", "fheatflx": "Flex. heat",
-            "fcoldflx": "Flex. cold", "frstorinit": "Init. storage fill",
-            "fdistheat": "District heating", "frcihflex": "Flex. ind. heat",
-        },
-        "(e) Ratios and factors": {
+        "D)  Ratios and factors": {
             "cspstorgat": "CSP stor. ratio", "ugfac": "UTES rate fac.",
             "hwfac": "HW-STES rate fac.", "hpturbrat": "Hydro turb. ratio",
-            "damcaprat": "Dam cap. ratio", "cperform": "Heat pump COP",
+            "cperform": "Heat pump COP",
         },
-        "(f) Demand response": {
+        "E)  Demand response": {
             "mxhrdrm": "Max DR shift (h)",
         },
     }
-    fig, axes = plt.subplots(3, 2, figsize=(18, 12))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 10))
     for ax, (panel_title, param_dict) in zip(axes.flatten(), PANEL_GROUPS.items()):
         for col, label in param_dict.items():
             if col in df_best.columns:
@@ -312,14 +327,14 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
                 if bval is not None:
                     ax.axhline(bval, color=ax.get_lines()[-1].get_color(),
                                ls=":", lw=1.2, alpha=0.9)
-        ax.set_title(panel_title, fontsize=11, fontweight="bold")
+        ax.set_title(panel_title, fontweight="bold")
         ax.set_xlabel("Generation")
         if ax.get_lines():
             ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                       frameon=False, fontsize=7, ncol=1)
         ax.set_xlim(1, n_gens)
-    fig.suptitle("Non-capacity parameter trajectories (best feasible per generation)\n"
-                 "Dotted lines = baseline values", fontsize=13, fontweight="bold")
+    # Hide unused 6th panel
+    axes.flatten()[-1].set_visible(False)
     _save(fig, "fig3_parameter_trajectories", save_dir)
 
 
@@ -328,13 +343,16 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fig4_baseline_vs_ga(df_compare, save_dir):
-    df = df_compare.copy()
+    # Sort: unlocked (optimised) params first, fixed params at bottom.
+    df_unlocked = df_compare[~df_compare["Locked"]].copy()
+    df_locked   = df_compare[df_compare["Locked"]].copy()
+    df = pd.concat([df_unlocked, df_locked], ignore_index=True)
     df["bl_norm"] = 1.0
     df["ga_norm"] = df["GA optimal"] / df["Baseline"].replace(0, np.nan)
     zero_bl = df["Baseline"].abs() < 1e-12
     df.loc[zero_bl, "ga_norm"] = np.nan
 
-    fig, ax = plt.subplots(figsize=(9, max(8, len(df) * 0.28)))
+    fig, ax = plt.subplots(figsize=(10, max(8, len(df) * 0.28)))
     y = np.arange(len(df))
     h = 0.35
     for i, (_, r) in enumerate(df.iterrows()):
@@ -377,6 +395,9 @@ def fig4_baseline_vs_ga(df_compare, save_dir):
         ax.annotate(f"{ga_str}  ({pct:+.0f}%)",
                     xy=(max(ga_vals[i], 0) + 0.02, i - h/2),
                     fontsize=7, va="center", color="dimgray")
+    # Extra x-room so annotations don't clip.
+    max_ga = np.nanmax(ga_vals) if len(ga_vals) > 0 else 1.0
+    ax.set_xlim(left=0, right=max(max_ga * 1.35, 2.0))
     _save(fig, "fig4_baseline_vs_ga", save_dir)
 
 
@@ -390,9 +411,7 @@ def _to_gw(record, factor_col, base_key):
 
 def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n_gens,
                             records, save_dir):
-    fig, axes = plt.subplots(2, 2, figsize=(18, 11), gridspec_kw={"wspace": 0.45})
-    ax_a, ax_b = axes[0, 0], axes[0, 1]
-    ax_c, ax_d = axes[1, 0], axes[1, 1]
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(16, 6))
 
     # A) Population cost distribution per generation
     gen_costs, gen_positions = [], []
@@ -403,10 +422,11 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
             gen_costs.append(feas.values)
             gen_positions.append(g)
     ax_a.boxplot(gen_costs, positions=gen_positions, widths=0.6, patch_artist=True,
-                 showfliers=False, boxprops=dict(facecolor="lightblue", alpha=0.7),
-                 medianprops=dict(color="navy", lw=1.5))
+                 showfliers=False, boxprops=dict(facecolor=OKABE_ITO[1], alpha=0.5),
+                 medianprops=dict(color=OKABE_ITO[4], lw=1.5))
     valid = df_gen[df_gen["cum_best_cost"] < float("inf")]
-    ax_a.plot(valid["gen"], valid["cum_best_cost"], "r-", lw=2, label="Cumulative best", zorder=5)
+    ax_a.plot(valid["gen"], valid["cum_best_cost"], "-", color=OKABE_ITO[5], lw=2,
+              label="Cumulative best", zorder=5)
     ax_a.set_xlabel("Generation")
     ax_a.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
     ax_a.set_title("A)", loc="left", fontweight="bold")
@@ -416,7 +436,9 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     ax_a.set_xticks(tick_gens)
     ax_a.set_xticklabels([str(g) for g in tick_gens])
 
-    # B) Capacity evolution stacked bar at milestones
+    # B) Capacity evolution stacked bars at milestones:
+    #    Left bars (x - 0.22): generation capacity (GW, left y-axis)
+    #    Right bars (x + 0.22): energy storage capacity (TWh, right y-axis)
     milestones = [("Baseline", records[0])]
     for r in records:
         if r.get("label", "").startswith("inflate") and r.get("feasible"):
@@ -431,72 +453,50 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
 
     n_ms = len(milestones)
     x = np.arange(n_ms)
+    bar_w = 0.38
     cmap_b = plt.cm.Set2(np.linspace(0, 1, len(FACTOR_TO_BASE)))
-    bottom = np.zeros(n_ms)
+
+    # Generation capacity bars (GW) — left axis
+    bottom_gw = np.zeros(n_ms)
     for j, (fcol, (bkey, tname)) in enumerate(FACTOR_TO_BASE.items()):
         caps = np.array([_to_gw(ms[1], fcol, bkey) for ms in milestones])
-        ax_b.bar(x, caps, 0.55, bottom=bottom, label=tname,
+        ax_b.bar(x - bar_w / 2, caps, bar_w, bottom=bottom_gw, label=tname,
                  color=cmap_b[j], edgecolor="white", lw=0.4)
-        bottom += caps
-    ax_b.set_ylabel("Total capacity (GW)")
+        bottom_gw += caps
+    ax_b.set_ylabel("Generation capacity (GW)")
+    ax_b.set_ylim(0, bottom_gw.max() * 1.15)
+
+    # Energy storage bars (TWh) — right axis
+    STORAGE_TWH = [
+        ("Battery",           lambda r: r.get("batdisch", 0) * r.get("storhbat", 0)),
+        ("H\u2082 long-term", lambda r: r.get("fcdisch", 0) * r.get("dayh2stor", 0) * 24),
+        ("Heat battery",      lambda r: r.get("hbtdisch", 0) * r.get("storhhbt", 0)),
+    ]
+    ax_b2 = ax_b.twinx()
+    ax_b2.spines["right"].set_visible(True)
+    bottom_twh = np.zeros(n_ms)
+    stor_colors = [OKABE_ITO[0], OKABE_ITO[2], OKABE_ITO[5]]
+    for k, (sname, sfn) in enumerate(STORAGE_TWH):
+        vals = np.array([sfn(ms[1]) for ms in milestones])
+        ax_b2.bar(x + bar_w / 2, vals, bar_w, bottom=bottom_twh,
+                  label=sname, color=stor_colors[k], edgecolor="white", lw=0.4,
+                  hatch="//")
+        bottom_twh += vals
+    ax_b2.set_ylabel("Energy storage (TWh)")
+    ax_b2.set_ylim(0, bottom_twh.max() * 1.15 if bottom_twh.max() > 0 else 1)
+
     ax_b.set_xticks(x)
     ax_b.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
-    ax_b.legend(bbox_to_anchor=(1.15, 1), loc="upper left", borderaxespad=0,
-                frameon=False, ncol=1, fontsize=7)
-    ax_b.set_ylim(0, bottom.max() * 1.12)
-    ax_b2 = ax_b.twinx()
-    costs_ms = [ms[1].get("cost_mn_bil_per_year", float("inf")) for ms in milestones]
-    vi = [i for i, c in enumerate(costs_ms) if c < float("inf")]
-    vc = [costs_ms[i] for i in vi]
-    ax_b2.plot(vi, vc, "rD-", lw=2, ms=8, zorder=10)
-    ax_b2.set_ylabel(r"Annual cost (\$B yr$^{-1}$)", color="red")
-    ax_b2.tick_params(axis="y", labelcolor="red")
     ax_b.set_title("B)", loc="left", fontweight="bold")
 
-    # C) Storage power capacity trajectories
-    STORAGE_POWER_COLS = {
-        "batdisch": "Battery", "fcdisch": "H\u2082 FC",
-        "fccharg": "Electrolyser", "hbtdisch": "Heat battery",
-    }
-    for col, label in STORAGE_POWER_COLS.items():
-        if col in df_best.columns:
-            ax_c.plot(df_best["gen"], df_best[col], lw=1.4, label=label)
-    ax_c.set_xlabel("Generation")
-    ax_c.set_ylabel("Power capacity (TW)")
-    ax_c.set_title("C)", loc="left", fontweight="bold")
-    ax_c.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-                frameon=False, fontsize=8, ncol=1)
-    ax_c.set_xlim(1, n_gens)
-    ax_c.set_ylim(bottom=0)
-
-    # D) Storage energy capacity trajectories
-    STORAGE_ENERGY_FNS = {
-        "Battery":           ("batdisch", "storhbat",   1),
-        "H\u2082 long-term": ("fcdisch",  "dayh2stor", 24),
-        "Heat battery":      ("hbtdisch", "storhhbt",   1),
-    }
-    for label, (col_pow, col_dur, scale) in STORAGE_ENERGY_FNS.items():
-        if col_pow in df_best.columns and col_dur in df_best.columns:
-            vals = df_best[col_pow] * df_best[col_dur] * scale
-            ax_d.plot(df_best["gen"], vals, lw=1.4, label=label)
-    ax_d.set_xlabel("Generation")
-    ax_d.set_ylabel("Energy capacity (TWh)")
-    ax_d.set_xlim(1, n_gens)
-    ax_d.set_ylim(bottom=0)
-    ax_d.set_title("D)", loc="left", fontweight="bold")
-    ax_d2 = ax_d.twinx()
-    if "storhhfc" in df_best.columns:
-        ax_d2.plot(df_best["gen"], df_best["storhhfc"],
-                   color="gray", ls="--", lw=1.3, label="H\u2082 FC stor. (h)")
-        ax_d2.set_ylabel("H\u2082 FC storage duration (h)", color="gray")
-        ax_d2.tick_params(axis="y", labelcolor="gray")
-        ax_d2.set_ylim(bottom=0)
-    h1, l1 = ax_d.get_legend_handles_labels()
-    h2, l2 = ax_d2.get_legend_handles_labels()
-    ax_d.legend(h1 + h2, l1 + l2, bbox_to_anchor=(1.08, 1), loc="upper left",
-                borderaxespad=0, frameon=False, fontsize=8, ncol=1)
-    ax_d.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
-                  fontsize=8, va="top", color="gray")
+    # Combined legend: generation sources + storage types
+    gen_handles = [Patch(facecolor=cmap_b[j], label=tn, edgecolor="white")
+                   for j, (_, (_, tn)) in enumerate(FACTOR_TO_BASE.items())]
+    stor_handles = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
+                    for k, (sn, _) in enumerate(STORAGE_TWH)]
+    ax_b.legend(handles=gen_handles + stor_handles,
+                bbox_to_anchor=(1.18, 1), loc="upper left", borderaxespad=0,
+                frameon=False, ncol=1, fontsize=7)
 
     _save(fig, "fig5_cost_and_capacity", save_dir)
 
@@ -531,7 +531,7 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir):
         Patch(facecolor="tab:green", label="CV < 5% (well constrained)"),
         Patch(facecolor="tab:orange", label="5% ≤ CV ≤ 20%"),
         Patch(facecolor="tab:red", label="CV > 20% (loosely constrained)"),
-    ], loc="lower right", fontsize=8)
+    ], loc="upper right", fontsize=7)
     _save(fig, "fig6_parameter_sensitivity", save_dir)
 
 
@@ -618,16 +618,13 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
     ax3.set_xticklabels(se_labels + ["H\u2082 FC (h)"], rotation=35, ha="right", fontsize=8)
     ax3.set_xlim(-0.6, x_hfc + 0.6)
 
-    # Single shared legend beneath all subplots
+    # Legend inside panel A top right
     leg_handles = [
         Patch(facecolor=col_bl, alpha=0.85, edgecolor="black", lw=0.5, label="Baseline"),
         Patch(facecolor=col_ga, alpha=0.85, edgecolor="black", lw=0.5, label="GA optimal"),
     ]
-    fig.legend(handles=leg_handles, loc="lower center", ncol=2, frameon=False,
-               fontsize=10, bbox_to_anchor=(0.5, -0.02))
+    ax1.legend(handles=leg_handles, loc="upper right", frameon=True, fontsize=7)
 
-    fig.suptitle("GA-optimal vs baseline: generation and storage capacities",
-                 fontsize=13, fontweight="bold")
     _save(fig, "fig7_capacity_comparison", save_dir)
 
 
@@ -690,8 +687,7 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES")
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
     ax_a.set_ylabel(f"Land area (% of {region_label} land)")
-    ax_a.set_title(f"A)  Per-technology land use (% of {region_label} land)",
-                   loc="left", fontweight="bold")
+    ax_a.set_title("A)", loc="left", fontweight="bold")
     land_type_handles = [h for h in ax_a.get_legend_handles_labels()[0]]
     land_type_handles += [
         Patch(facecolor="gray", alpha=0.5,  edgecolor="black", lw=0.5, label="Baseline"),
@@ -725,8 +721,7 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES")
     ax_b.set_xticks([0, 1])
     ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
     ax_b.set_ylabel(f"Land footprint (% of {region_label} land)")
-    ax_b.set_title(f"B)  Total LANDALLTECH footprint (% of {region_label} land)",
-                   loc="left", fontweight="bold")
+    ax_b.set_title("B)", loc="left", fontweight="bold")
     ax_b.annotate(f"BL: {bl_total/US_LAND_AREA_KM2*100:.2f}%\n({bl_total:,.0f} km²)",
                   xy=(0, bl_total/US_LAND_AREA_KM2*100), xytext=(0.15, 0.2),
                   textcoords=("axes fraction", "axes fraction"),
@@ -738,8 +733,6 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES")
     ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
-    fig.suptitle(f"Land area demand: baseline vs GA-optimal (LANDALLTECH convention)",
-                 fontsize=12, fontweight="bold")
     _save(fig, "fig8_area_comparison", save_dir)
 
 
@@ -777,8 +770,8 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
         if bv > 1e-3:
             pct = 100 * (ov - bv) / bv
             ax_a.annotate(f"{'+' if pct>=0 else ''}{pct:.1f}%",
-                          xy=(i + w/2, ov), xytext=(4, 3), textcoords="offset points",
-                          ha="left", va="bottom", fontsize=6, color="dimgray")
+                          xy=(i + w/2, ov), xytext=(0, 3), textcoords="offset points",
+                          ha="center", va="bottom", fontsize=6, color="dimgray")
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(groups, rotation=30, ha="right", fontsize=9)
     ax_a.set_ylabel(r"Annual cost (\$BIL yr$^{-1}$)")
@@ -804,10 +797,6 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
                       textcoords="offset points", ha="center", va="bottom",
                       fontsize=10, fontweight="bold")
     ax_b.set_ylim(0, max(bl_sum, opt_sum) * 1.18)
-    ax_b.annotate(f"Savings: ${savings:.1f}B/yr\n({100*savings/bl_sum:.1f}%)",
-                  xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top",
-                  fontsize=9, color="dimgray",
-                  bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
     ax_b.set_xticks([0, 1])
     ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
     ax_b.set_ylabel(r"Annual system cost (\$BIL yr$^{-1}$)")
@@ -815,8 +804,6 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
-    fig.suptitle("Annual system cost: GA-optimised vs baseline",
-                 fontsize=12, fontweight="bold")
     _save(fig, "fig9_cost_comparison", save_dir)
 
 
@@ -855,7 +842,8 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
         w, s = wind / tot, solar / tot
         return s + w * 0.5, w * _S3 / 2
 
-    fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(21, 7))
+    fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(18, 6),
+                                            gridspec_kw={"width_ratios": [1, 1, 1.3]})
 
     # A) Absolute capacity stacked bars
     # The 2020 reference bar is US-specific data; skip it for other regions.
@@ -997,18 +985,12 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
             arrowprops=dict(arrowstyle="-", color="gray", lw=0.6),
         )
 
-    ax_c.set_xlim(-0.18, 1.18)
+    ax_c.set_xlim(-0.10, 1.10)
     ax_c.set_ylim(-0.16, _S3/2 + 0.14)
-    ax_c.set_aspect("equal")
     ax_c.axis("off")
     ax_c.set_title("C)  Wind–Solar–Water ternary (2050)", loc="left", fontweight="bold")
     ax_c.legend(fontsize=8, loc="upper right", framealpha=0.9, edgecolor="lightgray")
 
-    title = (f"{region} generation capacity mix: 2050 baseline vs GA-optimal vs 2020"
-             if is_us else
-             f"{region} generation capacity mix: 2050 baseline vs GA-optimal"
-             "\n(capacities scaled by US reference base — region-specific base not available)")
-    fig.suptitle(title, fontsize=12, fontweight="bold")
     _save(fig, "fig10_capacity_mix", save_dir)
 
 
@@ -1343,7 +1325,7 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
     x_dl, x_dr = 0.87, 0.87 + bar_w
     lpad = 0.010
 
-    fig, ax = plt.subplots(figsize=(22, 10))
+    fig, ax = plt.subplots(figsize=(20, 9))
     ax.set_xlim(-0.32, 1.22)
     ax.set_ylim(-0.06 * src_h, 1.10 * src_h)
     ax.axis("off")
@@ -1355,7 +1337,8 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
     # ── Bypass ribbons first (drawn behind storage column) ────────────────────
     # Direct electricity, T&D losses, and curtailment go straight from the
     # source column to the destination column, bypassing the storage boxes.
-    for bp_val, bp_color, dst_idx in bypass_flows:
+    # Ribbons are colored by their source energy type.
+    for bp_val, _bp_color, dst_idx in bypass_flows:
         for i, ((_sn, src_val, src_color), _) in enumerate(zip(sources, src_pos)):
             rw = src_val * bp_val / src_total
             l_bot, l_top = src_cur[i],       src_cur[i] + rw
@@ -1363,7 +1346,7 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
             src_cur[i]       = l_top
             dst_cur[dst_idx] = d_top
             _sankey_ribbon(ax, x_sr, x_dl, l_bot, l_top, d_bot, d_top,
-                           color=bp_color, alpha=0.28)
+                           color=src_color, alpha=0.28)
 
     # ── Draw bar fills (on top of bypass ribbons) ─────────────────────────────
     for (name, val, color), (y_bot, y_top) in zip(sources, src_pos):
@@ -1479,11 +1462,6 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
     ]:
         ax.text(x_ctr, -0.05 * src_h, label, ha="center", va="top",
                 fontsize=10, color="#444", style="italic")
-
-    ax.text(0.5 * (x_sl + x_dr + bar_w),
-            1.07 * src_h,
-            f"Energy flow: {scenario_label} (TWh/year)",
-            ha="center", va="bottom", fontsize=14, fontweight="bold")
 
     ax.text(x_sr + lpad, src_h * 1.01,
             f"Total generation: {src_total:,.0f} TWh/yr",
@@ -1910,12 +1888,24 @@ def _load_fortran_costs(region, save_dir, repo_root, best_row):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main(region=None):
+    all_regions = False
     if region is None:
         parser = argparse.ArgumentParser(description="Generate LoadMatch publication figures.")
         parser.add_argument("--region", default="UNITED-STATES",
                             help="Region name (default: UNITED-STATES)")
+        parser.add_argument(
+            "--all-regions", action="store_true", default=False,
+            help="Only regenerate cross-region overview figures (figA1–A3) "
+                 "from all completed runs. Skip per-region figures.",
+        )
         args = parser.parse_args()
         region = args.region
+        all_regions = args.all_regions
+
+    if all_regions:
+        print("Regenerating cross-region overview figures (figA1–A3)...")
+        plot_all_regions(REPO_ROOT)
+        return
 
     print(f"Region    : {region}")
     print(f"Repo root : {REPO_ROOT}")

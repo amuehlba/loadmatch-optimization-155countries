@@ -48,22 +48,29 @@ publication-quality figures.
 
 ```
 loadmatch-python/
+├── Snakefile                          # Snakemake pipeline (all rules)
+├── config/
+│   └── workflow.yaml                  # Default regions + GA parameters
+├── profiles/
+│   └── slurm/
+│       └── config.yaml                # SLURM cluster profile for Snakemake
 ├── src/
 │   ├── io/
 │   │   └── dat_parser.py              # Read/write .dat key=value files
 │   └── optimization/
 │       └── model_builder.py           # Pyomo LP model (optional warm-start)
 ├── scripts/
-│   ├── run_full_workflow.py           # Main entry point — GA + Fortran + plots
+│   ├── run_full_workflow.py           # GA + Fortran driver (--no-plots / --preprocess-only / --run-lp-only)
+│   ├── check_inputs.py                # Validate required data files (called by Snakemake)
 │   ├── parse_fortran_output.py        # Parse Fortran stdout → structured JSON
-│   ├── plot_results.py                # All publication figures (Figs 2–13 + overviews)
+│   ├── plot_results.py                # All publication figures (--all-regions flag)
 │   ├── run_python_model.py            # Standalone Pyomo LP (optional)
 │   ├── export_fortran_factors.py      # Convert LP results → fortran_factors.dat
 │   ├── factor_history_tools.py        # Parse/plot optimisation history
-│   ├── run_regions_slurm.sh           # Legacy 4-region SLURM job array
-│   ├── run_select_regions_slurm.sh    # Curated 10-region SLURM job array
-│   ├── run_all_regions_slurm.sh       # All 29-region SLURM job array
-│   └── run_europe_slurm.sh            # Single-region SLURM job (testing)
+│   ├── run_all_regions_slurm.sh       # All 29 regions — Snakemake cluster launcher
+│   ├── run_select_regions_slurm.sh    # 10 curated regions — Snakemake launcher
+│   ├── run_europe_slurm.sh            # EUROPE only — Snakemake launcher (testing)
+│   └── run_regions_slurm.sh           # Legacy 4-region direct job array
 ├── fortran/
 │   ├── src/powerworld.f               # LoadMatch Fortran source (~21 000 lines)
 │   └── bin/powerworld                 # Compiled executable (x86_64 Linux only)
@@ -78,6 +85,8 @@ loadmatch-python/
 │   ├── results_python/<REGION>/       # LP outputs (optional)
 │   ├── results_verification/<REGION>/ # Fortran logs, factor history, summaries
 │   └── results_verification/          # Cross-region overview figures (figA1–A3)
+├── logs/                              # Snakemake + SLURM logs
+├── docs/                              # dag.png and other documentation assets
 ├── requirements.txt
 └── README.md
 ```
@@ -133,7 +142,147 @@ to be the repository root when invoked.
 
 ---
 
-## Running the workflow
+## Snakemake workflow
+
+The entire pipeline is described in the `Snakefile` at the repo root.
+Snakemake tracks input/output dependencies and only reruns rules whose
+outputs are stale or missing — making it safe to restart interrupted runs.
+
+### Rule dependency graph (DAG)
+
+![Snakemake DAG (3 representative regions)](docs/dag.png)
+
+*Shown for 3 representative regions; the full 29-region graph follows the same structure.*
+
+**Rule execution order (per region):**
+
+```
+compile_fortran
+      │
+check_inputs          ← validates all required data files exist (exits on error)
+      │
+preprocess_supply     ← runs IFREWRITE=1,2 if wwssupworld.{region} missing
+      │
+[run_lp]              ← optional LP warm-start (lp_warmstart: true in config)
+      │
+run_ga                ← GA optimisation (--no-plots)
+      │
+plot_region           ← per-region figures (fig1–fig13)
+      │ (all regions done)
+plot_overview         ← cross-region figA1–A3
+      │
+     all
+```
+
+`run_lp` is only included in the DAG when `lp_warmstart: true` is set in
+`config/workflow.yaml` and a compatible LP solver is installed.
+
+To regenerate the DAG image at any time (requires `graphviz`):
+```bash
+# 3-region illustration (readable); requires actual data/raw files to exist
+.venv/bin/snakemake --dag \
+    --config "regions=[UNITED-STATES,EUROPE,JAPAN]" \
+    | dot -Tpng -Grankdir=TB -Gsize="10,12" -Gdpi=200 \
+    -o docs/dag.png
+```
+
+### Common commands
+
+```bash
+# ── Local (laptop / interactive node) ────────────────────────────────────────
+
+# Dry-run: print what would be executed without running anything
+snakemake --cores 1 --dryrun all
+
+# Run the full pipeline for all regions (N = number of CPUs available)
+snakemake --cores N all
+
+# Run for a single region only
+snakemake --cores 24 \
+    data/results_verification/EUROPE/optimal_summary.json \
+    data/results_verification/EUROPE/.plots_done
+
+# Regenerate overview figures from all completed runs
+snakemake --cores 1 plot_overview
+
+# Force-rerun one region's GA even if outputs exist
+snakemake --cores 24 --forcerun run_ga \
+    data/results_verification/EUROPE/optimal_summary.json
+
+# ── SLURM cluster (Sherlock) ──────────────────────────────────────────────────
+
+# Submit all 29 regions (orchestrator job launches child jobs automatically)
+sbatch scripts/run_all_regions_slurm.sh
+
+# Submit 10-region curated subset
+sbatch scripts/run_select_regions_slurm.sh
+
+# Submit EUROPE only (for testing)
+sbatch scripts/run_europe_slurm.sh
+
+# Monitor all running jobs
+squeue -u $USER
+
+# Check Snakemake's view of rule completion
+snakemake --profile profiles/slurm --summary
+```
+
+### Configuration
+
+Edit `config/workflow.yaml` to change which regions are run or to adjust GA
+hyper-parameters without modifying the Snakefile:
+
+```yaml
+# Run only a subset of regions
+regions:
+  - UNITED-STATES
+  - EUROPE
+  - JAPAN
+
+# Tune the GA
+ga:
+  population:  50
+  generations: 100
+
+# Enable LP warm-start (requires Gurobi or HiGHS)
+lp_warmstart: true
+```
+
+Pass a one-off override without editing the file:
+```bash
+snakemake --cores 24 \
+    --config ga.generations=100 \
+    data/results_verification/EUROPE/optimal_summary.json
+```
+
+#### LP warm-start (`lp_warmstart`)
+
+When `lp_warmstart: true`, the `run_lp` rule runs the Pyomo LP optimiser for
+each region **before** the GA and uses the resulting capacity factors as the GA
+starting point.  Requires a working LP solver in the Python environment:
+
+```bash
+pip install highspy      # HiGHS (open-source, recommended)
+# or
+pip install gurobipy     # Gurobi (requires licence)
+```
+
+When `lp_warmstart: false` (default), the GA starts from:
+1. `data/raw/baseline_results.<REGION>.dat` — if present
+2. Fortran hardcoded region defaults — otherwise
+
+### New flags added to Python scripts
+
+| Script | Flag | Effect |
+|--------|------|--------|
+| `run_full_workflow.py` | `--no-plots` | Skip figure generation after GA (Snakemake handles plots as a separate rule) |
+| `run_full_workflow.py` | `--preprocess-only` | Run IFREWRITE=1,2 supply preprocessing only, then exit (used by `preprocess_supply` rule) |
+| `run_full_workflow.py` | `--run-lp-only` | Run LP optimisation and export factors only, then exit (used by `run_lp` rule) |
+| `plot_results.py` | `--all-regions` | Only regenerate cross-region overview figures (figA1–A3); skip per-region figures |
+
+---
+
+## Running the workflow (standalone, without Snakemake)
 
 ### Single region (local or Sherlock interactive)
 
@@ -371,24 +520,28 @@ Each region requires `data/raw/wwssupworld.<REGION>` and optionally
 
 ## Figures generated
 
-All figures are saved as both `.pdf` and `.png`.
+All figures are saved as both `.pdf` and `.png` using SKILL.md publication defaults
+(8 pt Helvetica/Arial, Okabe-Ito CVD-safe palette, no top/right spines, 300 dpi).
 
-| Figure | Contents |
-|--------|----------|
-| `fig2` | GA cost convergence over generations |
-| `fig3` | Factor evolution over GA generations |
-| `fig4` | Baseline vs GA-optimal factor comparison (all parameters, fixed shown in grey) |
-| `fig5` | Energy supply/demand breakdown and storage |
-| `fig7` | Annual cost breakdown by technology category |
-| `fig8` | Land and water use (region-specific labels) |
-| `fig9` | Capacity factor and generation by source |
-| `fig10` | Installed capacity comparison (baseline vs GA vs 2050 target) |
-| `fig12` | Storage hours and capacity |
-| `fig13a` | Sankey energy-flow diagram — baseline scenario |
-| `fig13b` | Sankey energy-flow diagram — GA-optimal scenario |
-| `figA1` | *(cross-region)* Cost reduction (%) vs GA generation |
-| `figA2` | *(cross-region)* Wind vs solar energy share scatter |
-| `figA3` | *(cross-region)* Wind–Solar–Water ternary composition |
+| Figure | Filename stem | Contents |
+|--------|---------------|----------|
+| 1 | `fig1_cost_convergence` | GA cost convergence + feasibility rate per generation |
+| 2 | `fig2_capacity_factors` | Capacity-factor trajectories of the best feasible individual |
+| 3 | `fig3_parameter_trajectories` | Optimised (non-fixed) parameter trajectories, 5 panels |
+| 4 | `fig4_baseline_vs_ga` | Baseline vs GA-optimal: all parameters, fixed params sorted to bottom |
+| 5 | `fig5_cost_and_capacity` | Cost distribution boxplots (A) + generation GW & energy storage TWh at milestones (B) |
+| 6 | `fig6_parameter_sensitivity` | Coefficient of variation across final-generation feasible population |
+| 7 | `fig7_capacity_comparison` | Generation & storage capacities: baseline vs GA-optimal (3 panels) |
+| 8 | `fig8_area_comparison` | Land area demand by technology and total footprint |
+| 9 | `fig9_cost_comparison` | Annual cost breakdown by category: baseline vs GA-optimal |
+| 10 | `fig10_capacity_mix` | Installed capacity mix, wind/solar scatter, and ternary diagram |
+| 11 | `fig11_diversity_heatmap` | Population diversity heatmap (final GA generation) |
+| 12 | `fig12_cost_waterfall` | Cost waterfall: contribution of each parameter change |
+| 13a | `fig13_sankey_energy_flow` | Sankey energy-flow diagram — baseline scenario |
+| 13b | `fig13_sankey_energy_flow_optimal` | Sankey energy-flow diagram — GA-optimal scenario |
+| A1 | `figA1_all_regions_convergence` | *(cross-region)* Cost reduction (%) vs GA generation |
+| A2 | `figA2_all_regions_wind_solar` | *(cross-region)* Wind vs solar energy share scatter |
+| A3 | `figA3_all_regions_ternary` | *(cross-region)* Wind–Solar–Water ternary composition |
 
 Cross-region figures (figA1–A3) are regenerated automatically each time any
 region finishes, accumulating all available results.
@@ -415,8 +568,13 @@ values, then writes a factor file for every subsequent GA evaluation.
 `powerworld.f` to read the actual runtime values of each parameter for a given
 region.  It is aware of `IF/ELSEIF/ELSE/ENDIF` chains conditioned on `IMERGH2`
 and `IFEGS` (both hardcoded in `powerworld.f`) and only reads values from the
-branch that executes at runtime.  Unknown conditionals fall back to
-conservative "always-active" treatment.
+branch that executes at runtime.
+
+Conditionals on **unknown** variables (e.g. `FRCLDEGS`, `IFNEWLOAD`) are treated
+as **opaque blocks**: an `unrecognized_depth` counter tracks nesting depth, and
+any assignments inside an opaque block are silently skipped.  This prevents
+incorrect defaults being extracted (e.g. `BATDISCH=0` from a dead branch in the
+EUROPE block), which would otherwise make every GA evaluation infeasible.
 
 ### Supply file preprocessing (IFREWRITE)
 
@@ -453,6 +611,10 @@ with sub-GW or fractional demand values (e.g. Cyprus, small island states).
 | Supply preprocessing takes 20+ minutes | Normal for first run of a region; subsequent runs are fast |
 | `Solver not available: highs` | Install HiGHS or use `--baseline-start defaults` to skip the LP entirely |
 | Figures not generated / plot errors | Run `python -m scripts.plot_results --region <REGION>` manually; check for missing `optimal_summary.json` |
+| Snakemake `MissingOutputException` for `optimal_summary.json` | GA run failed or was killed — check `logs/run_ga_<REGION>.log`; resubmit with `--rerun-incomplete` |
+| `fortran/bin/powerworld does not exist and compile: false` | Set `compile: true` in `config/workflow.yaml` or pre-build the binary on a compute node |
+| Snakemake SLURM profile: `sbatch: command not found` | Profile is only valid on Sherlock; use `snakemake --cores N` for local execution |
+| Overview figures (figA1–A3) missing after partial runs | Run `snakemake --cores 1 plot_overview` after at least one region completes |
 
 ---
 

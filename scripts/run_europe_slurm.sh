@@ -2,84 +2,66 @@
 # ============================================================================
 # run_europe_slurm.sh
 #
-# Single SLURM job for the EUROPE region only (for testing).
+# Single SLURM job for the EUROPE region only.  Useful for rapid testing of
+# the full GA pipeline before committing a full 29-region run.
+#
+# Uses Snakemake to run the pipeline in correct rule order:
+#   run_ga (EUROPE) → plot_region (EUROPE)
 #
 # Usage (from repo root on Sherlock login node):
 #   sbatch scripts/run_europe_slurm.sh
 #
 # Monitor progress:
 #   squeue -u $USER
-#   tail -f logs/slurm_europe_<jobid>.out
-#   tail -f data/results_EUROPE/factor_history.log
+#   tail -f logs/snakemake/run_ga_EUROPE_*.out
+#   tail -f data/results_verification/EUROPE/factor_history.log
 # ============================================================================
 
-# ---- SLURM directives -------------------------------------------------------
+# ---- SLURM directives (orchestrator job) ------------------------------------
 #SBATCH --job-name=loadmatch-europe
-#SBATCH --output=logs/slurm_europe_%j.out
-#SBATCH --error=logs/slurm_europe_%j.err
-#SBATCH --time=48:00:00
+#SBATCH --output=logs/snakemake_europe_%j.out
+#SBATCH --error=logs/snakemake_europe_%j.err
+#SBATCH --time=72:00:00          # orchestrator must outlive the child GA job
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=24                 # must equal PARALLEL_EVALS below
-#SBATCH --mem=200G
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
 #SBATCH --partition=serc
 
 # ---- CONFIG -----------------------------------------------------------------
 
-REGION="EUROPE"
-PARALLEL_EVALS=24
-
-# GA settings
-GA_POPULATION=37
-GA_GENERATIONS=50
-GA_MUTATION_RATE=0.15
-GA_MUTATION_SCALE=0.2
-GA_ELITE_FRAC=0.2
-GA_COOLING=0.985
-
-BASELINE_DIR="data/raw"
 REPO_ROOT="$GROUP_HOME/loadmatch-python"
 PYTHON_ENV_SETUP="module load python/3.12.1 && source ${REPO_ROOT}/.venv/bin/activate"
 
-# ---- END CONFIG -------------------------------------------------------------
+# Override regions list to only EUROPE.
+EUROPE_CONFIG="config/europe_only.yaml"
 
-echo "======================================================================"
-echo "Job ID  : $SLURM_JOB_ID"
-echo "Region  : $REGION"
-echo "Start   : $(date)"
-echo "Host    : $(hostname)"
-echo "======================================================================"
+# ---- END CONFIG -------------------------------------------------------------
 
 eval "$PYTHON_ENV_SETUP"
 cd "$REPO_ROOT" || { echo "Cannot cd to $REPO_ROOT"; exit 1; }
-mkdir -p logs
 
-BASELINE_START="defaults"
-CANDIDATE="${REPO_ROOT}/${BASELINE_DIR}/baseline_results.${REGION}.dat"
-if [ -f "$CANDIDATE" ]; then
-    BASELINE_START="$CANDIDATE"
-    echo "Baseline : $CANDIDATE"
-else
-    echo "Baseline : Fortran region defaults (no file at $CANDIDATE)"
-fi
+mkdir -p logs/snakemake config
 
-CMD=(
-    python -m scripts.run_full_workflow
-    --region              "$REGION"
-    --optimizer           ga
-    --parallel-evals      "$PARALLEL_EVALS"
-    --ga-population       "$GA_POPULATION"
-    --ga-generations      "$GA_GENERATIONS"
-    --ga-mutation-rate    "$GA_MUTATION_RATE"
-    --ga-mutation-scale   "$GA_MUTATION_SCALE"
-    --ga-elite-frac       "$GA_ELITE_FRAC"
-    --ga-mutation-cooling "$GA_COOLING"
-    --baseline-start      "$BASELINE_START"
-)
+cat > "$EUROPE_CONFIG" <<'EOF'
+regions:
+  - EUROPE
+EOF
 
-echo "Running: ${CMD[*]}"
 echo "======================================================================"
-"${CMD[@]}"
+echo "Snakemake orchestrator (EUROPE only) starting"
+echo "Repo     : $REPO_ROOT"
+echo "Start    : $(date)"
+echo "Host     : $(hostname)"
+echo "======================================================================"
+
+snakemake \
+    --profile    profiles/slurm \
+    --configfile "$EUROPE_CONFIG" \
+    --jobs       1 \
+    --rerun-incomplete \
+    all
+
 EXIT_CODE=$?
 
 echo "======================================================================"
