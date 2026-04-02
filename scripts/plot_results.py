@@ -246,14 +246,14 @@ def fig1_convergence(df_gen, save_dir):
                s=18, c="tab:blue", alpha=0.5, zorder=3, label="Generation best")
     ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
     ax.legend(loc="upper right")
-    ax.set_title("(a)  Cost convergence")
+    ax.set_title("A)", loc="left", fontweight="bold")
 
     ax2 = axes[1]
     ax2.bar(df_gen["gen"], df_gen["feas_frac"] * 100, color="tab:green", alpha=0.7, width=0.8)
     ax2.set_ylabel("Feasible (%)")
     ax2.set_xlabel("Generation")
     ax2.set_ylim(0, 105)
-    ax2.set_title("(b)  Feasibility rate per generation")
+    ax2.set_title("B)", loc="left", fontweight="bold")
 
     _save(fig, "fig1_cost_convergence", save_dir)
 
@@ -282,7 +282,7 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
     ax.set_ylabel("Scaling factor (–)")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
               frameon=False, ncol=1)
-    ax.set_title("Capacity-factor trajectories (best feasible per generation)")
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.set_ylim(bottom=0)
     ax.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
                 fontsize=8, va="top", color="gray")
@@ -327,7 +327,7 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
                 if bval is not None:
                     ax.axhline(bval, color=ax.get_lines()[-1].get_color(),
                                ls=":", lw=1.2, alpha=0.9)
-        ax.set_title(panel_title, fontweight="bold")
+        ax.set_title(panel_title[:2], loc="left", fontweight="bold")
         ax.set_xlabel("Generation")
         if ax.get_lines():
             ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
@@ -376,8 +376,7 @@ def fig4_baseline_vs_ga(df_compare, save_dir):
          for _, r in df.iterrows()],
         fontsize=7.5)
     ax.set_xlabel("Ratio to baseline value")
-    ax.set_title("Parameter values: GA-optimised / baseline\n"
-                 "(1.0 = unchanged; gray = fixed, not optimised)")
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(
         handles=[
             Patch(facecolor="steelblue", alpha=0.8, label="Baseline"),
@@ -524,8 +523,7 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir):
     ax.set_yticks(range(len(df_cv)))
     ax.set_yticklabels(df_cv["Parameter"].values, fontsize=8)
     ax.set_xlabel("Coefficient of variation (%)")
-    ax.set_title(f"Parameter spread in final generation (gen {int(n_gens)}, "
-                 f"n={len(last_gen)} feasible)")
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.invert_yaxis()
     ax.legend(handles=[
         Patch(facecolor="tab:green", label="CV < 5% (well constrained)"),
@@ -601,9 +599,9 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
                             xy=(i + w/2, gv), xytext=(0, 3), textcoords="offset points",
                             ha="center", va="bottom", fontsize=7, color="dimgray")
 
-    _grouped_bars(ax1, gen_labels, gen_bl_gw, gen_ga_gw, "Capacity (GW)", "A)  Generation")
-    _grouped_bars(ax2, sp_labels, sp_bl, sp_ga, "Power capacity (TW)", "B)  Storage power")
-    _grouped_bars(ax3, se_labels, se_bl, se_ga, "Energy capacity (TWh)", "C)  Storage energy")
+    _grouped_bars(ax1, gen_labels, gen_bl_gw, gen_ga_gw, "Capacity (GW)", "A)")
+    _grouped_bars(ax2, sp_labels, sp_bl, sp_ga, "Power capacity (TW)", "B)")
+    _grouped_bars(ax3, se_labels, se_bl, se_ga, "Energy capacity (TWh)", "C)")
 
     ax3_r = ax3.twinx()
     x_hfc = len(se_labels)
@@ -775,7 +773,7 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(groups, rotation=30, ha="right", fontsize=9)
     ax_a.set_ylabel(r"Annual cost (\$BIL yr$^{-1}$)")
-    ax_a.set_title("A)  Cost breakdown per category", loc="left", fontweight="bold")
+    ax_a.set_title("A)", loc="left", fontweight="bold")
     ax_a.set_ylim(bottom=0)
     legend_elems = (
         [Patch(facecolor=GROUP_COLORS[g], label=g) for g in groups]
@@ -800,7 +798,7 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     ax_b.set_xticks([0, 1])
     ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
     ax_b.set_ylabel(r"Annual system cost (\$BIL yr$^{-1}$)")
-    ax_b.set_title("B)  Total cost by category", loc="left", fontweight="bold")
+    ax_b.set_title("B)", loc="left", fontweight="bold")
     ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
@@ -876,7 +874,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
                       "(region-specific 2020 data not available)",
                       xy=(0.5, 0.01), xycoords="axes fraction",
                       ha="center", va="bottom", fontsize=7, color="gray", style="italic")
-    ax_a.set_title("A)  Generation capacity mix", loc="left", fontweight="bold")
+    ax_a.set_title("A)", loc="left", fontweight="bold")
     ax_a.legend(
         handles=[Patch(facecolor=c, label=g, edgecolor="white", lw=0.4)
                  for g, _, c in reversed(STACK_ORDER)],
@@ -929,7 +927,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_b.set_ylabel("Wind share of total installed capacity (%)")
     ax_b.set_xlim(0, x_max)
     ax_b.set_ylim(0, y_max)
-    ax_b.set_title("B)  Wind vs solar share (% of total capacity)", loc="left", fontweight="bold")
+    ax_b.set_title("B)", loc="left", fontweight="bold")
     ax_b.legend(fontsize=8, loc="lower right")
 
     # C) Ternary (2050 scenarios only)
@@ -988,7 +986,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_c.set_xlim(-0.10, 1.10)
     ax_c.set_ylim(-0.16, _S3/2 + 0.14)
     ax_c.axis("off")
-    ax_c.set_title("C)  Wind–Solar–Water ternary (2050)", loc="left", fontweight="bold")
+    ax_c.set_title("C)", loc="left", fontweight="bold")
     ax_c.legend(fontsize=8, loc="upper right", framealpha=0.9, edgecolor="lightgray")
 
     _save(fig, "fig10_capacity_mix", save_dir)
@@ -1037,10 +1035,7 @@ def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir):
     ax.set_yticklabels(cost_labels, fontsize=7)
     ax.set_xlabel("Parameter (sorted by CV, most constrained left)")
     ax.set_ylabel("Individual (sorted by cost, best at top)")
-    ax.set_title(f"Population diversity — final generation (gen {int(n_gens)}, "
-                 f"n={len(last_gen)} feasible)\n"
-                 "Colour = value / GA-optimal  (green=match, red=diverge)",
-                 fontsize=11)
+    ax.set_title("A)", loc="left", fontweight="bold")
     cbar = fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
     cbar.set_label("Value / GA-optimal", fontsize=9)
     ax.axhline(-0.5, color="white", lw=0)  # padding
@@ -1126,12 +1121,7 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
     ax.set_xticklabels(labels_wf, rotation=25, ha="right", fontsize=9)
     ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
     ax.set_ylim(0, bl_total * 1.12)
-    ax.set_title(
-        f"Cost waterfall: baseline (${bl_total:.1f}B/yr) → GA optimal (${opt_total:.1f}B/yr)\n"
-        f"Total savings: ${bl_total - opt_total:.1f}B/yr  "
-        f"({100*(bl_total-opt_total)/bl_total:.1f}%)",
-        fontsize=11, fontweight="bold"
-    )
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(handles=[
         Patch(facecolor="steelblue", label="Baseline total"),
         Patch(facecolor="tab:green", label="Cost reduction"),
@@ -1582,7 +1572,7 @@ def fig_all_convergence(region_data, overview_dir):
     ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5)
     ax.set_xlabel("Generation")
     ax.set_ylabel("Cost reduction vs baseline (%)")
-    ax.set_title("GA cost convergence — all regions", fontweight="bold")
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
               frameon=False, ncol=2, fontsize=8)
     ax.set_xlim(left=1)
@@ -1637,7 +1627,7 @@ def fig_all_wind_solar(region_data, overview_dir):
     ax.set_ylabel("Wind share of 2050 installed capacity (%)")
     ax.set_xlim(0, x_max)
     ax.set_ylim(0, y_max)
-    ax.set_title("Wind vs solar share — all regions", fontweight="bold")
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
               borderaxespad=0, frameon=False, ncol=2, fontsize=8)
     _save(fig, "figA2_all_regions_wind_solar", overview_dir)
@@ -1694,7 +1684,7 @@ def fig_all_ternary(region_data, overview_dir):
     ax.set_ylim(-0.12, _S3_TERNARY / 2 + 0.16)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_title("Wind–Solar–Water ternary — all regions", fontweight="bold", y=1.02)
+    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
               borderaxespad=0, frameon=False, ncol=2, fontsize=8)
     _save(fig, "figA3_all_regions_ternary", overview_dir)
@@ -1710,8 +1700,9 @@ def plot_all_regions(repo_root):
     for region_dir in sorted(results_root.iterdir()):
         if not region_dir.is_dir():
             continue
-        log_path = region_dir / "factor_history.log"
-        if not log_path.exists():
+        if not (region_dir / "optimal_summary.json").exists():
+            continue  # run_ga not finished yet for this region
+        if not (region_dir / "factor_history.log").exists():
             continue
         region = region_dir.name
         print(f"\n  Loading {region} for overview figures...")
@@ -1801,6 +1792,9 @@ def _load_ga_data(region, repo_root):
 
     n_gens   = df_ga["gen"].max()
     pop_size = df_ga.groupby("gen").size().median()
+    if pd.isna(n_gens) or pd.isna(pop_size):
+        print(f"  [SKIP] Not enough GA data to plot (only {len(df_ga)} GA trials)")
+        return (None,) * 7
     print(f"GA: {int(n_gens)} generations, population ≈ {int(pop_size)}")
 
     # Per-generation aggregates
