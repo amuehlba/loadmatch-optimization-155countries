@@ -67,10 +67,9 @@ loadmatch-python/
 │   ├── run_python_model.py            # Standalone Pyomo LP (optional)
 │   ├── export_fortran_factors.py      # Convert LP results → fortran_factors.dat
 │   ├── factor_history_tools.py        # Parse/plot optimisation history
-│   ├── run_all_regions_slurm.sh       # All 29 regions — Snakemake cluster launcher
-│   ├── run_select_regions_slurm.sh    # 10 curated regions — Snakemake launcher
-│   ├── run_europe_slurm.sh            # EUROPE only — Snakemake launcher (testing)
-│   └── run_regions_slurm.sh           # Legacy 4-region direct job array
+│   ├── run_all_regions.sh             # All 29 regions — run from login node
+│   ├── run_select_regions.sh          # 10 curated regions — run from login node
+│   └── run_europe.sh                  # EUROPE only — run from login node (testing)
 ├── fortran/
 │   ├── src/powerworld.f               # LoadMatch Fortran source (~21 000 lines)
 │   └── bin/powerworld                 # Compiled executable (x86_64 Linux only)
@@ -192,39 +191,43 @@ To regenerate the DAG image at any time (requires `graphviz`):
 # ── Local (laptop / interactive node) ────────────────────────────────────────
 
 # Dry-run: print what would be executed without running anything
-snakemake --cores 1 --dryrun all
+.venv/bin/snakemake --cores 1 --dryrun all
 
-# Run the full pipeline for all regions (N = number of CPUs available)
-snakemake --cores N all
-
-# Run for a single region only
-snakemake --cores 24 \
-    data/results_verification/EUROPE/optimal_summary.json \
-    data/results_verification/EUROPE/.plots_done
-
-# Regenerate overview figures from all completed runs
-snakemake --cores 1 plot_overview
-
-# Force-rerun one region's GA even if outputs exist
-snakemake --cores 24 --forcerun run_ga \
-    data/results_verification/EUROPE/optimal_summary.json
+# Run the full pipeline for all regions locally (N = number of CPUs)
+.venv/bin/snakemake --cores N all
 
 # ── SLURM cluster (Sherlock) ──────────────────────────────────────────────────
+# Run Snakemake directly from the login node — it submits SLURM jobs itself.
+# Use screen or tmux to keep it alive across disconnects.
 
-# Submit all 29 regions (orchestrator job launches child jobs automatically)
-sbatch scripts/run_all_regions_slurm.sh
+screen -S loadmatch   # or: tmux new -s loadmatch
 
-# Submit 10-region curated subset
-sbatch scripts/run_select_regions_slurm.sh
+# All 29 regions
+bash scripts/run_all_regions.sh
 
-# Submit EUROPE only (for testing)
-sbatch scripts/run_europe_slurm.sh
+# 10-region curated subset
+bash scripts/run_select_regions.sh
 
-# Monitor all running jobs
+# EUROPE only (for testing)
+bash scripts/run_europe.sh
+
+# Force-rerun specific rules (e.g. after a code change), all regions:
+bash scripts/run_all_regions.sh --forcerun plot_region plot_overview
+
+# Run a single region's full pipeline
+.venv/bin/snakemake --profile profiles/slurm --jobs 1 \
+    data/results_verification/EUROPE/.plots_done
+
+# Dry-run to see what would be submitted
+.venv/bin/snakemake --profile profiles/slurm --jobs 29 --dryrun all
+
+# Check status of all rules across regions
+.venv/bin/snakemake --profile profiles/slurm --summary
+
+# Monitor running jobs
 squeue -u $USER
-
-# Check Snakemake's view of rule completion
-snakemake --profile profiles/slurm --summary
+tail -f logs/run_ga_EUROPE.log
+tail -f data/results_verification/EUROPE/factor_history.log
 ```
 
 ### Configuration
@@ -393,20 +396,26 @@ Fixed parameters are still shown in Fig 4 (parameter comparison) with a
 
 ## Multi-region SLURM runs (Stanford Sherlock)
 
-Three ready-to-submit SLURM job-array scripts are provided.  Each task in the
-array runs one region independently; `--parallel-evals` CPUs are used for
-intra-GA parallelism within each task.
+Snakemake runs directly on the login node and submits each rule as an
+individual SLURM job via `--profile profiles/slurm`.  Three convenience
+scripts set up the environment and launch Snakemake with the right arguments.
+Run them inside `screen` or `tmux` so they survive disconnects.
 
 ### Available scripts
 
-| Script | Regions | Array |
-|--------|---------|-------|
-| `run_select_regions_slurm.sh` | 10 curated regions (see below) | `--array=0-9` |
-| `run_all_regions_slurm.sh` | All 29 world regions | `--array=0-28` |
-| `run_europe_slurm.sh` | EUROPE only (for testing) | single job |
-| `run_regions_slurm.sh` | USA, Canada, Europe, China (legacy) | `--array=0-3` |
+| Script | Regions |
+|--------|---------|
+| `scripts/run_all_regions.sh` | All 29 world regions |
+| `scripts/run_select_regions.sh` | 10 curated regions (see below) |
+| `scripts/run_europe.sh` | EUROPE only (for testing) |
 
-### Curated 10-region set (`run_select_regions_slurm.sh`)
+All scripts accept extra Snakemake flags, e.g.:
+```bash
+bash scripts/run_all_regions.sh --forcerun plot_region plot_overview
+bash scripts/run_all_regions.sh --dryrun
+```
+
+### Curated 10-region set (`run_select_regions.sh`)
 
 Chosen for geographic diversity and resource contrast:
 
@@ -423,7 +432,7 @@ Chosen for geographic diversity and resource contrast:
 | 8 | `SOUTHEAST-ASIA` | Tropical; biomass + solar |
 | 9 | `RUSSIA` | Cold climate; fossil-heavy baseline |
 
-### All 29 world regions (`run_all_regions_slurm.sh`)
+### All 29 world regions (`run_all_regions.sh`)
 
 `AFRICA-EAST`, `AFRICA-NORTH`, `AFRICA-SOUTH`, `AFRICA-WEST`, `AUSTRALIA`,
 `CANADA`, `CENTRAL-AMERIC`, `CENTRAL-ASIA`, `CHINA`, `CUBA`, `EUROPE`,
@@ -453,37 +462,41 @@ gfortran -O2 -mcmodel=medium \
 exit
 ```
 
-### Submit
+### Run
 
 ```bash
-# Recommended: start with the 10-region batch to validate
-sbatch scripts/run_select_regions_slurm.sh
+# Start a persistent session so Snakemake survives disconnects
+screen -S loadmatch          # or: tmux new -s loadmatch
+
+# Recommended: validate with 10-region subset first
+bash scripts/run_select_regions.sh
 
 # Full 29-region run
-sbatch scripts/run_all_regions_slurm.sh
+bash scripts/run_all_regions.sh
 
-# Test single region
-sbatch scripts/run_europe_slurm.sh
+# Test with EUROPE only
+bash scripts/run_europe.sh
+
+# Reattach after disconnect
+screen -r loadmatch          # or: tmux attach -t loadmatch
 ```
 
 ### Monitor progress
 
 ```bash
 squeue -u $USER
-tail -f logs/slurm_<JOBID>_<TASK>.out
+tail -f logs/run_ga_<REGION>.log
 tail -f data/results_verification/<REGION>/factor_history.log
+.venv/bin/snakemake --profile profiles/slurm --summary
 ```
 
-### After jobs complete — generate plots
-
-Plots are generated automatically at the end of each run (including cross-region
-overviews).  To regenerate manually for any region:
+### Regenerate plots after a code change
 
 ```bash
-python -m scripts.plot_results --region UNITED-STATES
+bash scripts/run_all_regions.sh --forcerun plot_region plot_overview
 ```
 
-Sync figures to your local machine:
+### Sync figures to your local machine
 
 ```bash
 rsync -av sherlock:/path/to/repo/data/results_verification/ ./results_local/
