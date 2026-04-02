@@ -282,7 +282,6 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
     ax.set_ylabel("Scaling factor (–)")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
               frameon=False, ncol=1)
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.set_ylim(bottom=0)
     ax.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
                 fontsize=8, va="top", color="gray")
@@ -376,7 +375,6 @@ def fig4_baseline_vs_ga(df_compare, save_dir):
          for _, r in df.iterrows()],
         fontsize=7.5)
     ax.set_xlabel("Ratio to baseline value")
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(
         handles=[
             Patch(facecolor="steelblue", alpha=0.8, label="Baseline"),
@@ -523,7 +521,6 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir):
     ax.set_yticks(range(len(df_cv)))
     ax.set_yticklabels(df_cv["Parameter"].values, fontsize=8)
     ax.set_xlabel("Coefficient of variation (%)")
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.invert_yaxis()
     ax.legend(handles=[
         Patch(facecolor="tab:green", label="CV < 5% (well constrained)"),
@@ -1035,7 +1032,6 @@ def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir):
     ax.set_yticklabels(cost_labels, fontsize=7)
     ax.set_xlabel("Parameter (sorted by CV, most constrained left)")
     ax.set_ylabel("Individual (sorted by cost, best at top)")
-    ax.set_title("A)", loc="left", fontweight="bold")
     cbar = fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
     cbar.set_label("Value / GA-optimal", fontsize=9)
     ax.axhline(-0.5, color="white", lw=0)  # padding
@@ -1106,22 +1102,24 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
     for xi, (bot, ht, lbl) in enumerate(zip(bottoms, heights, labels_wf)):
         top = bot + ht
         if xi == 0 or xi == len(labels_wf) - 1:
-            ax.text(xi, top + 1, f"${ht:.1f}B", ha="center", va="bottom",
-                    fontsize=9, fontweight="bold")
+            ax.annotate(f"${ht:.1f}B", xy=(xi, top), xytext=(0, 4),
+                        textcoords="offset points", ha="center", va="bottom",
+                        fontsize=9, fontweight="bold")
         else:
             g = sorted_groups[xi - 1]
             d = deltas[g]
             sign = "−" if d < 0 else "+"
-            ax.text(xi, top + 1 if d >= 0 else bot - 4,
-                    f"{sign}${abs(d):.1f}B",
-                    ha="center", va="bottom" if d >= 0 else "top",
-                    fontsize=8, color="tab:green" if d < 0 else "tab:red")
+            y_anchor = top if d >= 0 else bot
+            offset   = (0, 4) if d >= 0 else (0, -4)
+            va       = "bottom" if d >= 0 else "top"
+            ax.annotate(f"{sign}${abs(d):.1f}B", xy=(xi, y_anchor), xytext=offset,
+                        textcoords="offset points", ha="center", va=va,
+                        fontsize=8, color="tab:green" if d < 0 else "tab:red")
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels_wf, rotation=25, ha="right", fontsize=9)
     ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
     ax.set_ylim(0, bl_total * 1.12)
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(handles=[
         Patch(facecolor="steelblue", label="Baseline total"),
         Patch(facecolor="tab:green", label="Cost reduction"),
@@ -1572,7 +1570,6 @@ def fig_all_convergence(region_data, overview_dir):
     ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5)
     ax.set_xlabel("Generation")
     ax.set_ylabel("Cost reduction vs baseline (%)")
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
               frameon=False, ncol=2, fontsize=8)
     ax.set_xlim(left=1)
@@ -1627,7 +1624,6 @@ def fig_all_wind_solar(region_data, overview_dir):
     ax.set_ylabel("Wind share of 2050 installed capacity (%)")
     ax.set_xlim(0, x_max)
     ax.set_ylim(0, y_max)
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
               borderaxespad=0, frameon=False, ncol=2, fontsize=8)
     _save(fig, "figA2_all_regions_wind_solar", overview_dir)
@@ -1684,7 +1680,6 @@ def fig_all_ternary(region_data, overview_dir):
     ax.set_ylim(-0.12, _S3_TERNARY / 2 + 0.16)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_title("A)", loc="left", fontweight="bold")
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
               borderaxespad=0, frameon=False, ncol=2, fontsize=8)
     _save(fig, "figA3_all_regions_ternary", overview_dir)
@@ -1837,7 +1832,8 @@ def _load_fortran_costs(region, save_dir, repo_root, best_row):
     Missing files → None values with a printed warning.
     """
     optimal_out  = save_dir / "fortran_optimal_run.out"
-    baseline_out = repo_root / "data" / "raw" / f"xxEGS.{region}"
+    xxegs_out    = repo_root / "data" / "raw" / f"xxEGS.{region}"
+    baseline_out = xxegs_out if xxegs_out.exists() else save_dir / "fortran_baseline_run.out"
 
     opt_costs, opt_energy = {}, None
     bl_costs,  bl_energy  = {}, None
@@ -1871,8 +1867,9 @@ def _load_fortran_costs(region, save_dir, repo_root, best_row):
     if baseline_out.exists():
         bl_costs, bl_energy = _parse_fortran_costs(baseline_out.read_text())
     else:
-        print(f"  [WARN] Baseline Fortran output not found: {baseline_out}")
-        print(f"         Expected at: {baseline_out}")
+        print(f"  [WARN] No baseline Fortran output found for {region}")
+        print(f"         Tried: {xxegs_out}")
+        print(f"         Tried: {save_dir / 'fortran_baseline_run.out'}")
 
     return bl_costs, opt_costs, bl_energy, opt_energy, baseline_out
 
