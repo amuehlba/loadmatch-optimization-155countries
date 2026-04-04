@@ -95,15 +95,24 @@ def _lp_factors(wildcards):
 # Rule: all — top-level target
 # ---------------------------------------------------------------------------
 
-rule all:
-    input:
-        expand(
-            "data/results_verification/{region}/.plots_done",
+def _all_targets():
+    targets = (
+        expand("data/results_verification/{region}/.plots_done", region=REGIONS)
+        + [
+            "data/results_verification/figA1_all_regions_convergence.pdf",
+            "data/results_verification/figA2_all_regions_wind_solar.pdf",
+            "data/results_verification/figA3_all_regions_ternary.pdf",
+        ]
+    )
+    if LP_WARMSTART:
+        targets += expand(
+            "data/results_verification/{region}/.lp_plots_done",
             region=REGIONS,
-        ),
-        "data/results_verification/figA1_all_regions_convergence.pdf",
-        "data/results_verification/figA2_all_regions_wind_solar.pdf",
-        "data/results_verification/figA3_all_regions_ternary.pdf",
+        )
+    return targets
+
+rule all:
+    input: _all_targets()
 
 
 # ---------------------------------------------------------------------------
@@ -375,5 +384,88 @@ rule plot_overview:
         """
         python -m scripts.plot_results \
             --all-regions \
+            2>&1 | tee {log}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: run_ga_from_lp — GA optimisation warm-started from LP solution
+# ---------------------------------------------------------------------------
+
+rule run_ga_from_lp:
+    """Run GA starting from LP factors → lp_summary.json + lp_ga_summary.json.
+
+    Does NOT overwrite baseline_summary.json or optimal_summary.json, so all
+    four cases (baseline, LP-eval, GA-from-baseline, GA-from-LP) coexist.
+
+    Only included in the DAG when lp_warmstart: true in config.
+    """
+    input:
+        binary       = "fortran/bin/powerworld",
+        checked      = "data/results_verification/{region}/.check_inputs_done",
+        preprocessed = "data/results_verification/{region}/.preprocess_done",
+        lp_factors   = "data/results_python/{region}/fortran_factors.dat",
+    output:
+        lp_eval  = "data/results_verification/{region}/lp_summary.json",
+        lp_ga    = "data/results_verification/{region}/lp_ga_summary.json",
+    params:
+        population       = GA_POPULATION,
+        generations      = GA_GENERATIONS,
+        mutation_rate    = GA_MUTATION_RATE,
+        mutation_scale   = GA_MUTATION_SCALE,
+        elite_frac       = GA_ELITE_FRAC,
+        mutation_cooling = GA_MUTATION_COOLING,
+    log:
+        "logs/run_ga_from_lp_{region}.log",
+    resources:
+        mem_mb  = 200000,
+        runtime = 2880,
+    threads: GA_PARALLEL_EVALS
+    shell:
+        """
+        mkdir -p logs/snakemake
+        python -m scripts.run_full_workflow \
+            --region              {wildcards.region} \
+            --run-ga-from-lp \
+            --optimizer           ga \
+            --parallel-evals      {threads} \
+            --ga-population       {params.population} \
+            --ga-generations      {params.generations} \
+            --ga-mutation-rate    {params.mutation_rate} \
+            --ga-mutation-scale   {params.mutation_scale} \
+            --ga-elite-frac       {params.elite_frac} \
+            --ga-mutation-cooling {params.mutation_cooling} \
+            --no-plots \
+            2>&1 | tee {log}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: plot_four_cases — input data + LP diagram + four-case comparison
+# ---------------------------------------------------------------------------
+
+rule plot_four_cases:
+    """Generate LP input data figure, LP system diagram, and four-case comparison.
+
+    Requires all four result files to exist.  Only active when lp_warmstart: true.
+    """
+    input:
+        baseline = "data/results_verification/{region}/baseline_summary.json",
+        lp_eval  = "data/results_verification/{region}/lp_summary.json",
+        ga_bl    = "data/results_verification/{region}/optimal_summary.json",
+        lp_ga    = "data/results_verification/{region}/lp_ga_summary.json",
+    output:
+        sentinel = touch("data/results_verification/{region}/.lp_plots_done"),
+    log:
+        "logs/plot_four_cases_{region}.log",
+    resources:
+        mem_mb  = 8000,
+        runtime = 30,
+    threads: 1
+    shell:
+        """
+        python -m scripts.plot_results \
+            --region      {wildcards.region} \
+            --lp-figures \
             2>&1 | tee {log}
         """

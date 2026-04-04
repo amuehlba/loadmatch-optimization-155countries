@@ -1,461 +1,596 @@
-from typing import Dict, Iterable
+"""
+model_builder.py — LoadMatch LP warm-start model.
 
+Decision variables map directly to the 20 optimisable PARAM_REGISTRY keys
+(all non-"fixed" parameters after the 2026-04 update).  Fixed parameters
+(CSPSTORGAT, HCHARCSP, UGFAC, HWFAC, MXHRDRM, HPTURBRAT, DAYBASHYD, …)
+are not decision variables — their values come from the region defaults.
+
+Sectors modelled
+----------------
+  Electric : onshore wind, offshore wind, PV (res/com/util), CSP
+             + fixed baseload: hydro, tidal, wave, geothermal-electric
+               (constant dispatch = SUPHYD/TID/WAV/GEL2050 × 1000 MW from countrystats)
+             → battery, PHS, H2 fuel-cell output
+  Heat     : solar thermal + fixed geothermal-heat (SUPGHT2050) + heat pumps
+             → hot-water STES, heat battery, UTES (seasonal)
+  Cold     : AC (from electricity)
+             → cold TES
+  H2       : electrolysers → H2 storage → fuel cells → electricity
+
+Storage sizing strategy
+-----------------------
+For storage technologies whose **power rate** in LoadMatch is load-derived
+(PHS, cold TES, hot-water STES, UTES), the power rate is treated as a
+fixed constant computed from the region load data.  The duration variable
+is then the only LP decision variable and the energy capacity is linear.
+
+For technologies with an **explicit power-rate parameter** (battery, H2
+fuel cell/electrolyser, heat battery), power and energy capacity are
+independent LP variables to avoid bilinear products.  The LoadMatch
+duration parameter (STORHBAT etc.) is recovered post-solve as energy/power.
+
+Fixed physical constants
+------------------------
+  UGFAC   = 3.0   UTES charge rate multiplier (× avg heat load)
+  HWFAC   = 1.0   hot-water STES charge rate multiplier (× WARMMAX)
+  PHSMIN  = 0.016 TW   minimum PHS power
+  HEAT_COP = 4.0  CPERFORM
+  COLD_COP = 3.0
+  H2_EFF   = 0.60  round-trip H2 efficiency (electrolyser × fuel-cell)
+"""
+
+from typing import Dict
+import numpy as np
 import pyomo.environ as pyo
 
 
-DEFAULT_CAPITAL_COSTS = {
-    "onshore_wind": 1_350_000.0,
-    "offshore_wind": 3_800_000.0,
-    "rooftop_pv": 1_600_000.0,
-    "utility_pv": 1_100_000.0,
-    "csp": 4_500_000.0,
-    "solar_thermal": 800_000.0,
+# ── Fixed physical / policy constants ──────────────────────────────────────
+UGFAC    = 3.0         # UTES charge rate factor (fixed)
+HWFAC    = 1.0         # hot-water STES charge rate factor (fixed)
+PHSMIN   = 0.016       # TW — minimum PHS nameplate power (fixed)
+HEAT_COP = 4.0         # CPERFORM (fixed)
+COLD_COP = 3.0         # cold COP (fixed)
+H2_RT_EFF = 0.60       # H2 round-trip efficiency (electrolyser → fuel cell)
+BAT_EFF   = 0.95       # battery one-way efficiency
+HRSPDAY   = 24.0
+DAYSPY    = 365.0
+
+# ── Cost proxies ($/MW-year) for LP objective ───────────────────────────────
+# Relative magnitudes matter; absolute values do not affect the GA warm-start.
+_CRF = 0.05 * (1.05**25) / ((1.05**25) - 1)   # capital recovery factor (5%, 25 yr)
+
+def _capex(usd_per_mw):
+    return usd_per_mw * _CRF
+
+GEN_COST = {   # $/MW installed → annualised
+    "onshore_wind":  _capex(1_350_000),
+    "offshore_wind": _capex(3_800_000),
+    "res_pv":        _capex(  900_000),
+    "com_pv":        _capex(  900_000),
+    "utility_pv":    _capex(1_100_000),
+    "csp":           _capex(4_500_000),
+    "solar_thermal": _capex(  800_000),
 }
 
-DEFAULT_VARIABLE_COSTS = {
-    "onshore_wind": 12.0,
-    "offshore_wind": 20.0,
-    "rooftop_pv": 8.0,
-    "utility_pv": 5.0,
-    "csp": 15.0,
-    "solar_thermal": 5.0,
+STOR_COST_POWER  = {   # $/MW power
+    "battery":    _capex(  300_000),
+    "h2_fc":      _capex(  800_000),
+    "h2_chg":     _capex(  500_000),
+    "heat_bat":   _capex(  200_000),
+}
+STOR_COST_ENERGY = {   # $/MWh energy
+    "battery":    _capex(  150_000),
+    "phs":        _capex(   20_000),
+    "cold_tes":   _capex(   30_000),
+    "hw_stes":    _capex(   15_000),
+    "h2":         _capex(    8_000),
+    "heat_bat":   _capex(   50_000),
+    "utes":       _capex(    5_000),
 }
 
-DEFAULT_STORAGE_COSTS = {
-    "electric": {"power": 450_000.0, "energy": 180_000.0},
-    "heat": {"power": 150_000.0, "energy": 40_000.0},
-    "cold": {"power": 150_000.0, "energy": 40_000.0},
-}
-
-DEFAULT_CAPACITY_LIMITS_MW = {
-    "onshore_wind": 5_000_000.0,
-    "offshore_wind": 5_000_000.0,
-    "rooftop_pv": 5_000_000.0,
-    "utility_pv": 5_000_000.0,
-    "csp": 0_001.0,
-    "solar_thermal": 5_000_000.0,
-}
-
-LOAD_SHEDDING_PENALTY = 1_000_000.0
-CURTAILMENT_PENALTY = 1.0
+LOAD_SHED_PENALTY = 5_000_000   # $/MWh — unmet demand
+CURTAIL_PENALTY   =         1   # $/MWh — excess generation (small, allow curtailment)
 
 
-class StorageParameters(object):
-    def __init__(self, base_power_mw, energy_hours, charge_efficiency, discharge_efficiency):
-        self.base_power_mw = float(base_power_mw)
-        self.energy_hours = float(energy_hours)
-        self.charge_efficiency = float(charge_efficiency)
-        self.discharge_efficiency = float(discharge_efficiency)
+# ── Build model ─────────────────────────────────────────────────────────────
 
-    @property
-    def base_energy_mwh(self):
-        return self.base_power_mw * self.energy_hours
-
-
-def _dict_from_series(values: Iterable[float]) -> Dict[int, float]:
-    return {idx: float(val) for idx, val in enumerate(values)}
-
-
-def build_model(inputs: Dict[str, object]) -> pyo.ConcreteModel:
-    """
-    Construct a linear programming approximation of the LoadMatch dispatch problem.
+def build_model(inputs: Dict) -> pyo.ConcreteModel:
+    """Construct the LoadMatch LP.
 
     Parameters
     ----------
-    inputs
-        Dictionary produced by ``src.io.data_loader.load_inputs``.
-        All powers are assumed to be in MW and energy in MWh.
+    inputs : dict
+        Output of ``src.io.data_loader.load_inputs``.  All power in MW,
+        energy in MWh.
+
+    Returns
+    -------
+    pyo.ConcreteModel
+        Solved or unsolved Pyomo model.  Call ``collect_results(model)``
+        after solving to extract PARAM_REGISTRY-aligned factors.
     """
+    hours   = inputs["hours"]
+    n       = len(hours)
+    T       = range(n)
 
-    hours = inputs["hours"]
-    n_hours = len(hours)
-    if n_hours == 0:
-        raise ValueError("No hourly data supplied to build_model")
+    base    = inputs["base_capacities_mw"]        # dict tech → MW
+    detail  = inputs.get("base_capacities_detail", {})
+    avail   = inputs["availability"]              # dict tech → array[n]
+    sol_av  = inputs["solar_thermal_availability"]  # array[n]
+    fixed   = inputs.get("fixed_baseload_mw", {}) # dict tech → avg MW (constant dispatch)
 
-    availability = inputs["availability"]
-    electric_techs = tuple(availability.keys())
-    base_caps = inputs["base_capacities_mw"]
+    elec_load = np.asarray(inputs["electric_load_mw"], dtype=float)
+    heat_load = np.asarray(inputs["heat_load_mw"],     dtype=float)
+    cold_load = np.asarray(inputs["cold_load_mw"],     dtype=float)
 
-    solar_availability = inputs["solar_thermal_availability"]
-    solar_base_capacity = base_caps["solar_thermal"]
-    supply_profiles = inputs.get("supply_profiles_mw", {})
+    # Fixed baseload dispatch [MW] — constant at every hour.
+    # Hydro, tidal, wave, geothermal-electric reduce the remaining electric load
+    # that variable renewables + storage must cover.
+    # Geothermal-heat is a constant direct heat supply (like solar thermal but dispatchable).
+    fixed_elec_mw = (fixed.get("hydro",    0.0)
+                     + fixed.get("tidal",   0.0)
+                     + fixed.get("wave",    0.0)
+                     + fixed.get("geo_elec",0.0))
+    fixed_heat_mw = fixed.get("geo_heat", 0.0)
 
-    electric_load = inputs["electric_load_mw"]
-    heat_load = inputs["heat_load_mw"]
-    cold_load = inputs["cold_load_mw"]
+    # ── Derived constants (region-specific) ─────────────────────────────────
 
-    storage_meta = inputs["storage"]
-    storage_costs = inputs.get("storage_costs", DEFAULT_STORAGE_COSTS)
+    # Rooftop PV split
+    res_base = detail.get("res_rooftop_pv", base["rooftop_pv"] * 0.6)
+    com_base = detail.get("com_rooftop_pv", base["rooftop_pv"] * 0.4)
 
-    # Heat pumps: convert electricity to thermal and cooling energy.
-    heat_cop = inputs.get("heat_cop", 4.0)
-    cold_cop = inputs.get("cold_cop", 3.0)
+    # Load averages used as proxy power rates for storage with no explicit
+    # power-rate parameter
+    avg_heat  = float(np.mean(heat_load))   # ≈ WARMMAX proxy (MW)
+    avg_cold  = float(np.mean(cold_load))   # ≈ TSTORCOOL proxy (MW)
+    avg_elec  = float(np.mean(elec_load))
 
-    user_capacity_limits = inputs.get("capacity_limits_mw", {})
-    capacity_upper_bounds = {}
-    for tech in electric_techs:
-        default_limit = DEFAULT_CAPACITY_LIMITS_MW.get(tech, base_caps[tech])
-        upper_bound = user_capacity_limits.get(tech, default_limit)
-        if upper_bound <= 0.0:
-            upper_bound = default_limit
-        # if upper_bound < base_caps[tech]:
-        #     upper_bound = base_caps[tech]
-        capacity_upper_bounds[tech] = upper_bound
-
-    solar_capacity_max = inputs.get(
-        "solar_capacity_limit_mw",
-        max(
-            DEFAULT_CAPACITY_LIMITS_MW.get("solar_thermal", solar_base_capacity),
-            solar_base_capacity,
-        ),
+    # PHS power: max(existing PHS, PHSMIN) in MW — mirrors Fortran line 10984
+    phs_power_mw = max(
+        inputs.get("storage", {}).get("electric", {}).get("base_power_mw", 0.0),
+        PHSMIN * 1e6,
     )
 
-    # Storage parameters for each carrier
-    storage_params = {
-        "electric": StorageParameters(
-            base_power_mw=storage_meta["electric"]["base_power_mw"],
-            energy_hours=storage_meta["electric"]["energy_hours"],
-            charge_efficiency=0.95,
-            discharge_efficiency=0.95,
-        ),
-        "heat": StorageParameters(
-            base_power_mw=storage_meta["heat"]["base_power_mw"],
-            energy_hours=storage_meta["heat"]["energy_hours"],
-            charge_efficiency=0.95,
-            discharge_efficiency=0.95,
-        ),
-        "cold": StorageParameters(
-            base_power_mw=storage_meta["cold"]["base_power_mw"],
-            energy_hours=storage_meta["cold"]["energy_hours"],
-            charge_efficiency=0.9,
-            discharge_efficiency=0.9,
-        ),
-    }
+    # UTES charge power = UGFAC × avg heat load (mirrors Fortran STORUGFAC usage)
+    utes_power_mw = UGFAC * avg_heat
 
-    capital_costs = {**DEFAULT_CAPITAL_COSTS, **inputs.get("capital_costs", {})}
-    variable_costs = {**DEFAULT_VARIABLE_COSTS, **inputs.get("variable_costs", {})}
+    # H2 annual load proxy (for DAYH2STOR seasonal capacity)
+    # TLOADH2 in Fortran ≈ fraction of electric load used for H2 production
+    # We use a conservative 5% of annual electric load as H2 demand proxy.
+    annual_h2_proxy_mwh = float(np.sum(elec_load)) * 0.05
 
-    model_name = f"LoadMatchLP_{inputs['region']}"
-    m = pyo.ConcreteModel(name=model_name)
-    m.T = pyo.RangeSet(0, n_hours - 1)
-    m.electric_techs = pyo.Set(initialize=electric_techs, ordered=True)
+    # ── Model ────────────────────────────────────────────────────────────────
+    m = pyo.ConcreteModel(name=f"LoadMatchLP_{inputs['region']}")
+    m.T = pyo.RangeSet(0, n - 1)
 
-    # Parameters for generation availability
-    availability_data = {
-        (tech, t): float(availability[tech][t])
-        for tech in electric_techs
-        for t in range(n_hours)
-    }
-    m.availability = pyo.Param(
-        m.electric_techs,
-        m.T,
-        initialize=availability_data,
-        within=pyo.NonNegativeReals,
-        mutable=False,
-    )
+    # ════════════════════════════════════════════════════════════════════════
+    # Decision variables — generation factors (→ PARAM_REGISTRY)
+    # Installed capacity [MW] = factor × base_capacity_mw
+    # ════════════════════════════════════════════════════════════════════════
+    m.faconwin   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
+    m.facoffwin  = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
+    m.facutilpv  = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
+    m.facrespv   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
+    m.faccompv   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
+    m.cspturbfac = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 12))
+    m.facsht     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
 
-    m.base_capacity = pyo.Param(
-        m.electric_techs,
-        initialize={tech: float(base_caps[tech]) for tech in electric_techs},
-        within=pyo.NonNegativeReals,
-        mutable=False,
-    )
+    # ════════════════════════════════════════════════════════════════════════
+    # Decision variables — storage with load-derived power rates
+    # (duration [h or days] is the only free sizing variable → energy linear)
+    # ════════════════════════════════════════════════════════════════════════
 
-    m.capital_cost = pyo.Param(
-        m.electric_techs,
-        initialize={tech: float(capital_costs[tech]) for tech in electric_techs},
-        within=pyo.NonNegativeReals,
-        mutable=False,
-    )
+    # STORHPHS  — PHS duration (hours).  Energy = phs_power_mw × storhphs
+    m.storhphs   = pyo.Var(within=pyo.NonNegativeReals, bounds=(1, 200))
 
-    m.variable_cost = pyo.Param(
-        m.electric_techs,
-        initialize={tech: float(variable_costs.get(tech, 0.0)) for tech in electric_techs},
-        mutable=False,
-    )
+    # STORHCOLD — cold TES duration (hours).  Energy = avg_cold_mw × storhcold
+    m.storhcold  = pyo.Var(within=pyo.NonNegativeReals, bounds=(1, 72))
 
-    m.electric_load = pyo.Param(m.T, initialize=_dict_from_series(electric_load))
-    m.heat_load = pyo.Param(m.T, initialize=_dict_from_series(heat_load))
-    m.cold_load = pyo.Param(m.T, initialize=_dict_from_series(cold_load))
+    # STORHHWAT — hot-water STES duration (hours).  Energy = avg_heat_mw × storhhwat
+    m.storhhwat  = pyo.Var(within=pyo.NonNegativeReals, bounds=(1, 72))
 
-    # Decision variables
-    m.capacity = pyo.Var(
-        m.electric_techs,
-        within=pyo.NonNegativeReals,
-        bounds=lambda _m, tech: (0.0, capacity_upper_bounds[tech]),
-    )
-    m.gen = pyo.Var(m.electric_techs, m.T, within=pyo.NonNegativeReals)
+    # STORUGDYS — UTES seasonal storage (days).  Energy = utes_power_mw × storugdys × 24
+    m.storugdys  = pyo.Var(within=pyo.NonNegativeReals, bounds=(1, 180))
 
-    m.load_shed_electric = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.excess_electric = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    # ════════════════════════════════════════════════════════════════════════
+    # Decision variables — storage with explicit power-rate parameters
+    # Power [MW] and energy [MWh] are decoupled LP variables.
+    # Duration parameter recovered post-solve as energy / power.
+    # ════════════════════════════════════════════════════════════════════════
 
-    # Electricity storage
-    elec_params = storage_params["electric"]
-    m.storage_power_add_electric = pyo.Var(within=pyo.NonNegativeReals)
-    m.charge_electric = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.discharge_electric = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.soc_electric = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    # Battery  →  BATDISCH [TW] = bat_power_mw / 1e6
+    #             STORHBAT [h]  = bat_energy_mwh / bat_power_mw  (post-solve)
+    m.bat_power_mw   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e7))
+    m.bat_energy_mwh = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e8))
 
-    base_energy_electric = elec_params.base_energy_mwh
-    m.soc0_electric = pyo.Param(initialize=0.5 * base_energy_electric, mutable=False)
+    # H2 fuel cell  →  FCDISCH [TW] = h2_fc_mw / 1e6
+    # H2 electrolyser → FCCHARG [TW] = h2_chg_mw / 1e6
+    # H2 storage    →  STORHHFC [h] = h2_energy_mwh / h2_fc_mw  (post-solve)
+    m.h2_fc_mw       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e6))
+    m.h2_chg_mw      = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e6))
+    m.h2_energy_mwh  = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e8))
 
-    m.electric_power_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.charge_electric[t]
-        <= elec_params.base_power_mw + _m.storage_power_add_electric,
-    )
-    m.electric_discharge_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.discharge_electric[t]
-        <= elec_params.base_power_mw + _m.storage_power_add_electric,
-    )
+    # H2 seasonal  →  DAYH2STOR [days] = h2_seasonal_mwh / (annual_h2_proxy / 365)
+    #                                    (post-solve)
+    m.h2_seasonal_mwh = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e8))
 
-    electric_energy_capacity = (
-        elec_params.base_power_mw + m.storage_power_add_electric
-    ) * elec_params.energy_hours
+    # Heat battery  →  HBTDISCH [TW] = hbat_power_mw / 1e6
+    #                  STORHHBT [h]  = hbat_energy_mwh / hbat_power_mw  (post-solve)
+    m.hbat_power_mw   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e6))
+    m.hbat_energy_mwh = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 2e8))
 
-    m.electric_soc_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.soc_electric[t] <= electric_energy_capacity,
-    )
+    # ════════════════════════════════════════════════════════════════════════
+    # Dispatch variables — generation (MW)
+    # ════════════════════════════════════════════════════════════════════════
+    m.gen_wind_on  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.gen_wind_off = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.gen_pv_res   = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.gen_pv_com   = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.gen_pv_util  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.gen_csp      = pyo.Var(m.T, within=pyo.NonNegativeReals)  # electric
+    m.gen_solth    = pyo.Var(m.T, within=pyo.NonNegativeReals)  # heat
 
-    def electric_soc_rule(_m, t):
-        charge = elec_params.charge_efficiency * _m.charge_electric[t]
-        discharge = _m.discharge_electric[t] / elec_params.discharge_efficiency
-        if t == 0:
-            return _m.soc_electric[t] == _m.soc0_electric + charge - discharge
-        return _m.soc_electric[t] == _m.soc_electric[t - 1] + charge - discharge
+    # ════════════════════════════════════════════════════════════════════════
+    # Dispatch variables — electric storage
+    # ════════════════════════════════════════════════════════════════════════
+    # Battery
+    m.chg_bat  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.dis_bat  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.soc_bat  = pyo.Var(m.T, within=pyo.NonNegativeReals)
 
-    m.electric_soc_balance = pyo.Constraint(m.T, rule=electric_soc_rule)
+    # PHS
+    m.chg_phs  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.dis_phs  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.soc_phs  = pyo.Var(m.T, within=pyo.NonNegativeReals)
 
-    m.electric_ending_soc = pyo.Constraint(
-        expr=m.soc_electric[n_hours - 1] == m.soc0_electric
-    )
+    # ════════════════════════════════════════════════════════════════════════
+    # Dispatch variables — H2 sector
+    # ════════════════════════════════════════════════════════════════════════
+    m.electrolyser = pyo.Var(m.T, within=pyo.NonNegativeReals)  # MW_elec consumed
+    m.fuelcell     = pyo.Var(m.T, within=pyo.NonNegativeReals)  # MW_elec produced
+    m.soc_h2       = pyo.Var(m.T, within=pyo.NonNegativeReals)  # MWh equiv.
 
-    # Heat sector variables
-    solar_base_capacity = base_caps["solar_thermal"]
-    solar_cap_cost = capital_costs["solar_thermal"]
-    solar_var_cost = variable_costs.get("solar_thermal", 0.0)
+    # ════════════════════════════════════════════════════════════════════════
+    # Dispatch variables — heat sector
+    # ════════════════════════════════════════════════════════════════════════
+    m.heat_pump   = pyo.Var(m.T, within=pyo.NonNegativeReals)  # MW_elec → heat
+    # Hot-water STES
+    m.chg_hwstes  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.dis_hwstes  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.soc_hwstes  = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    # Heat battery
+    m.chg_hbat    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.dis_hbat    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.soc_hbat    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    # UTES seasonal
+    m.chg_utes    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.dis_utes    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.soc_utes    = pyo.Var(m.T, within=pyo.NonNegativeReals)
 
-    m.solar_capacity = pyo.Var(
-        within=pyo.NonNegativeReals,
-        bounds=(0.0, solar_capacity_max),
-    )
-    m.solar_gen = pyo.Var(m.T, within=pyo.NonNegativeReals)
-
-    m.solar_availability = pyo.Param(
-        m.T,
-        initialize=_dict_from_series(solar_availability),
-        within=pyo.NonNegativeReals,
-        mutable=False,
-    )
-
-    m.electric_to_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.load_shed_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.excess_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
-
-    heat_params = storage_params["heat"]
-    m.storage_power_add_heat = pyo.Var(within=pyo.NonNegativeReals)
-    m.charge_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.discharge_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.soc_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.soc0_heat = pyo.Param(
-        initialize=0.5 * heat_params.base_energy_mwh, mutable=False
-    )
-
-    def heat_generation_limit(_m, t):
-        return _m.solar_gen[t] <= _m.solar_availability[t] * _m.solar_capacity
-
-    m.heat_generation_limit = pyo.Constraint(m.T, rule=heat_generation_limit)
-
-    m.heat_charge_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.charge_heat[t]
-        <= heat_params.base_power_mw + _m.storage_power_add_heat,
-    )
-    m.heat_discharge_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.discharge_heat[t]
-        <= heat_params.base_power_mw + _m.storage_power_add_heat,
-    )
-
-    heat_energy_capacity = (
-        heat_params.base_power_mw + m.storage_power_add_heat
-    ) * heat_params.energy_hours
-
-    m.heat_soc_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.soc_heat[t] <= heat_energy_capacity,
-    )
-
-    def heat_soc_rule(_m, t):
-        charge = heat_params.charge_efficiency * _m.charge_heat[t]
-        discharge = _m.discharge_heat[t] / heat_params.discharge_efficiency
-        if t == 0:
-            return _m.soc_heat[t] == _m.soc0_heat + charge - discharge
-        return _m.soc_heat[t] == _m.soc_heat[t - 1] + charge - discharge
-
-    m.heat_soc_balance = pyo.Constraint(m.T, rule=heat_soc_rule)
-    m.heat_ending_soc = pyo.Constraint(expr=m.soc_heat[n_hours - 1] == m.soc0_heat)
-
-    # Cold sector variables
-    m.electric_to_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.load_shed_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.excess_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
-
-    cold_params = storage_params["cold"]
-    m.storage_power_add_cold = pyo.Var(within=pyo.NonNegativeReals)
-    m.charge_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.discharge_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    # ════════════════════════════════════════════════════════════════════════
+    # Dispatch variables — cold sector
+    # ════════════════════════════════════════════════════════════════════════
+    m.ac       = pyo.Var(m.T, within=pyo.NonNegativeReals)  # MW_elec
+    m.chg_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.dis_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
     m.soc_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
-    m.soc0_cold = pyo.Param(
-        initialize=0.5 * cold_params.base_energy_mwh, mutable=False
-    )
 
-    m.cold_charge_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.charge_cold[t]
-        <= cold_params.base_power_mw + _m.storage_power_add_cold,
-    )
-    m.cold_discharge_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.discharge_cold[t]
-        <= cold_params.base_power_mw + _m.storage_power_add_cold,
-    )
+    # ════════════════════════════════════════════════════════════════════════
+    # Slack variables
+    # ════════════════════════════════════════════════════════════════════════
+    m.shed_elec    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.surplus_elec = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.shed_heat    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.surplus_heat = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.shed_cold    = pyo.Var(m.T, within=pyo.NonNegativeReals)
+    m.surplus_cold = pyo.Var(m.T, within=pyo.NonNegativeReals)
 
-    cold_energy_capacity = (
-        cold_params.base_power_mw + m.storage_power_add_cold
-    ) * cold_params.energy_hours
+    # ════════════════════════════════════════════════════════════════════════
+    # Helper: availability at time t (safe for techs with zero base capacity)
+    # ════════════════════════════════════════════════════════════════════════
+    def av(tech, t):
+        arr = avail.get(tech)
+        return float(arr[t]) if arr is not None else 0.0
 
-    m.cold_soc_limit = pyo.Constraint(
-        m.T,
-        rule=lambda _m, t: _m.soc_cold[t] <= cold_energy_capacity,
-    )
+    # ════════════════════════════════════════════════════════════════════════
+    # Generation limits
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_wind_on  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_wind_on[t]  <= av("onshore_wind", t)  * base["onshore_wind"]  * _m.faconwin)
+    m.c_wind_off = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_wind_off[t] <= av("offshore_wind", t) * base["offshore_wind"] * _m.facoffwin)
+    m.c_pv_res   = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_pv_res[t]   <= av("rooftop_pv", t)    * res_base              * _m.facrespv)
+    m.c_pv_com   = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_pv_com[t]   <= av("rooftop_pv", t)    * com_base              * _m.faccompv)
+    m.c_pv_util  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_pv_util[t]  <= av("utility_pv", t)    * base["utility_pv"]   * _m.facutilpv)
+    m.c_csp      = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_csp[t]      <= av("csp", t)            * base["csp"]          * _m.cspturbfac)
+    m.c_solth    = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.gen_solth[t]    <= float(sol_av[t])         * base["solar_thermal"] * _m.facsht)
 
-    def cold_soc_rule(_m, t):
-        charge = cold_params.charge_efficiency * _m.charge_cold[t]
-        discharge = _m.discharge_cold[t] / cold_params.discharge_efficiency
-        if t == 0:
-            return _m.soc_cold[t] == _m.soc0_cold + charge - discharge
-        return _m.soc_cold[t] == _m.soc_cold[t - 1] + charge - discharge
+    # ════════════════════════════════════════════════════════════════════════
+    # Battery storage
+    # Power cap: bat_power_mw (both charge and discharge)
+    # Energy cap: bat_energy_mwh
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_bat_chg_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.chg_bat[t] <= _m.bat_power_mw)
+    m.c_bat_dis_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.dis_bat[t] <= _m.bat_power_mw)
+    m.c_bat_soc_max  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_bat[t] <= _m.bat_energy_mwh)
 
-    m.cold_soc_balance = pyo.Constraint(m.T, rule=cold_soc_rule)
-    m.cold_ending_soc = pyo.Constraint(expr=m.soc_cold[n_hours - 1] == m.soc0_cold)
+    def _bat_soc(m_, t):
+        prev = m_.soc_bat[t - 1] if t > 0 else m_.soc_bat[n - 1]
+        return m_.soc_bat[t] == prev + BAT_EFF * m_.chg_bat[t] - m_.dis_bat[t] / BAT_EFF
+    m.c_bat_soc = pyo.Constraint(m.T, rule=_bat_soc)
 
-    # Generation capacity limits
-    def generation_limit_rule(_m, tech, t):
-        return _m.gen[tech, t] <= _m.availability[tech, t] * _m.capacity[tech]
+    # ════════════════════════════════════════════════════════════════════════
+    # PHS storage
+    # Power cap: phs_power_mw (fixed constant)
+    # Energy cap: phs_power_mw × storhphs  (linear in storhphs)
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_phs_chg_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.chg_phs[t] <= phs_power_mw)
+    m.c_phs_dis_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.dis_phs[t] <= phs_power_mw)
+    m.c_phs_soc_max  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_phs[t] <= phs_power_mw * _m.storhphs)
 
-    m.generation_limits = pyo.Constraint(
-        m.electric_techs, m.T, rule=generation_limit_rule
-    )
+    def _phs_soc(m_, t):
+        prev = m_.soc_phs[t - 1] if t > 0 else m_.soc_phs[n - 1]
+        return m_.soc_phs[t] == prev + 0.90 * m_.chg_phs[t] - m_.dis_phs[t] / 0.90
+    m.c_phs_soc = pyo.Constraint(m.T, rule=_phs_soc)
 
+    # ════════════════════════════════════════════════════════════════════════
+    # H2 storage
+    # Charge power cap: h2_chg_mw (electrolyser)
+    # Discharge power cap: h2_fc_mw (fuel cell)
+    # Energy cap: max(h2_energy_mwh, h2_seasonal_mwh)
+    # To keep LP linear: soc_h2 ≤ h2_energy_mwh  AND  soc_h2 ≤ h2_seasonal_mwh
+    # would give min; instead use a single combined energy variable.
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_h2_chg_pow   = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.electrolyser[t] <= _m.h2_chg_mw)
+    m.c_h2_dis_pow   = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.fuelcell[t]     <= _m.h2_fc_mw)
+    # Total H2 capacity = max of short-term (h2_energy_mwh) and seasonal (h2_seasonal_mwh)
+    # LP: soc ≤ h2_energy_mwh + h2_seasonal_mwh (conservative upper bound)
+    m.c_h2_soc_max   = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_h2[t] <= _m.h2_energy_mwh + _m.h2_seasonal_mwh)
+    # Seasonal buffer must cover a minimum fraction of annual H2 proxy demand
+    m.c_h2_seasonal_min = pyo.Constraint(
+        expr=m.h2_seasonal_mwh >= annual_h2_proxy_mwh / DAYSPY)
+
+    def _h2_soc(m_, t):
+        prev = m_.soc_h2[t - 1] if t > 0 else m_.soc_h2[n - 1]
+        return m_.soc_h2[t] == prev + H2_RT_EFF * m_.electrolyser[t] - m_.fuelcell[t]
+    m.c_h2_soc = pyo.Constraint(m.T, rule=_h2_soc)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Hot-water STES
+    # Power cap: avg_heat_mw × HWFAC (fixed)
+    # Energy cap: avg_heat_mw × storhhwat  (linear in storhhwat)
+    # ════════════════════════════════════════════════════════════════════════
+    hwstes_power_mw = HWFAC * avg_heat
+    m.c_hwstes_chg_pow = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.chg_hwstes[t] <= hwstes_power_mw)
+    m.c_hwstes_dis_pow = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.dis_hwstes[t] <= hwstes_power_mw)
+    m.c_hwstes_soc_max = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_hwstes[t] <= avg_heat * _m.storhhwat)
+
+    def _hwstes_soc(m_, t):
+        prev = m_.soc_hwstes[t - 1] if t > 0 else m_.soc_hwstes[n - 1]
+        return m_.soc_hwstes[t] == prev + 0.95 * m_.chg_hwstes[t] - m_.dis_hwstes[t] / 0.95
+    m.c_hwstes_soc = pyo.Constraint(m.T, rule=_hwstes_soc)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Heat battery
+    # Power cap: hbat_power_mw (both charge and discharge)
+    # Energy cap: hbat_energy_mwh
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_hbat_chg_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.chg_hbat[t] <= _m.hbat_power_mw)
+    m.c_hbat_dis_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.dis_hbat[t] <= _m.hbat_power_mw)
+    m.c_hbat_soc_max  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_hbat[t] <= _m.hbat_energy_mwh)
+
+    def _hbat_soc(m_, t):
+        prev = m_.soc_hbat[t - 1] if t > 0 else m_.soc_hbat[n - 1]
+        return m_.soc_hbat[t] == prev + 0.95 * m_.chg_hbat[t] - m_.dis_hbat[t] / 0.95
+    m.c_hbat_soc = pyo.Constraint(m.T, rule=_hbat_soc)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # UTES seasonal heat storage
+    # Power cap: utes_power_mw = UGFAC × avg_heat (fixed)
+    # Energy cap: utes_power_mw × storugdys × 24  (linear in storugdys)
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_utes_chg_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.chg_utes[t] <= utes_power_mw)
+    m.c_utes_dis_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.dis_utes[t] <= utes_power_mw)
+    m.c_utes_soc_max  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_utes[t] <= utes_power_mw * _m.storugdys * HRSPDAY)
+
+    def _utes_soc(m_, t):
+        prev = m_.soc_utes[t - 1] if t > 0 else m_.soc_utes[n - 1]
+        return m_.soc_utes[t] == prev + 0.90 * m_.chg_utes[t] - m_.dis_utes[t] / 0.90
+    m.c_utes_soc = pyo.Constraint(m.T, rule=_utes_soc)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Cold TES
+    # Power cap: avg_cold_mw (fixed, proportional to cold load)
+    # Energy cap: avg_cold_mw × storhcold  (linear in storhcold)
+    # ════════════════════════════════════════════════════════════════════════
+    m.c_cold_chg_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.chg_cold[t] <= avg_cold)
+    m.c_cold_dis_pow  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.dis_cold[t] <= avg_cold)
+    m.c_cold_soc_max  = pyo.Constraint(m.T, rule=lambda _m, t:
+        _m.soc_cold[t] <= avg_cold * _m.storhcold)
+
+    def _cold_soc(m_, t):
+        prev = m_.soc_cold[t - 1] if t > 0 else m_.soc_cold[n - 1]
+        return m_.soc_cold[t] == prev + 0.95 * m_.chg_cold[t] - m_.dis_cold[t] / 0.95
+    m.c_cold_soc = pyo.Constraint(m.T, rule=_cold_soc)
+
+    # ════════════════════════════════════════════════════════════════════════
     # Energy balance constraints
-    def electric_balance_rule(_m, t):
-        supply = sum(_m.gen[tech, t] for tech in _m.electric_techs)
-        supply += _m.discharge_electric[t]
-        supply += _m.load_shed_electric[t]
+    # ════════════════════════════════════════════════════════════════════════
 
-        demand = _m.electric_load[t]
-        demand += _m.charge_electric[t]
-        demand += _m.electric_to_heat[t]
-        demand += _m.electric_to_cold[t]
-        demand += _m.excess_electric[t]
+    def _elec_balance(m_, t):
+        supply  = (m_.gen_wind_on[t] + m_.gen_wind_off[t]
+                   + m_.gen_pv_res[t] + m_.gen_pv_com[t] + m_.gen_pv_util[t]
+                   + m_.gen_csp[t]
+                   + fixed_elec_mw          # hydro + tidal + wave + geo_elec (constant)
+                   + m_.dis_bat[t] + m_.dis_phs[t] + m_.fuelcell[t]
+                   + m_.shed_elec[t])
+        demand  = (float(elec_load[t])
+                   + m_.chg_bat[t] + m_.chg_phs[t]
+                   + m_.electrolyser[t]
+                   + m_.heat_pump[t] + m_.ac[t]
+                   + m_.surplus_elec[t])
         return supply == demand
+    m.c_elec_balance = pyo.Constraint(m.T, rule=_elec_balance)
 
-    m.electric_balance = pyo.Constraint(m.T, rule=electric_balance_rule)
-
-    def heat_balance_rule(_m, t):
-        supply = _m.solar_gen[t]
-        supply += _m.discharge_heat[t]
-        supply += heat_cop * _m.electric_to_heat[t]
-        supply += _m.load_shed_heat[t]
-
-        demand = _m.heat_load[t]
-        demand += _m.charge_heat[t]
-        demand += _m.excess_heat[t]
+    def _heat_balance(m_, t):
+        supply  = (m_.gen_solth[t]
+                   + fixed_heat_mw          # geothermal direct heat (constant)
+                   + HEAT_COP * m_.heat_pump[t]
+                   + m_.dis_hwstes[t] + m_.dis_hbat[t] + m_.dis_utes[t]
+                   + m_.shed_heat[t])
+        demand  = (float(heat_load[t])
+                   + m_.chg_hwstes[t] + m_.chg_hbat[t] + m_.chg_utes[t]
+                   + m_.surplus_heat[t])
         return supply == demand
+    m.c_heat_balance = pyo.Constraint(m.T, rule=_heat_balance)
 
-    m.heat_balance = pyo.Constraint(m.T, rule=heat_balance_rule)
-
-    def cold_balance_rule(_m, t):
-        supply = cold_cop * _m.electric_to_cold[t]
-        supply += _m.discharge_cold[t]
-        supply += _m.load_shed_cold[t]
-
-        demand = _m.cold_load[t]
-        demand += _m.charge_cold[t]
-        demand += _m.excess_cold[t]
+    def _cold_balance(m_, t):
+        supply  = (COLD_COP * m_.ac[t]
+                   + m_.dis_cold[t]
+                   + m_.shed_cold[t])
+        demand  = (float(cold_load[t])
+                   + m_.chg_cold[t]
+                   + m_.surplus_cold[t])
         return supply == demand
+    m.c_cold_balance = pyo.Constraint(m.T, rule=_cold_balance)
 
-    m.cold_balance = pyo.Constraint(m.T, rule=cold_balance_rule)
+    # ════════════════════════════════════════════════════════════════════════
+    # Objective — minimise total annualised cost + load-shed penalty
+    # ════════════════════════════════════════════════════════════════════════
 
-    # Objective components
-    capex_electric = sum(
-        m.capital_cost[tech] * m.capacity[tech] for tech in m.electric_techs
+    # Generation CAPEX
+    gen_capex = (
+        GEN_COST["onshore_wind"]  * base["onshore_wind"]  * m.faconwin
+        + GEN_COST["offshore_wind"] * base["offshore_wind"] * m.facoffwin
+        + GEN_COST["res_pv"]        * res_base               * m.facrespv
+        + GEN_COST["com_pv"]        * com_base               * m.faccompv
+        + GEN_COST["utility_pv"]    * base["utility_pv"]    * m.facutilpv
+        + GEN_COST["csp"]           * base["csp"]            * m.cspturbfac
+        + GEN_COST["solar_thermal"] * base["solar_thermal"]  * m.facsht
     )
 
-    capex_heat = solar_cap_cost * m.solar_capacity
-
-    storage_capex = (
-        storage_costs["electric"]["power"] * m.storage_power_add_electric
-        + storage_costs["electric"]["energy"]
-        * elec_params.energy_hours
-        * m.storage_power_add_electric
-        + storage_costs["heat"]["power"] * m.storage_power_add_heat
-        + storage_costs["heat"]["energy"]
-        * heat_params.energy_hours
-        * m.storage_power_add_heat
-        + storage_costs["cold"]["power"] * m.storage_power_add_cold
-        + storage_costs["cold"]["energy"]
-        * cold_params.energy_hours
-        * m.storage_power_add_cold
+    # Storage CAPEX (power + energy components)
+    stor_capex = (
+        STOR_COST_POWER["battery"]  * m.bat_power_mw
+        + STOR_COST_ENERGY["battery"]  * m.bat_energy_mwh
+        + STOR_COST_ENERGY["phs"]      * phs_power_mw * m.storhphs
+        + STOR_COST_POWER["h2_fc"]     * m.h2_fc_mw
+        + STOR_COST_POWER["h2_chg"]    * m.h2_chg_mw
+        + STOR_COST_ENERGY["h2"]       * (m.h2_energy_mwh + m.h2_seasonal_mwh)
+        + STOR_COST_POWER["heat_bat"]  * m.hbat_power_mw
+        + STOR_COST_ENERGY["heat_bat"] * m.hbat_energy_mwh
+        + STOR_COST_ENERGY["hw_stes"]  * avg_heat * m.storhhwat
+        + STOR_COST_ENERGY["cold_tes"] * avg_cold * m.storhcold
+        + STOR_COST_ENERGY["utes"]     * utes_power_mw * m.storugdys * HRSPDAY
     )
 
-    var_costs_electric = sum(
-        m.variable_cost[tech] * m.gen[tech, t]
-        for tech in m.electric_techs
-        for t in range(n_hours)
-    )
-    var_costs_heat = solar_var_cost * sum(m.solar_gen[t] for t in range(n_hours))
-
-    penalty_costs = LOAD_SHEDDING_PENALTY * (
-        sum(m.load_shed_electric[t] for t in range(n_hours))
-        + sum(m.load_shed_heat[t] for t in range(n_hours))
-        + sum(m.load_shed_cold[t] for t in range(n_hours))
+    # Load-shed penalty
+    penalty = LOAD_SHED_PENALTY * (
+        sum(m.shed_elec[t] + m.shed_heat[t] + m.shed_cold[t] for t in T)
     )
 
-    curtail_costs = CURTAILMENT_PENALTY * (
-        sum(m.excess_electric[t] for t in range(n_hours))
-        + sum(m.excess_heat[t] for t in range(n_hours))
-        + sum(m.excess_cold[t] for t in range(n_hours))
+    # Curtailment (small penalty to avoid free surplus)
+    curtail = CURTAIL_PENALTY * (
+        sum(m.surplus_elec[t] + m.surplus_heat[t] + m.surplus_cold[t] for t in T)
     )
 
-    m.total_cost = pyo.Objective(
-        expr=capex_electric
-        + capex_heat
-        + storage_capex
-        + var_costs_electric
-        + var_costs_heat
-        + penalty_costs
-        + curtail_costs,
-        sense=pyo.minimize,
-    )
+    m.obj = pyo.Objective(expr=gen_capex + stor_capex + penalty + curtail,
+                          sense=pyo.minimize)
 
-    # Record additional items for downstream use if desired
-    m.metadata = {
-        "hours": hours,
-        "supply_profiles_mw": supply_profiles,
-        "heat_cop": heat_cop,
-        "cold_cop": cold_cop,
-        "solar_base_capacity_mw": solar_base_capacity,
-        "capacity_upper_bounds_mw": capacity_upper_bounds,
-        "solar_capacity_limit_mw": solar_capacity_max,
-        "storage_base_power_mw": {
-            "electric": elec_params.base_power_mw,
-            "heat": heat_params.base_power_mw,
-            "cold": cold_params.base_power_mw,
-        },
+    # Store metadata for collect_results
+    m._lp_meta = {
+        "phs_power_mw":       phs_power_mw,
+        "avg_heat_mw":        avg_heat,
+        "avg_cold_mw":        avg_cold,
+        "utes_power_mw":      utes_power_mw,
+        "annual_h2_proxy_mwh": annual_h2_proxy_mwh,
+        "fixed_elec_mw":      fixed_elec_mw,
+        "fixed_heat_mw":      fixed_heat_mw,
+        "n_hours":            n,
     }
 
     return m
+
+
+# ── Collect results ──────────────────────────────────────────────────────────
+
+def collect_results(model: pyo.ConcreteModel) -> Dict[str, float]:
+    """Extract LP solution as a dict of PARAM_REGISTRY keys → values.
+
+    Duration parameters that depend on power/energy ratios are computed
+    here post-solve.  Fixed parameters are not included — they are merged
+    in export_fortran_factors.py using PARAM_REGISTRY defaults.
+    """
+    v = pyo.value
+    meta = model._lp_meta
+
+    phs_power_mw   = meta["phs_power_mw"]
+    avg_heat_mw    = meta["avg_heat_mw"]
+    avg_cold_mw    = meta["avg_cold_mw"]
+    utes_power_mw  = meta["utes_power_mw"]
+    annual_h2_mwh  = meta["annual_h2_proxy_mwh"]
+
+    bat_power   = max(v(model.bat_power_mw),   1e-6)
+    h2_fc       = max(v(model.h2_fc_mw),       1e-6)
+    hbat_power  = max(v(model.hbat_power_mw),  1e-6)
+
+    # Duration = energy / power (post-solve, guaranteed finite)
+    storhbat  = v(model.bat_energy_mwh) / bat_power
+    storhhfc  = v(model.h2_energy_mwh)  / h2_fc
+    storhhbt  = v(model.hbat_energy_mwh) / hbat_power
+
+    # DAYH2STOR: seasonal H2 energy / (daily H2 proxy demand in MWh)
+    daily_h2_mwh  = max(annual_h2_mwh / DAYSPY, 1e-6)
+    dayh2stor = v(model.h2_seasonal_mwh) / daily_h2_mwh
+
+    return {
+        # Generation factors
+        "FACONWIN":  v(model.faconwin),
+        "FACOFFWIN": v(model.facoffwin),
+        "FACUTILPV": v(model.facutilpv),
+        "FACRESPV":  v(model.facrespv),
+        "FACCOMPV":  v(model.faccompv),
+        "CSPTURBFAC":v(model.cspturbfac),
+        "FACSHT":    v(model.facsht),
+        # Storage durations (directly LP variables)
+        "STORHPHS":  v(model.storhphs),
+        "STORHCOLD": v(model.storhcold),
+        "STORHHWAT": v(model.storhhwat),
+        "STORUGDYS": v(model.storugdys),
+        # Storage durations (computed post-solve)
+        "STORHBAT":  storhbat,
+        "STORHHFC":  storhhfc,
+        "STORHHBT":  storhhbt,
+        "DAYH2STOR": dayh2stor,
+        # Storage power rates [TW]
+        "BATDISCH":  bat_power  / 1e6,
+        "FCDISCH":   h2_fc      / 1e6,
+        "FCCHARG":   v(model.h2_chg_mw) / 1e6,
+        "HBTDISCH":  hbat_power / 1e6,
+    }

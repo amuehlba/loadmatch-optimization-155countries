@@ -43,6 +43,11 @@ def _region_paths(region: str):
         optimal_summary=results_dir / "optimal_summary.json",
         # Final optimal Fortran output (consumed by plot_results.py)
         fortran_optimal_out=results_dir / "fortran_optimal_run.out",
+        # LP warm-start GA: separate outputs so they don't overwrite the baseline-GA results
+        lp_eval_summary=results_dir / "lp_summary.json",
+        lp_ga_summary=results_dir / "lp_ga_summary.json",
+        fortran_lp_out=results_dir / "fortran_lp_run.out",
+        fortran_lp_ga_out=results_dir / "fortran_lp_ga_run.out",
     )
 
 
@@ -85,22 +90,23 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "CSPTURBFAC":  (1.0,          "capacity",  "CSP turbine capacity ratio"),
     "FACSHT":      (1.0,          "capacity",  "Solar thermal heat scaling"),
     # --- CSP / storage configuration ---
-    "CSPSTORGAT":  (2.61244594,   "ratio",     "CSP storage charge/discharge ratio"),
-    "MXHRDRM":     (11.0,         "hours",     "Max demand-response shift hours"),
+    "CSPSTORGAT":  (2.61244594,   "fixed",     "CSP storage charge/discharge ratio"),
+    "HCHARCSP":    (14.0,         "fixed",     "CSP max charge hours"),
     "BATDISCH":    (1.55,         "tw",        "Battery max discharge rate (TW)"),
-    "HCHARCSP":    (14.0,         "hours",     "CSP max charge hours"),
     "STORHBAT":    (4.0,          "hours",     "Battery storage duration hours"),
     "STORHCOLD":   (14.0,         "hours",     "Cold storage hours (PCM-ice + CW-STES)"),
     "STORHHWAT":   (14.0,         "hours",     "Hot-water STES hours"),
     "STORHPHS":    (14.0,         "hours",     "Pumped hydro storage hours"),
     # --- UTES and hydrogen storage ---
-    "UGFAC":       (3.0,          "factor",    "UTES charge rate factor"),
+    "UGFAC":       (3.0,          "fixed",     "UTES charge rate factor"),
     "STORUGDYS":   (60.0,         "days",      "UTES seasonal heat storage days"),
     "DAYH2STOR":   (40.0,         "days",      "H2 storage days"),
     # --- Hydropower ---
-    "HPTURBRAT":   (10.0,         "ratio",     "Hydro turbine discharge ratio"),
+    "HPTURBRAT":   (10.0,         "fixed",     "Hydro turbine discharge ratio"),
     "DAMCAPRAT":   (0.583,        "fixed",     "Hydro dam capacity / annual output"),
-    "DAYBASHYD":   (360.0,        "days",      "Baseload hydro storage days"),
+    "DAYBASHYD":   (360.0,        "fixed",     "Baseload hydro storage days"),
+    # --- Demand response ---
+    "MXHRDRM":     (11.0,         "fixed",     "Max demand-response shift hours"),
     # --- Thermal storage and demand response ---
     "COOLSTES":    (0.4,          "fixed",     "Fraction AC from CW-STES vs ice"),
     "PHSMIN":      (0.016,        "fixed",     "Min PHS nameplate capacity (TW)"),
@@ -113,7 +119,7 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "HCDDADD":     (1.0,          "fixed",     "HDD/CDD daily minimum (numerical safeguard)"),
     "FMORTBAU":    (0.9,          "fixed",     "BAU air-pollution mortality fraction"),
     # --- Hot-water, H2, heat battery ---
-    "HWFAC":       (1.0,          "factor",    "HW-STES charge rate factor"),
+    "HWFAC":       (1.0,          "fixed",     "HW-STES charge rate factor"),
     "FCDISCH":     (0.091,        "tw",        "H2 fuel-cell discharge rate (TW)"),
     "FCCHARG":     (0.091,        "tw",        "H2 electrolyser charge rate (TW)"),
     "STORHHFC":    (13.0,         "hours",     "H2 electricity storage hours"),
@@ -1111,7 +1117,6 @@ def run_workflow(
     else:
         run_python_model.main(region=region, output_dir=paths["lp_summary"].parent)
         export_fortran_factors.main([
-            "--region", region,
             "--summary", str(paths["lp_summary"]),
             "--output", str(paths["factor_result"]),
         ])
@@ -1251,6 +1256,116 @@ def run_workflow(
     else:
         print("Skipping plot generation (--no-plots). "
               "Run 'python -m scripts.plot_results --region {}' separately.".format(region))
+
+
+# ---------------------------------------------------------------------------
+# LP warm-start GA workflow (separate outputs, does not overwrite baseline-GA)
+# ---------------------------------------------------------------------------
+
+def run_ga_from_lp_workflow(
+    region="UNITED-STATES",
+    parallel_evals=1,
+    ga_population=24,
+    ga_generations=50,
+    ga_mutation_rate=0.15,
+    ga_mutation_scale=0.2,
+    ga_elite_frac=0.2,
+    ga_mutation_cooling=0.98,
+    ga_factor_scales=None,
+    ga_magnitude_damping=0.5,
+    generate_plots=False,
+):
+    """Run GA starting from LP factors, saving to lp_summary.json and lp_ga_summary.json.
+
+    This function intentionally does NOT overwrite baseline_summary.json or
+    optimal_summary.json so that all four cases (baseline, LP-eval, GA-from-baseline,
+    GA-from-LP) can coexist for per-region four-case comparison plots.
+    """
+    paths = _region_paths(region)
+    paths["results_dir"].mkdir(parents=True, exist_ok=True)
+    paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. Load LP factors
+    lp_factors_path = paths["factor_result"]
+    if not lp_factors_path.exists():
+        raise FileNotFoundError(
+            f"LP factors not found: {lp_factors_path}. "
+            "Run '--run-lp-only' first."
+        )
+    lp_factors = read_dat(str(lp_factors_path))
+    base_factors = _build_full_factors(lp_factors)
+
+    # 2. Evaluate LP solution with Fortran → lp_summary.json
+    print(f"Evaluating LP factors with Fortran for region '{region}'...")
+    write_factor_files(base_factors, paths)
+    lp_stdout = run_fortran(region=region, paths=paths)
+    paths["fortran_lp_out"].write_text(lp_stdout)
+    _parse_and_save(
+        lp_stdout,
+        factors=base_factors,
+        region=region,
+        run_type="lp_eval",
+        out_path=paths["lp_eval_summary"],
+    )
+    lp_cost = parse_cost(lp_stdout)
+    lp_feasible = check_feasibility(lp_stdout)
+    log_candidate(base_factors, lp_feasible, lp_cost, label="LP-eval",
+                  history_file=paths["history_file"])
+    print(f"  LP Fortran evaluation: feasible={lp_feasible}, cost={lp_cost:.3f}")
+
+    if lp_feasible:
+        candidate, cost = base_factors.copy(), lp_cost
+    else:
+        print("  LP solution infeasible in Fortran — inflating capacity factors...")
+        candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths)
+
+    # 3. GA from LP warm-start
+    print(f"Running GA from LP warm-start (population={ga_population}, "
+          f"generations={ga_generations})...")
+    best_factors, best_cost = genetic_search(
+        candidate,
+        cost,
+        population_size=ga_population,
+        generations=ga_generations,
+        mutation_rate=ga_mutation_rate,
+        mutation_scale=ga_mutation_scale,
+        elite_frac=ga_elite_frac,
+        direction="both",
+        parallel_evals=parallel_evals,
+        locked_factors=None,
+        mutation_cooling=ga_mutation_cooling,
+        factor_scales=ga_factor_scales or {},
+        magnitude_damping=ga_magnitude_damping,
+        region=region,
+        paths=paths,
+    )
+    print(f"GA-from-LP best cost: {best_cost:.3f}")
+    write_dat(best_factors, paths["results_dir"] / "lp_ga_factors.dat")
+
+    # 4. Final Fortran evaluation → lp_ga_summary.json
+    print("Running final Fortran evaluation with LP-GA optimal factors...")
+    write_factor_files(best_factors, paths)
+    final_stdout = run_fortran(region=region, paths=paths)
+    paths["fortran_lp_ga_out"].write_text(final_stdout)
+    _parse_and_save(
+        final_stdout,
+        factors=best_factors,
+        region=region,
+        run_type="lp_ga_optimal",
+        out_path=paths["lp_ga_summary"],
+    )
+    print(
+        "LP-GA final cost: {:.3f}  →  {}".format(
+            parse_cost(final_stdout), paths["lp_ga_summary"]
+        )
+    )
+
+    if generate_plots:
+        try:
+            import scripts.plot_results as _plot_results
+            _plot_results.main(region=region)
+        except Exception as exc:
+            print(f"  [WARN] Plot generation failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1420,6 +1535,16 @@ def parse_args():
              "Requires a working LP solver (Gurobi/HiGHS). "
              "Used by the Snakemake run_lp rule.",
     )
+    parser.add_argument(
+        "--run-ga-from-lp",
+        action="store_true",
+        default=False,
+        help="Evaluate LP factors with Fortran (→ lp_summary.json), then run GA "
+             "from the LP warm-start (→ lp_ga_summary.json). "
+             "Does NOT overwrite baseline_summary.json or optimal_summary.json. "
+             "Requires completed '--run-lp-only' output. "
+             "Used by the Snakemake run_ga_from_lp rule.",
+    )
     return parser.parse_args()
 
 def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
@@ -1454,11 +1579,29 @@ def main():
         paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
         run_python_model.main(region=args.region, output_dir=paths["lp_summary"].parent)
         export_fortran_factors.main([
-            "--region",  args.region,
             "--summary", str(paths["lp_summary"]),
             "--output",  str(paths["factor_result"]),
         ])
         print(f"LP factors written to: {paths['factor_result']}")
+        return
+
+    if args.run_ga_from_lp:
+        # Evaluate LP factors with Fortran → lp_summary.json
+        # Run GA from LP warm-start → lp_ga_summary.json
+        factor_scales = _parse_factor_scales(args.ga_factor_scale)
+        run_ga_from_lp_workflow(
+            region=args.region,
+            parallel_evals=max(1, args.parallel_evals),
+            ga_population=args.ga_population,
+            ga_generations=args.ga_generations,
+            ga_mutation_rate=args.ga_mutation_rate,
+            ga_mutation_scale=args.ga_mutation_scale,
+            ga_elite_frac=args.ga_elite_frac,
+            ga_mutation_cooling=args.ga_mutation_cooling,
+            ga_factor_scales=factor_scales,
+            ga_magnitude_damping=args.ga_magnitude_damping,
+            generate_plots=not args.no_plots,
+        )
         return
 
     # ── Normal GA/HJ workflow ─────────────────────────────────────────────────

@@ -195,6 +195,18 @@ def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, objec
         "solar_thermal": stats.get("TMWSOLTH", 0.0),
     }
 
+    # Fixed baseload supply — these technologies are not LP decision variables.
+    # SUPHYD2050 etc. are average annual supply in GW (from countrystats 2050 scenario);
+    # multiplied by 1000 to get MW.  Treated as constant hourly dispatch in the LP
+    # (reasonable for geothermal/tidal; conservative simplification for hydro/wave).
+    fixed_baseload_mw = {
+        "hydro":    stats.get("SUPHYD2050", 0.0) * 1_000.0,   # GW → MW
+        "tidal":    stats.get("SUPTID2050", 0.0) * 1_000.0,
+        "wave":     stats.get("SUPWAV2050", 0.0) * 1_000.0,
+        "geo_elec": stats.get("SUPGEL2050", 0.0) * 1_000.0,
+        "geo_heat": stats.get("SUPGHT2050", 0.0) * 1_000.0,
+    }
+
     availability = {}
     for tech in ("onshore_wind", "offshore_wind", "rooftop_pv", "utility_pv", "csp"):
         base_capacity = base_capacities_mw[tech]
@@ -250,6 +262,7 @@ def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, objec
         "solar_thermal_availability": solar_thermal_availability,
         "base_capacities_mw": base_capacities_mw,
         "base_capacities_detail": base_capacities_detail,
+        "fixed_baseload_mw": fixed_baseload_mw,
         "storage": storage_defaults,
         "supply_profiles_mw": supply_profiles_mw,
     }

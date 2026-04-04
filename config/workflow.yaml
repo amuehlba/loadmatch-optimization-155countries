@@ -70,7 +70,7 @@ ga:
 #   1. data/raw/baseline_results.<REGION>.dat  (if it exists)
 #   2. Fortran hardcoded region defaults       (otherwise)
 # ---------------------------------------------------------------------------
-lp_warmstart: false
+lp_warmstart: true
 
 # ---------------------------------------------------------------------------
 # Fortran compilation

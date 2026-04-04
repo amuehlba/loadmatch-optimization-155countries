@@ -1875,11 +1875,306 @@ def _load_fortran_costs(region, save_dir, repo_root, best_row):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LP input-data & system figures
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fig_input_data(region: str, save_dir: Path):
+    """Three-panel figure showing the LP input data for one region.
+
+    A) Monthly-mean electric / heat / cold load profiles (MW).
+    B) Capacity-factor profiles for a sample summer week (wind + PV).
+    C) Fixed baseload breakdown (hydro, tidal, wave, geo_elec, geo_heat).
+    """
+    from src.io.data_loader import load_inputs
+    try:
+        inputs = load_inputs(region)
+    except Exception as exc:
+        print(f"  [SKIP] fig_input_data: could not load inputs for {region}: {exc}")
+        return
+
+    elec = np.asarray(inputs["electric_load_mw"])
+    heat = np.asarray(inputs["heat_load_mw"])
+    cold = np.asarray(inputs["cold_load_mw"])
+    avail = inputs["availability"]
+    fixed = inputs.get("fixed_baseload_mw", {})
+    n = len(elec)
+
+    # Monthly means (8760 hours → 12 months of ~730 h each)
+    hrs_per_month = n / 12
+    months = np.arange(12)
+    def monthly(arr):
+        return [float(np.mean(arr[int(i*hrs_per_month):int((i+1)*hrs_per_month)]))
+                for i in range(12)]
+
+    # Sample week: mid-July (hour ~4380 ± 84)
+    mid = min(int(4380), n - 168)
+    week_slice = slice(mid, mid + 168)
+    week_h = np.arange(168)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    # Panel A — monthly loads
+    ax = axes[0]
+    month_labels = ["Jan","Feb","Mar","Apr","May","Jun",
+                    "Jul","Aug","Sep","Oct","Nov","Dec"]
+    ax.plot(months, monthly(elec), "-o", ms=4, label="Electric", color="steelblue")
+    ax.plot(months, monthly(heat), "-s", ms=4, label="Heat",     color="firebrick")
+    ax.plot(months, monthly(cold), "-^", ms=4, label="Cold",     color="teal")
+    ax.set_xticks(months)
+    ax.set_xticklabels(month_labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Average load (MW)")
+    ax.set_title("A)", loc="left", fontweight="bold")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Panel B — sample week capacity factors
+    ax = axes[1]
+    cf_colors = {
+        "onshore_wind":  "steelblue",
+        "offshore_wind": "royalblue",
+        "utility_pv":    "gold",
+        "rooftop_pv":    "orange",
+        "csp":           "darkorange",
+    }
+    for tech, color in cf_colors.items():
+        cf = avail.get(tech)
+        if cf is not None and len(cf) >= mid + 168:
+            ax.plot(week_h, cf[week_slice], lw=0.8, color=color,
+                    label=tech.replace("_", " "), alpha=0.85)
+    ax.set_xlabel("Hour of sample week (mid-July)")
+    ax.set_ylabel("Capacity factor (0–1)")
+    ax.set_title("B)", loc="left", fontweight="bold")
+    ax.legend(fontsize=7, ncol=2)
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3)
+
+    # Panel C — fixed baseload breakdown
+    ax = axes[2]
+    labels = ["Hydro", "Tidal", "Wave", "Geo\nElec", "Geo\nHeat"]
+    keys   = ["hydro", "tidal", "wave", "geo_elec", "geo_heat"]
+    colors = ["steelblue", "cadetblue", "slategray", "saddlebrown", "coral"]
+    values = [fixed.get(k, 0.0) for k in keys]
+    bars = ax.bar(labels, values, color=colors, edgecolor="white")
+    for bar, val in zip(bars, values):
+        if val > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(values)*0.01,
+                    f"{val/1000:.1f} GW", ha="center", va="bottom", fontsize=7)
+    ax.set_ylabel("Average dispatch (MW)")
+    ax.set_title("C)", loc="left", fontweight="bold")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle(f"LP input data — {region}", fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    _save(fig, "fig_input_data", save_dir)
+
+
+def fig_lp_system_diagram(save_dir: Path):
+    """Static schematic of the LP energy system model.
+
+    Shows four sectors (Electric, Heat, Cold, H2) with technologies and
+    storage connected by annotated arrows.  One-time output, not per-region.
+    """
+    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+    import matplotlib.patheffects as pe
+
+    fig, ax = plt.subplots(figsize=(14, 9))
+    ax.set_xlim(0, 14)
+    ax.set_ylim(0, 9)
+    ax.axis("off")
+
+    C = {
+        "elec":  "#AED6F1",
+        "heat":  "#F9E79F",
+        "cold":  "#A9DFBF",
+        "h2":    "#D2B4DE",
+        "stor":  "#F0F0F0",
+        "fixed": "#D5DBDB",
+    }
+
+    def box(ax, x, y, w, h, color, label, fontsize=9, bold=False):
+        patch = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.1",
+                               facecolor=color, edgecolor="gray", linewidth=1.2)
+        ax.add_patch(patch)
+        ax.text(x + w/2, y + h/2, label, ha="center", va="center",
+                fontsize=fontsize, fontweight="bold" if bold else "normal",
+                wrap=True)
+
+    def arrow(ax, x1, y1, x2, y2, label="", color="gray", lw=1.5, style="-|>"):
+        ax.annotate("", xy=(x2, y2), xytext=(x1, y1),
+                    arrowprops=dict(arrowstyle=style, color=color, lw=lw))
+        if label:
+            mx, my = (x1+x2)/2, (y1+y2)/2
+            ax.text(mx, my, label, ha="center", va="center", fontsize=7,
+                    color=color, bbox=dict(fc="white", ec="none", pad=1))
+
+    # ── Sector boxes ───────────────────────────────────────────────────────────
+    box(ax,  0.3, 5.5, 13.4, 3.2, C["elec"],  "ELECTRIC SECTOR", 11, True)
+    box(ax,  0.3, 2.5,  5.8, 2.7, C["heat"],  "HEAT SECTOR",     11, True)
+    box(ax,  6.4, 2.5,  3.5, 2.7, C["cold"],  "COLD SECTOR",     11, True)
+    box(ax, 10.2, 2.5,  3.5, 2.7, C["h2"],    "HYDROGEN SECTOR", 11, True)
+    box(ax,  0.3, 0.1, 13.4, 2.1, C["fixed"], "FIXED BASELOAD (constant dispatch)", 10, True)
+
+    # ── Variable generation (electric) ─────────────────────────────────────────
+    gen_labels = ["Onshore\nWind", "Offshore\nWind", "Rooftop\nPV (res+com)",
+                  "Utility\nPV", "CSP\nturbine", "Solar\nThermal →"]
+    gen_x = [1.0, 2.7, 4.4, 6.1, 7.8, 9.5]
+    for lbl, gx in zip(gen_labels, gen_x):
+        color = C["heat"] if "Thermal" in lbl else C["elec"]
+        box(ax, gx, 7.5, 1.4, 0.9, color, lbl, 7)
+
+    # ── Electric storage ───────────────────────────────────────────────────────
+    box(ax, 1.0, 5.8, 1.8, 1.4, C["stor"], "Battery\n(BATDISCH,\nSTORHBAT)", 7)
+    box(ax, 3.1, 5.8, 1.8, 1.4, C["stor"], "PHS\n(STORHPHS)", 7)
+    box(ax, 5.2, 5.8, 1.8, 1.4, C["stor"], "H2\nFuel Cell\n(FCDISCH)", 7)
+    box(ax, 7.3, 5.8, 2.5, 1.4, C["stor"], "CSP thermal\nstorage\n(HCHARCSP – fixed)", 7)
+
+    # ── Heat storage ───────────────────────────────────────────────────────────
+    box(ax, 0.6, 2.8, 1.6, 1.2, C["stor"], "HW-STES\n(STORHHWAT)", 7)
+    box(ax, 2.4, 2.8, 1.6, 1.2, C["stor"], "UTES\n(STORUGDYS)", 7)
+    box(ax, 4.2, 2.8, 1.6, 1.2, C["stor"], "Heat Bat.\n(HBTDISCH,\nSTORHHBT)", 7)
+
+    # ── Cold storage ───────────────────────────────────────────────────────────
+    box(ax, 6.7, 2.8, 2.8, 1.2, C["stor"], "Cold TES\n(STORHCOLD)", 7)
+
+    # ── H2 storage ─────────────────────────────────────────────────────────────
+    box(ax, 10.5, 2.8, 2.8, 1.2, C["stor"], "H2 storage\n(STORHHFC,\nDAYH2STOR)", 7)
+
+    # ── Fixed baseload technologies ────────────────────────────────────────────
+    bl_labels = ["Hydro\n(SUPHYD2050)", "Tidal\n(SUPTID2050)",
+                 "Wave\n(SUPWAV2050)", "Geo Electric\n(SUPGEL2050)",
+                 "Geo Heat\n(SUPGHT2050)"]
+    bl_x = [1.0, 3.4, 5.8, 8.2, 10.6]
+    for lbl, bx in zip(bl_labels, bl_x):
+        color = C["heat"] if "Heat" in lbl else C["fixed"]
+        box(ax, bx, 0.3, 2.0, 1.6, color, lbl, 7)
+
+    # ── Cross-sector arrows ────────────────────────────────────────────────────
+    # Heat pump: Electric → Heat
+    arrow(ax, 3.5, 5.5, 3.5, 5.2, "Heat pump\n(COP=4)", "firebrick")
+    # AC: Electric → Cold
+    arrow(ax, 8.0, 5.5, 7.7, 5.2, "AC\n(COP=3)", "teal")
+    # Electrolyser: Electric → H2
+    arrow(ax, 11.0, 5.5, 11.5, 5.2, "Electrolyser\n(FCCHARG)", "purple")
+    # Fuel cell: H2 → Electric
+    arrow(ax, 6.1, 6.5, 5.2, 6.5, "FC→elec", "purple")
+    # Hydro etc → Electric
+    for bx in bl_x[:4]:
+        arrow(ax, bx+1.0, 2.0, bx+1.0, 5.5, "", "dimgray", lw=1)
+    # Geo Heat → Heat
+    arrow(ax, 11.6, 2.0, 3.0, 4.0, "Geo heat", "saddlebrown")
+
+    fig.suptitle("LoadMatch LP — Energy System Model", fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    _save(fig, "fig_lp_system_diagram", save_dir)
+
+
+def fig_four_case_comparison(region: str, save_dir: Path):
+    """Four-case comparison per region: baseline / LP-eval / GA-from-baseline / GA-from-LP.
+
+    Reads the four JSON summary files.  Missing cases are shown as empty bars
+    with a 'not yet run' annotation so the figure is still useful when only
+    some cases exist.
+    """
+    cases = {
+        "Baseline":         save_dir / "baseline_summary.json",
+        "LP":               save_dir / "lp_summary.json",
+        "GA (baseline)":    save_dir / "optimal_summary.json",
+        "GA (LP)":          save_dir / "lp_ga_summary.json",
+    }
+    colors = ["#5D6D7E", "#A9CCE3", "#1A5276", "#2ECC71"]
+
+    def _load(path):
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    data = {label: _load(path) for label, path in cases.items()}
+    labels  = list(cases.keys())
+    present = [d is not None for d in data.values()]
+    if not any(present):
+        print(f"  [SKIP] fig_four_case_comparison: no summary files found for {region}")
+        return
+
+    def _val(d, key, default=np.nan):
+        if d is None:
+            return np.nan
+        return float(d.get(key, default) or default)
+
+    costs   = [_val(data[l], "annual_cost_mn_bil_per_yr") for l in labels]
+    wind    = [_val(data[l], "wind_twh")    for l in labels]
+    solar   = [_val(data[l], "solar_twh")   for l in labels]
+    hydro   = [_val(data[l], "hydro_twh")   for l in labels]
+    curtail = [_val(data[l], "curtailment_twh") for l in labels]
+    td_loss = [_val(data[l], "td_loss_twh") for l in labels]
+    feasible= [bool((data[l] or {}).get("feasible", False)) for l in labels]
+
+    x  = np.arange(len(labels))
+    bw = 0.6
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+
+    # Panel A — system cost
+    ax = axes[0]
+    bars = ax.bar(x, costs, width=bw, color=colors, edgecolor="white")
+    for i, (bar, c, feas) in enumerate(zip(bars, costs, feasible)):
+        if np.isnan(c):
+            ax.text(bar.get_x() + bw/2, 0.5, "not run", ha="center",
+                    va="bottom", fontsize=7, color="gray", rotation=90)
+        else:
+            marker = "" if feas else " ✗"
+            ax.text(bar.get_x() + bw/2, c + max([v for v in costs if not np.isnan(v)], default=1)*0.01,
+                    f"${c:.0f}B{marker}", ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Annual system cost ($B/yr)")
+    ax.set_title("A)", loc="left", fontweight="bold")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # Panel B — generation mix (stacked)
+    ax = axes[1]
+    bar_wind  = ax.bar(x, wind,  width=bw, label="Wind",  color="#5DADE2", edgecolor="white")
+    bar_solar = ax.bar(x, solar, width=bw, label="Solar", color="#F4D03F", edgecolor="white",
+                       bottom=wind)
+    hydro_bot = [w + s for w, s in zip(
+        [v if not np.isnan(v) else 0 for v in wind],
+        [v if not np.isnan(v) else 0 for v in solar])]
+    ax.bar(x, hydro, width=bw, label="Hydro+Geo", color="#27AE60", edgecolor="white",
+           bottom=hydro_bot)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Annual generation (TWh/yr)")
+    ax.set_title("B)", loc="left", fontweight="bold")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # Panel C — losses
+    ax = axes[2]
+    bar_curt = ax.bar(x, curtail, width=bw, label="Curtailment", color="#E74C3C", edgecolor="white")
+    td_bot = [v if not np.isnan(v) else 0 for v in curtail]
+    ax.bar(x, td_loss, width=bw, label="T&D losses", color="#F0B27A", edgecolor="white",
+           bottom=td_bot)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Annual losses (TWh/yr)")
+    ax.set_title("C)", loc="left", fontweight="bold")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle(f"Four-case comparison — {region}", fontsize=11, fontweight="bold")
+    fig.tight_layout()
+    _save(fig, "fig_four_case_comparison", save_dir)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main(region=None):
     all_regions = False
+    lp_figures  = False
     if region is None:
         parser = argparse.ArgumentParser(description="Generate LoadMatch publication figures.")
         parser.add_argument("--region", default="UNITED-STATES",
@@ -1889,13 +2184,29 @@ def main(region=None):
             help="Only regenerate cross-region overview figures (figA1–A3) "
                  "from all completed runs. Skip per-region figures.",
         )
-        args = parser.parse_args()
-        region = args.region
+        parser.add_argument(
+            "--lp-figures", action="store_true", default=False,
+            help="Generate LP input data figure, LP system diagram, and "
+                 "four-case comparison (baseline / LP / GA-baseline / GA-LP). "
+                 "Used by the Snakemake plot_four_cases rule.",
+        )
+        args        = parser.parse_args()
+        region      = args.region
         all_regions = args.all_regions
+        lp_figures  = args.lp_figures
 
     if all_regions:
         print("Regenerating cross-region overview figures (figA1–A3)...")
         plot_all_regions(REPO_ROOT)
+        return
+
+    if lp_figures:
+        save_dir = REPO_ROOT / "data" / "results_verification" / region
+        save_dir.mkdir(parents=True, exist_ok=True)
+        print(f"LP figures → {save_dir}\n")
+        _try_fig("Input data",         fig_input_data,         region, save_dir)
+        _try_fig("LP system diagram",  fig_lp_system_diagram,  save_dir)
+        _try_fig("Four-case comparison", fig_four_case_comparison, region, save_dir)
         return
 
     print(f"Region    : {region}")
