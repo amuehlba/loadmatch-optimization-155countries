@@ -28,6 +28,10 @@ cd "$REPO_ROOT"
 
 mkdir -p logs/snakemake
 
+# Unlock any stale lock left by a previously killed Snakemake process.
+# No-op if there is no lock.
+.venv/bin/snakemake --unlock --profile profiles/slurm 2>/dev/null || true
+
 .venv/bin/snakemake \
     --profile          profiles/slurm \
     --jobs             29 \

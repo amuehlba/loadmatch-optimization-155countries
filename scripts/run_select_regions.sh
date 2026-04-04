@@ -40,6 +40,8 @@ regions:
   - RUSSIA
 EOF
 
+.venv/bin/snakemake --unlock --profile profiles/slurm --configfile "$SELECT_CONFIG" 2>/dev/null || true
+
 .venv/bin/snakemake \
     --profile          profiles/slurm \
     --configfile       "$SELECT_CONFIG" \

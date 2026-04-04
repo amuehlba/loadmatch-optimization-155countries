@@ -91,6 +91,11 @@ def _lp_factors(wildcards):
         return [f"data/results_python/{region}/fortran_factors.dat"]
     return []
 
+
+def _lp_factors_path(wildcards):
+    """Return LP factors file path (single string, always) for run_ga_from_lp."""
+    return f"data/results_python/{str(wildcards.region).strip()}/fortran_factors.dat"
+
 # ---------------------------------------------------------------------------
 # Rule: all — top-level target
 # ---------------------------------------------------------------------------
@@ -404,7 +409,7 @@ rule run_ga_from_lp:
         binary       = "fortran/bin/powerworld",
         checked      = "data/results_verification/{region}/.check_inputs_done",
         preprocessed = "data/results_verification/{region}/.preprocess_done",
-        lp_factors   = "data/results_python/{region}/fortran_factors.dat",
+        lp_factors   = _lp_factors_path,
     output:
         lp_eval  = "data/results_verification/{region}/lp_summary.json",
         lp_ga    = "data/results_verification/{region}/lp_ga_summary.json",

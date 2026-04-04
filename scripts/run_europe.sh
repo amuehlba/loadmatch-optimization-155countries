@@ -27,6 +27,8 @@ regions:
   - EUROPE
 EOF
 
+.venv/bin/snakemake --unlock --profile profiles/slurm --configfile "$EUROPE_CONFIG" 2>/dev/null || true
+
 .venv/bin/snakemake \
     --profile          profiles/slurm \
     --configfile       "$EUROPE_CONFIG" \
