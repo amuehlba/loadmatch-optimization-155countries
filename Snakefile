@@ -92,16 +92,6 @@ def _lp_factors(wildcards):
     return []
 
 
-def _lp_factors_path(wildcards):
-    """Return LP factors file path for run_ga_from_lp.
-
-    Must NOT strip wildcards.region — the path must be identical to the string
-    produced by run_lp's output declaration so Snakemake can match the dependency.
-    (Snakemake 7.32.4 injects whitespace into wildcard values; stripping here
-    would create a path mismatch and cause MissingInputException at DAG build time.)
-    The Python code in run_full_workflow.py strips the region internally.
-    """
-    return f"data/results_python/{wildcards.region}/fortran_factors.dat"
 
 # ---------------------------------------------------------------------------
 # Rule: all — top-level target
@@ -416,7 +406,7 @@ rule run_ga_from_lp:
         binary       = "fortran/bin/powerworld",
         checked      = "data/results_verification/{region}/.check_inputs_done",
         preprocessed = "data/results_verification/{region}/.preprocess_done",
-        lp_factors   = _lp_factors_path,
+        lp_factors   = "data/results_python/{region}/fortran_factors.dat",
     output:
         lp_eval  = "data/results_verification/{region}/lp_summary.json",
         lp_ga    = "data/results_verification/{region}/lp_ga_summary.json",
