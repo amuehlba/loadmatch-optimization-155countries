@@ -17,7 +17,7 @@ def main(region: str = "UNITED-STATES", output_dir: Path = None):
     model = build_model(inputs)
 
     solver = None
-    for solver_name in ("gurobi", "highs", "glpk"):
+    for solver_name in ("gurobi", "appsi_highs", "highs", "glpk"):
         candidate = pyo.SolverFactory(solver_name)
         try:
             if candidate.available():
