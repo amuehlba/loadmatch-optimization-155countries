@@ -148,10 +148,12 @@ def load_electric_load(region: str, filepath: Path,
     """Load hourly electricity demand (GW) from loadreg.COUNTRY2030GW.
 
     Strategy:
-      1. Exact match on the region/country name (single-country or pre-aggregated row).
-      2. If not found and country_names is provided, sum loads for each country
-         whose name starts with any entry in country_names (handles partial matches
-         like "Slovenia-Croat" aggregating several Balkan countries).
+      1. Exact match on the region/country name.
+      2. For multi-country regions: each loadreg row is a dash-separated list of
+         country names (e.g. "Slovenia-Croatia-BosniaHerz-Serbia-..."). A loadreg
+         row is included if ANY of its dash-separated tokens matches ANY country
+         in country_names (case-insensitive prefix match). Each loadreg row is
+         counted at most once to avoid double-counting.
     """
     if not filepath.exists():
         raise FileNotFoundError(f"Load file not found: {filepath}")
@@ -160,40 +162,54 @@ def load_electric_load(region: str, filepath: Path,
         parts = line.split(",")
         return np.asarray([float(v) for v in parts[1:]], dtype=float)
 
-    # Build a dict of all rows keyed by their first token (country/region label)
-    load_rows: Dict[str, np.ndarray] = {}
+    # Build list of (row_name, array) — preserve order, allow duplicate keys
+    load_rows: List[Tuple[str, np.ndarray]] = []
     with filepath.open() as handle:
         for raw_line in handle:
             line = raw_line.strip()
             if not line or line.startswith('"'):
                 continue
             name = line.split(",")[0].strip()
-            if name:
-                load_rows[name] = _parse_row(line)
+            if name and not name.startswith("Times"):
+                load_rows.append((name, _parse_row(line)))
 
     # 1. Exact match
-    if region in load_rows:
-        return load_rows[region]
+    for name, arr in load_rows:
+        if name == region:
+            return arr
 
-    # 2. Prefix match across all known country names for the region
+    # 2. Multi-country: match loadreg rows whose name tokens overlap with region's countries
     if country_names:
+        # Normalise: uppercase, strip, split on dash/space for token comparison
+        def _tokens(s: str) -> List[str]:
+            return re.split(r'[-\s]+', s.upper().strip())
+
+        # Build per-country token sets so we can match whole country names,
+        # not just individual tokens (avoids false positives like "UNITED").
+        country_token_sets = [set(_tokens(c)) for c in country_names]
+
         total: Optional[np.ndarray] = None
         matched: List[str] = []
-        used_rows = set()
-        for cname in country_names:
-            for key, arr in load_rows.items():
-                if key in used_rows:
-                    continue
-                # Match if key starts with any country name prefix (handles
-                # aggregated rows like "Slovenia-Croat" that cover multiple countries)
-                if key.startswith(cname) or cname.startswith(key):
-                    if total is None:
-                        total = arr.copy()
-                    else:
-                        n = min(len(total), len(arr))
-                        total = total[:n] + arr[:n]
-                    matched.append(key)
-                    used_rows.add(key)
+        used: set = set()
+        for name, arr in load_rows:
+            if name in used:
+                continue
+            row_tokens = set(_tokens(name))
+            # A loadreg row belongs to this region if its tokens are a superset
+            # of at least one full country's token set (all tokens must match).
+            belongs = any(
+                cset and cset.issubset(row_tokens)
+                for cset in country_token_sets
+            )
+            if belongs:
+                if total is None:
+                    total = arr.copy()
+                else:
+                    n = min(len(total), len(arr))
+                    total = total[:n] + arr[:n]
+                matched.append(name)
+                used.add(name)
+
         if total is not None:
             print(f"  [INFO] loadreg: aggregated {len(matched)} rows for '{region}': "
                   f"{matched}")
