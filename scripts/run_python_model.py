@@ -16,7 +16,16 @@ def main(region: str = "UNITED-STATES", output_dir: Path = None):
     inputs = load_inputs(region=region)
     model = build_model(inputs)
 
-    solver = pyo.SolverFactory("gurobi")
+    for solver_name in ("gurobi", "highs", "glpk"):
+        solver = pyo.SolverFactory(solver_name)
+        if solver.available():
+            print(f"Using solver: {solver_name}")
+            break
+    else:
+        raise RuntimeError(
+            "No LP solver found. Install one of: gurobipy, highspy, glpk."
+        )
+
     solution = solver.solve(model, tee=True)
     if (solution.solver.status != pyo.SolverStatus.ok) or (
         solution.solver.termination_condition not in (
