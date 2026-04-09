@@ -436,12 +436,14 @@ def fig4_baseline_vs_ga(df_compare, save_dir, lp_factors=None, best_row_lp=None)
             df["_norm_Baseline"] = 1.0
         elif cname == "LP" and lp_factors:
             df["_norm_LP"] = pd.Series([
-                lp_factors.get(r["Parameter"], r["Baseline"]) / max(abs(r["Baseline"]), 1e-12)
+                (lp_factors.get(r["Parameter"], r["Baseline"]) / r["Baseline"])
+                if abs(r["Baseline"]) > 1e-12 else np.nan
                 for _, r in df.iterrows()
             ], index=df.index)
         elif cname == "GA (LP)" and best_row_lp is not None:
             df["_norm_GA (LP)"] = pd.Series([
-                _fac(best_row_lp, r["Parameter"]) / max(abs(r["Baseline"]), 1e-12)
+                (_fac(best_row_lp, r["Parameter"]) / r["Baseline"])
+                if abs(r["Baseline"]) > 1e-12 else np.nan
                 for _, r in df.iterrows()
             ], index=df.index)
 
