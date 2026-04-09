@@ -48,6 +48,7 @@ def _region_paths(region: str):
         lp_ga_summary=results_dir / "lp_ga_summary.json",
         fortran_lp_out=results_dir / "fortran_lp_run.out",
         fortran_lp_ga_out=results_dir / "fortran_lp_ga_run.out",
+        lp_ga_history_file=results_dir / "lp_ga_factor_history.log",
     )
 
 
@@ -1285,6 +1286,13 @@ def run_ga_from_lp_workflow(
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
     paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
 
+    # Use a separate history log so LP-GA history doesn't overwrite baseline-GA history.
+    paths_ga = dict(paths)
+    paths_ga["history_file"] = paths["lp_ga_history_file"]
+    if paths_ga["history_file"].exists():
+        paths_ga["history_file"].unlink()
+        print("Cleared previous LP-GA factor history: {}".format(paths_ga["history_file"]))
+
     # 1. Load LP factors
     lp_factors_path = paths["factor_result"]
     if not lp_factors_path.exists():
@@ -1310,14 +1318,14 @@ def run_ga_from_lp_workflow(
     lp_cost = parse_cost(lp_stdout)
     lp_feasible = check_feasibility(lp_stdout)
     log_candidate(base_factors, lp_feasible, lp_cost, label="LP-eval",
-                  history_file=paths["history_file"])
+                  history_file=paths_ga["history_file"])
     print(f"  LP Fortran evaluation: feasible={lp_feasible}, cost={lp_cost:.3f}")
 
     if lp_feasible:
         candidate, cost = base_factors.copy(), lp_cost
     else:
         print("  LP solution infeasible in Fortran — inflating capacity factors...")
-        candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths)
+        candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths_ga)
 
     # 3. GA from LP warm-start
     print(f"Running GA from LP warm-start (population={ga_population}, "
@@ -1337,7 +1345,7 @@ def run_ga_from_lp_workflow(
         factor_scales=ga_factor_scales or {},
         magnitude_damping=ga_magnitude_damping,
         region=region,
-        paths=paths,
+        paths=paths_ga,
     )
     print(f"GA-from-LP best cost: {best_cost:.3f}")
     write_dat(best_factors, paths["results_dir"] / "lp_ga_factors.dat")

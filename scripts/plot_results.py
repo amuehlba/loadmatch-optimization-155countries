@@ -48,6 +48,7 @@ from scripts.run_full_workflow import (
     load_baseline_start,
     extract_fortran_region_defaults,
 )
+from src.io.dat_parser import read_dat as _read_dat
 
 # ── matplotlib publication defaults (SKILL.md spec) ───────────────────────────
 OKABE_ITO = [
@@ -234,22 +235,36 @@ GROUP_COLORS = {
 # Figure 1 — Cost convergence and feasibility rate
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig1_convergence(df_gen, save_dir):
+def fig1_convergence(df_gen, save_dir, df_gen_lp=None, lp_cost=None):
     fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True,
                              gridspec_kw={"height_ratios": [3, 1]})
     ax = axes[0]
     valid = df_gen[df_gen["cum_best_cost"] < float("inf")]
-    ax.plot(valid["gen"], valid["cum_best_cost"], "k-", lw=1.8,
-            label="Best feasible (cumulative)")
+    ax.plot(valid["gen"], valid["cum_best_cost"], color="#1A5276", lw=1.8,
+            label="GA (baseline) — best cumulative")
     gen_valid = df_gen[df_gen["gen_best_cost"] < float("inf")]
     ax.scatter(gen_valid["gen"], gen_valid["gen_best_cost"],
-               s=18, c="tab:blue", alpha=0.5, zorder=3, label="Generation best")
+               s=18, c="#1A5276", alpha=0.35, zorder=3)
+    if df_gen_lp is not None:
+        valid_lp = df_gen_lp[df_gen_lp["cum_best_cost"] < float("inf")]
+        ax.plot(valid_lp["gen"], valid_lp["cum_best_cost"], color="#2ECC71", lw=1.8,
+                ls="--", label="GA (LP) — best cumulative")
+        gv_lp = df_gen_lp[df_gen_lp["gen_best_cost"] < float("inf")]
+        ax.scatter(gv_lp["gen"], gv_lp["gen_best_cost"],
+                   s=18, c="#2ECC71", alpha=0.35, zorder=3)
+    if lp_cost is not None and lp_cost < float("inf"):
+        ax.axhline(lp_cost, color="#F28C28", lw=1.4, ls=":", label=f"LP solution: ${lp_cost:.1f}B")
     ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
-    ax.legend(loc="upper right")
+    ax.legend(loc="upper right", fontsize=7)
     ax.set_title("A)", loc="left", fontweight="bold")
 
     ax2 = axes[1]
-    ax2.bar(df_gen["gen"], df_gen["feas_frac"] * 100, color="tab:green", alpha=0.7, width=0.8)
+    ax2.bar(df_gen["gen"], df_gen["feas_frac"] * 100, color="#1A5276", alpha=0.5, width=0.8,
+            label="GA (baseline)")
+    if df_gen_lp is not None:
+        ax2.bar(df_gen_lp["gen"], df_gen_lp["feas_frac"] * 100, color="#2ECC71",
+                alpha=0.5, width=0.8, label="GA (LP)")
+        ax2.legend(fontsize=7)
     ax2.set_ylabel("Feasible (%)")
     ax2.set_xlabel("Generation")
     ax2.set_ylim(0, 105)
@@ -262,7 +277,8 @@ def fig1_convergence(df_gen, save_dir):
 # Figure 2 — Capacity-factor trajectories
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
+def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir,
+                          df_best_lp=None, lp_factors=None):
     CAP_LABELS = {
         "faconwin":   "Onshore wind",
         "facoffwin":  "Offshore wind",
@@ -273,18 +289,32 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
         "facsht":     "Solar thermal",
     }
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    for col, label in CAP_LABELS.items():
-        ax.plot(df_best["gen"], df_best[col], lw=1.4, label=label)
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for ci, (col, label) in enumerate(CAP_LABELS.items()):
+        color = color_cycle[ci % len(color_cycle)]
+        ax.plot(df_best["gen"], df_best[col], lw=1.4, color=color, label=f"{label} — GA (bl)")
+        if df_best_lp is not None and col in df_best_lp.columns:
+            ax.plot(df_best_lp["gen"], df_best_lp[col], lw=1.2, color=color,
+                    ls="--", alpha=0.7, label=f"{label} — GA (LP)")
         bval = baseline_factors.get(col.upper())
         if bval is not None:
-            ax.axhline(bval, color=ax.get_lines()[-1].get_color(), ls=":", lw=1.5, alpha=0.9)
+            ax.axhline(bval, color=color, ls=":", lw=1.0, alpha=0.7)
+        if lp_factors and col.upper() in lp_factors:
+            ax.axhline(lp_factors[col.upper()], color=color, ls="-.", lw=1.0, alpha=0.7)
     ax.set_xlabel("Generation")
     ax.set_ylabel("Scaling factor (–)")
+    handles, labels_l = ax.get_legend_handles_labels()
+    # Deduplicate legend to show one entry per tech + style key
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-              frameon=False, ncol=1)
+              frameon=False, ncol=1, fontsize=7)
     ax.set_ylim(bottom=0)
-    ax.annotate("Dotted = baseline", xy=(0.01, 0.97), xycoords="axes fraction",
-                fontsize=8, va="top", color="gray")
+    note = "Dotted = baseline"
+    if lp_factors:
+        note += "  |  dash-dot = LP solution"
+    if df_best_lp is not None:
+        note += "  |  dashed = GA (LP) trajectory"
+    ax.annotate(note, xy=(0.01, 0.97), xycoords="axes fraction",
+                fontsize=7, va="top", color="gray")
     _save(fig, "fig2_capacity_factors", save_dir)
 
 
@@ -292,7 +322,8 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir):
 # Figure 3 — Non-capacity parameter trajectories (6 panels)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
+def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir,
+                                df_best_lp=None, lp_factors=None):
     # Only optimised (non-fixed) parameters; fixed-category params are excluded.
     PANEL_GROUPS = {
         "A)  Storage duration (hours)": {
@@ -318,56 +349,122 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir):
         },
     }
     fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for ax, (panel_title, param_dict) in zip(axes.flatten(), PANEL_GROUPS.items()):
-        for col, label in param_dict.items():
+        for ci, (col, label) in enumerate(param_dict.items()):
+            color = color_cycle[ci % len(color_cycle)]
             if col in df_best.columns:
-                ax.plot(df_best["gen"], df_best[col], lw=1.3, label=label)
+                ax.plot(df_best["gen"], df_best[col], lw=1.3, color=color, label=label)
+                if df_best_lp is not None and col in df_best_lp.columns:
+                    ax.plot(df_best_lp["gen"], df_best_lp[col], lw=1.1, color=color,
+                            ls="--", alpha=0.7)
                 bval = baseline_factors.get(col.upper())
                 if bval is not None:
-                    ax.axhline(bval, color=ax.get_lines()[-1].get_color(),
-                               ls=":", lw=1.2, alpha=0.9)
+                    ax.axhline(bval, color=color, ls=":", lw=1.0, alpha=0.7)
+                if lp_factors and col.upper() in lp_factors:
+                    ax.axhline(lp_factors[col.upper()], color=color, ls="-.", lw=1.0, alpha=0.7)
         ax.set_title(panel_title[:2], loc="left", fontweight="bold")
         ax.set_xlabel("Generation")
         if ax.get_lines():
             ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                       frameon=False, fontsize=7, ncol=1)
-        ax.set_xlim(1, n_gens)
+        n_gens_plot = n_gens
+        if df_best_lp is not None and "gen" in df_best_lp.columns and len(df_best_lp) > 0:
+            n_gens_plot = max(n_gens, df_best_lp["gen"].max())
+        ax.set_xlim(1, n_gens_plot)
     # Hide unused 6th panel
     axes.flatten()[-1].set_visible(False)
+    # Add style legend
+    note = "Solid = GA (bl)  |  Dotted = baseline"
+    if df_best_lp is not None:
+        note += "  |  Dashed = GA (LP)"
+    if lp_factors:
+        note += "  |  Dash-dot = LP"
+    axes.flatten()[-1].set_visible(True)
+    axes.flatten()[-1].axis("off")
+    axes.flatten()[-1].text(0.05, 0.95, note, transform=axes.flatten()[-1].transAxes,
+                             fontsize=8, va="top", color="gray")
     _save(fig, "fig3_parameter_trajectories", save_dir)
+
+
+# ── Four-case colours (used across all figures) ───────────────────────────────
+_CASE_COLORS = {
+    "Baseline":  "#5D6D7E",
+    "LP":        "#F28C28",
+    "GA (bl)":   "#1A5276",
+    "GA (LP)":   "#2ECC71",
+}
+_CASE_ALPHAS = {"Baseline": 0.7, "LP": 0.85, "GA (bl)": 0.9, "GA (LP)": 0.9}
+
+
+def _fac(factors_or_row, key):
+    """Get factor value from a factors dict (uppercase keys) or DataFrame row (lowercase keys)."""
+    if factors_or_row is None:
+        return PARAM_REGISTRY.get(key.upper(), (0.0,))[0]
+    key_up, key_lo = key.upper(), key.lower()
+    if hasattr(factors_or_row, "get"):  # dict
+        v = factors_or_row.get(key_up, factors_or_row.get(key_lo))
+        return float(v) if v is not None else PARAM_REGISTRY.get(key_up, (0.0,))[0]
+    # DataFrame row
+    if key_lo in factors_or_row.index:
+        return float(factors_or_row[key_lo])
+    return PARAM_REGISTRY.get(key_up, (0.0,))[0]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Figure 4 — Baseline vs GA-optimised: final parameter comparison
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig4_baseline_vs_ga(df_compare, save_dir):
-    # Sort: unlocked (optimised) params first, fixed params at bottom.
+def fig4_baseline_vs_ga(df_compare, save_dir, lp_factors=None, best_row_lp=None):
+    """Parameter comparison across all available cases (up to 4)."""
+    # Sort: unlocked first, then fixed.
     df_unlocked = df_compare[~df_compare["Locked"]].copy()
     df_locked   = df_compare[df_compare["Locked"]].copy()
     df = pd.concat([df_unlocked, df_locked], ignore_index=True)
-    df["bl_norm"] = 1.0
-    df["ga_norm"] = df["GA optimal"] / df["Baseline"].replace(0, np.nan)
-    zero_bl = df["Baseline"].abs() < 1e-12
-    df.loc[zero_bl, "ga_norm"] = np.nan
 
-    fig, ax = plt.subplots(figsize=(10, max(8, len(df) * 0.28)))
+    # Build per-case ratio columns (all relative to Baseline)
+    cases_avail = [("Baseline", None), ("GA (bl)", "GA optimal")]
+    if lp_factors:
+        cases_avail.insert(1, ("LP", None))
+    if best_row_lp is not None:
+        cases_avail.append(("GA (LP)", None))
+
+    for cname, col_src in cases_avail:
+        if col_src:
+            df[f"_norm_{cname}"] = df[col_src] / df["Baseline"].replace(0, np.nan)
+        elif cname == "Baseline":
+            df["_norm_Baseline"] = 1.0
+        elif cname == "LP" and lp_factors:
+            df["_norm_LP"] = pd.Series([
+                lp_factors.get(r["Parameter"], r["Baseline"]) / max(abs(r["Baseline"]), 1e-12)
+                for _, r in df.iterrows()
+            ], index=df.index)
+        elif cname == "GA (LP)" and best_row_lp is not None:
+            df["_norm_GA (LP)"] = pd.Series([
+                _fac(best_row_lp, r["Parameter"]) / max(abs(r["Baseline"]), 1e-12)
+                for _, r in df.iterrows()
+            ], index=df.index)
+
+    n_cases = len(cases_avail)
+    h_total = 0.75
+    h = h_total / n_cases
+    offsets = [h_total/2 - h*(i + 0.5) for i in range(n_cases)]
+
+    fig, ax = plt.subplots(figsize=(12, max(8, len(df) * 0.30)))
     y = np.arange(len(df))
-    h = 0.35
-    for i, (_, r) in enumerate(df.iterrows()):
-        alpha_bl = 0.35 if r["Locked"] else 0.8
-        alpha_ga = 0.35 if r["Locked"] else 0.8
-        ax.barh(i + h/2, 1.0, h, color="steelblue", edgecolor="black",
-                lw=0.4, alpha=alpha_bl,
-                label="Baseline" if i == 0 else "_")
-        ga_v = r["ga_norm"] if not np.isnan(r["ga_norm"]) else 0
-        col = "lightgray" if r["Locked"] else ("coral" if ga_v <= 1.0 else "salmon")
-        ax.barh(i - h/2, ga_v, h, color=col, edgecolor="black",
-                lw=0.4, alpha=alpha_ga,
-                label="GA optimised" if i == 0 else
-                      ("Fixed (not optimised)" if r["Locked"] and i == next(
-                          (j for j, (_, rr) in enumerate(df.iterrows()) if rr["Locked"]), -1)
-                       else "_"))
+
+    for ci, (cname, _) in enumerate(cases_avail):
+        color = _CASE_COLORS.get(cname, "gray")
+        alpha_mult = 0.4 if True else 0.9  # locked rows dimmed below
+        norm_col = f"_norm_{cname}"
+        vals = df[norm_col].fillna(0).values
+        for i, (_, r) in enumerate(df.iterrows()):
+            alpha = 0.3 if r["Locked"] else _CASE_ALPHAS.get(cname, 0.8)
+            ax.barh(i + offsets[ci], vals[i], h * 0.88,
+                    color=color if not r["Locked"] else "lightgray",
+                    edgecolor="black", lw=0.3, alpha=alpha,
+                    label=cname if i == 0 else "_")
+
     ax.axvline(1.0, color="black", ls="--", lw=0.8, alpha=0.5)
     ax.set_yticks(y)
     ax.set_yticklabels(
@@ -376,25 +473,28 @@ def fig4_baseline_vs_ga(df_compare, save_dir):
         fontsize=7.5)
     ax.set_xlabel("Ratio to baseline value")
     ax.legend(
-        handles=[
-            Patch(facecolor="steelblue", alpha=0.8, label="Baseline"),
-            Patch(facecolor="coral",     alpha=0.8, label="GA optimised"),
-            Patch(facecolor="lightgray", alpha=0.8, label="Fixed (not optimised)"),
-        ],
+        handles=[Patch(facecolor=_CASE_COLORS.get(c, "gray"), alpha=_CASE_ALPHAS.get(c, 0.8),
+                       label=c)
+                 for c, _ in cases_avail]
+        + [Patch(facecolor="lightgray", alpha=0.5, label="Fixed (not optimised)")],
         bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0, frameon=False, ncol=1)
     ax.invert_yaxis()
-    ga_vals = df["ga_norm"].fillna(0).values
-    for i, (_, r) in enumerate(df.iterrows()):
-        if r["Locked"]:
-            continue
-        ga_str = f"{r['GA optimal']:.3g}"
-        pct = r["Change vs baseline (%)"]
-        ax.annotate(f"{ga_str}  ({pct:+.0f}%)",
-                    xy=(max(ga_vals[i], 0) + 0.02, i - h/2),
-                    fontsize=7, va="center", color="dimgray")
-    # Extra x-room so annotations don't clip.
-    max_ga = np.nanmax(ga_vals) if len(ga_vals) > 0 else 1.0
-    ax.set_xlim(left=0, right=max(max_ga * 1.35, 2.0))
+    # Annotate GA (bl) values for unlocked params
+    ga_norm_col = "_norm_GA (bl)"
+    ga_bl_case_idx = next((ci for ci, (c, _) in enumerate(cases_avail) if c == "GA (bl)"), None)
+    if ga_norm_col in df.columns and ga_bl_case_idx is not None:
+        for i, (_, r) in enumerate(df.iterrows()):
+            if r["Locked"]:
+                continue
+            v = r[ga_norm_col] if ga_norm_col in r.index else np.nan
+            if not (isinstance(v, float) and np.isnan(v)):
+                pct = (float(v) - 1.0) * 100
+                y_pos = i + offsets[ga_bl_case_idx]
+                ax.annotate(f"{r['GA optimal']:.3g}  ({pct:+.0f}%)",
+                            xy=(max(float(v), 0) + 0.02, y_pos),
+                            fontsize=6.5, va="center", color="dimgray")
+    all_vals = np.concatenate([df[f"_norm_{c}"].fillna(0).values for c, _ in cases_avail])
+    ax.set_xlim(left=0, right=max(np.nanmax(all_vals) * 1.35, 2.0))
     _save(fig, "fig4_baseline_vs_ga", save_dir)
 
 
@@ -407,7 +507,7 @@ def _to_gw(record, factor_col, base_key):
 
 
 def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n_gens,
-                            records, save_dir):
+                            records, save_dir, df_gen_lp=None, best_row_lp=None):
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(16, 6))
 
     # A) Population cost distribution per generation
@@ -422,12 +522,16 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
                  showfliers=False, boxprops=dict(facecolor=OKABE_ITO[1], alpha=0.5),
                  medianprops=dict(color=OKABE_ITO[4], lw=1.5))
     valid = df_gen[df_gen["cum_best_cost"] < float("inf")]
-    ax_a.plot(valid["gen"], valid["cum_best_cost"], "-", color=OKABE_ITO[5], lw=2,
-              label="Cumulative best", zorder=5)
+    ax_a.plot(valid["gen"], valid["cum_best_cost"], "-", color="#1A5276", lw=2,
+              label="GA (bl) cumulative best", zorder=5)
+    if df_gen_lp is not None:
+        valid_lp = df_gen_lp[df_gen_lp["cum_best_cost"] < float("inf")]
+        ax_a.plot(valid_lp["gen"], valid_lp["cum_best_cost"], "--", color="#2ECC71", lw=2,
+                  label="GA (LP) cumulative best", zorder=5)
     ax_a.set_xlabel("Generation")
     ax_a.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
     ax_a.set_title("A)", loc="left", fontweight="bold")
-    ax_a.legend(loc="upper right")
+    ax_a.legend(loc="upper right", fontsize=7)
     ax_a.set_xlim(0.5, n_gens + 0.5)
     tick_gens = list(range(10, int(n_gens) + 1, 10))
     ax_a.set_xticks(tick_gens)
@@ -446,7 +550,9 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
         if len(gen_df):
             row = gen_df.loc[gen_df["cost_mn_bil_per_year"].idxmin()]
             milestones.append((f"Gen {g}", row.to_dict()))
-    milestones.append(("GA optimal", best_row.to_dict()))
+    milestones.append(("GA (bl) opt", best_row.to_dict()))
+    if best_row_lp is not None:
+        milestones.append(("GA (LP) opt", best_row_lp.to_dict()))
 
     n_ms = len(milestones)
     x = np.arange(n_ms)
@@ -502,31 +608,52 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
 # Figure 6 — Parameter sensitivity: CV across feasible GA population
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig6_parameter_cv(df_ga, n_gens, save_dir):
-    last_gen = df_ga[(df_ga["gen"] == int(n_gens)) & (df_ga["feasible"] == True)]
-    cols = [c for c in FACTOR_COLUMNS if c in last_gen.columns and c.upper() not in DEFAULT_LOCKED]
-    cv_data = []
-    for col in cols:
-        vals = last_gen[col].dropna()
-        mean_ = vals.mean()
-        std_  = vals.std()
-        cv = std_ / abs(mean_) * 100 if abs(mean_) > 1e-12 else 0.0
-        cv_data.append({"Parameter": col.upper(), "CV (%)": cv, "Mean": mean_, "Std": std_})
-    df_cv = pd.DataFrame(cv_data).sort_values("CV (%)", ascending=True)
+def fig6_parameter_cv(df_ga, n_gens, save_dir, df_ga_lp=None, n_gens_lp=None):
+    def _cv_df(df_pop):
+        cols = [c for c in FACTOR_COLUMNS if c in df_pop.columns and c.upper() not in DEFAULT_LOCKED]
+        rows = []
+        for col in cols:
+            vals = df_pop[col].dropna()
+            mean_ = vals.mean()
+            std_  = vals.std()
+            cv = std_ / abs(mean_) * 100 if abs(mean_) > 1e-12 else 0.0
+            rows.append({"Parameter": col.upper(), "CV (%)": cv})
+        return pd.DataFrame(rows).set_index("Parameter")
 
-    fig, ax = plt.subplots(figsize=(7, 9))
-    colors = ["tab:red" if cv > 20 else "tab:orange" if cv > 5 else "tab:green"
-              for cv in df_cv["CV (%)"].values]
-    ax.barh(range(len(df_cv)), df_cv["CV (%)"].values, color=colors, edgecolor="black", lw=0.3)
-    ax.set_yticks(range(len(df_cv)))
-    ax.set_yticklabels(df_cv["Parameter"].values, fontsize=8)
-    ax.set_xlabel("Coefficient of variation (%)")
-    ax.invert_yaxis()
-    ax.legend(handles=[
-        Patch(facecolor="tab:green", label="CV < 5% (well constrained)"),
-        Patch(facecolor="tab:orange", label="5% ≤ CV ≤ 20%"),
-        Patch(facecolor="tab:red", label="CV > 20% (loosely constrained)"),
-    ], loc="upper right", fontsize=7)
+    last_gen = df_ga[(df_ga["gen"] == int(n_gens)) & (df_ga["feasible"] == True)]
+    df_cv_bl = _cv_df(last_gen).rename(columns={"CV (%)": "GA (bl)"})
+
+    has_lp = df_ga_lp is not None and n_gens_lp is not None
+    if has_lp:
+        last_gen_lp = df_ga_lp[(df_ga_lp["gen"] == int(n_gens_lp)) & (df_ga_lp["feasible"] == True)]
+        df_cv_lp = _cv_df(last_gen_lp).rename(columns={"CV (%)": "GA (LP)"})
+        df_cv = df_cv_bl.join(df_cv_lp, how="outer").fillna(0)
+        df_cv = df_cv.sort_values("GA (bl)", ascending=True)
+    else:
+        df_cv = df_cv_bl.sort_values("GA (bl)", ascending=True)
+
+    ncols = 2 if has_lp else 1
+    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, max(8, len(df_cv) * 0.28)),
+                              sharey=True)
+    if ncols == 1:
+        axes = [axes]
+
+    for ax_i, (cname, col_key) in enumerate([("GA (bl)", "GA (bl)"), ("GA (LP)", "GA (LP)")] if has_lp else [("GA (bl)", "GA (bl)")]):
+        ax = axes[ax_i]
+        vals = df_cv[col_key].values
+        colors = ["tab:red" if v > 20 else "tab:orange" if v > 5 else "tab:green" for v in vals]
+        ax.barh(range(len(df_cv)), vals, color=colors, edgecolor="black", lw=0.3)
+        ax.set_yticks(range(len(df_cv)))
+        ax.set_yticklabels(df_cv.index.tolist(), fontsize=8)
+        ax.set_xlabel("Coefficient of variation (%)")
+        ax.invert_yaxis()
+        ax.set_title(cname, loc="left", fontweight="bold")
+        ax.legend(handles=[
+            Patch(facecolor="tab:green", label="CV < 5%"),
+            Patch(facecolor="tab:orange", label="5–20%"),
+            Patch(facecolor="tab:red", label="> 20%"),
+        ], loc="upper right", fontsize=7)
+
     _save(fig, "fig6_parameter_sensitivity", save_dir)
 
 
@@ -534,11 +661,15 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir):
 # Figure 7 — GA-optimal vs baseline: generation and storage capacities
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
-    def _ga(col):
-        return float(best_row[col]) if col in best_row.index else PARAM_REGISTRY[col.upper()][0]
-    def _bl(key):
-        return baseline_factors.get(key, PARAM_REGISTRY[key][0])
+def fig7_capacity_comparison(best_row, baseline_factors, save_dir,
+                             lp_factors=None, best_row_lp=None):
+    # Build all available cases
+    case_specs = [("Baseline", baseline_factors), ("GA (bl)", best_row)]
+    if lp_factors:
+        case_specs.insert(1, ("LP", lp_factors))
+    if best_row_lp is not None:
+        case_specs.append(("GA (LP)", best_row_lp))
+    n_cases = len(case_specs)
 
     gen_items = [
         ("Onshore wind",  "faconwin",   "onshore_wind"),
@@ -550,62 +681,56 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
         ("Solar thermal", "facsht",     "solar_thermal"),
     ]
     gen_labels = [it[0] for it in gen_items]
-    gen_ga_gw  = [_ga(it[1]) * BASE_CAPACITIES_USA[it[2]] / 1000 for it in gen_items]
-    gen_bl_gw  = [_bl(it[1].upper()) * BASE_CAPACITIES_USA[it[2]] / 1000 for it in gen_items]
-
     stor_pow_items = [
-        ("Battery",      "BATDISCH"),
-        ("H\u2082 FC",   "FCDISCH"),
-        ("Electrolyser", "FCCHARG"),
-        ("Heat battery", "HBTDISCH"),
-        ("PHS (min.)",   "PHSMIN"),
+        ("Battery",      "batdisch"),
+        ("H\u2082 FC",   "fcdisch"),
+        ("Electrolyser", "fccharg"),
+        ("Heat battery", "hbtdisch"),
+        ("PHS (min.)",   "phsmin"),
     ]
     sp_labels = [it[0] for it in stor_pow_items]
-    sp_ga     = [_ga(it[1].lower()) for it in stor_pow_items]
-    sp_bl     = [_bl(it[1])         for it in stor_pow_items]
-
     stor_ene_items = [
         ("Battery",           "batdisch", "storhbat",   1),
         ("H\u2082 long-term", "fcdisch",  "dayh2stor", 24),
         ("Heat battery",      "hbtdisch", "storhhbt",   1),
     ]
     se_labels = [it[0] for it in stor_ene_items]
-    se_ga = [_ga(it[1]) * _ga(it[2]) * it[3] for it in stor_ene_items]
-    se_bl = [_bl(it[1].upper()) * _bl(it[2].upper()) * it[3] for it in stor_ene_items]
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(16, 6))
-    w = 0.38
-    col_bl = "steelblue"
-    col_ga = "coral"
+    w_total = 0.72
+    w = w_total / n_cases
+    offsets = [w_total/2 - w*(i + 0.5) for i in range(n_cases)]
 
-    def _grouped_bars(ax, labels, bl_vals, ga_vals, ylabel, title):
+    def _grouped_bars(ax, labels, case_vals_list, ylabel, title):
         x = np.arange(len(labels))
-        ax.bar(x - w/2, bl_vals, w, label="Baseline",   color=col_bl, alpha=0.85,
-               edgecolor="black", lw=0.5)
-        ax.bar(x + w/2, ga_vals, w, label="GA optimal", color=col_ga, alpha=0.85,
-               edgecolor="black", lw=0.5)
+        for ci, ((cname, _), vals) in enumerate(zip(case_specs, case_vals_list)):
+            color = _CASE_COLORS.get(cname, "gray")
+            alpha = _CASE_ALPHAS.get(cname, 0.8)
+            ax.bar(x + offsets[ci], vals, w * 0.9, label=cname if ax == ax1 else "_",
+                   color=color, alpha=alpha, edgecolor="black", lw=0.4)
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel(ylabel)
         ax.set_title(title, loc="left", fontweight="bold")
         ax.set_ylim(bottom=0)
-        for i, (bv, gv) in enumerate(zip(bl_vals, ga_vals)):
-            if bv > 1e-9:
-                pct = 100 * (gv - bv) / bv
-                ax.annotate(f"{'+' if pct>=0 else ''}{pct:.0f}%",
-                            xy=(i + w/2, gv), xytext=(0, 3), textcoords="offset points",
-                            ha="center", va="bottom", fontsize=7, color="dimgray")
 
-    _grouped_bars(ax1, gen_labels, gen_bl_gw, gen_ga_gw, "Capacity (GW)", "A)")
-    _grouped_bars(ax2, sp_labels, sp_bl, sp_ga, "Power capacity (TW)", "B)")
-    _grouped_bars(ax3, se_labels, se_bl, se_ga, "Energy capacity (TWh)", "C)")
+    gen_vals = [[_fac(fac, it[1]) * BASE_CAPACITIES_USA[it[2]] / 1000 for it in gen_items]
+                for _, fac in case_specs]
+    sp_vals  = [[_fac(fac, it[1]) for it in stor_pow_items] for _, fac in case_specs]
+    se_vals  = [[_fac(fac, it[1]) * _fac(fac, it[2]) * it[3] for it in stor_ene_items]
+                for _, fac in case_specs]
+
+    _grouped_bars(ax1, gen_labels, gen_vals, "Capacity (GW)", "A)")
+    _grouped_bars(ax2, sp_labels,  sp_vals,  "Power capacity (TW)", "B)")
+    _grouped_bars(ax3, se_labels,  se_vals,  "Energy capacity (TWh)", "C)")
 
     ax3_r = ax3.twinx()
     x_hfc = len(se_labels)
-    bl_hfc_h = _bl("STORHHFC")
-    ga_hfc_h = _ga("storhhfc")
-    ax3_r.bar(x_hfc - w/2, bl_hfc_h, w, color=col_bl, alpha=0.5, edgecolor="black", lw=0.5, hatch="//")
-    ax3_r.bar(x_hfc + w/2, ga_hfc_h, w, color=col_ga, alpha=0.5, edgecolor="black", lw=0.5, hatch="//")
+    for ci, (cname, fac) in enumerate(case_specs):
+        color = _CASE_COLORS.get(cname, "gray")
+        alpha = _CASE_ALPHAS.get(cname, 0.8)
+        ax3_r.bar(x_hfc + offsets[ci], _fac(fac, "storhhfc"), w * 0.9,
+                  color=color, alpha=alpha * 0.6, edgecolor="black", lw=0.4, hatch="//")
     ax3_r.set_ylabel("H\u2082 FC storage duration (h)", color="gray")
     ax3_r.tick_params(axis="y", labelcolor="gray")
     ax3_r.set_ylim(bottom=0)
@@ -613,11 +738,8 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
     ax3.set_xticklabels(se_labels + ["H\u2082 FC (h)"], rotation=35, ha="right", fontsize=8)
     ax3.set_xlim(-0.6, x_hfc + 0.6)
 
-    # Legend inside panel A top right
-    leg_handles = [
-        Patch(facecolor=col_bl, alpha=0.85, edgecolor="black", lw=0.5, label="Baseline"),
-        Patch(facecolor=col_ga, alpha=0.85, edgecolor="black", lw=0.5, label="GA optimal"),
-    ]
+    leg_handles = [Patch(facecolor=_CASE_COLORS.get(c, "gray"), alpha=_CASE_ALPHAS.get(c, 0.8),
+                         edgecolor="black", lw=0.4, label=c) for c, _ in case_specs]
     ax1.legend(handles=leg_handles, loc="upper right", frameon=True, fontsize=7)
 
     _save(fig, "fig7_capacity_comparison", save_dir)
@@ -627,12 +749,16 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir):
 # Figure 8 — Land area demand
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES"):
+def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES",
+                   lp_factors=None, best_row_lp=None):
     region_label = region.replace("-", " ").title()
-    def _ga(col):
-        return float(best_row[col]) if col in best_row.index else PARAM_REGISTRY[col.upper()][0]
-    def _bl(key):
-        return baseline_factors.get(key, PARAM_REGISTRY[key][0])
+
+    case_specs = [("Baseline", baseline_factors), ("GA (bl)", best_row)]
+    if lp_factors:
+        case_specs.insert(1, ("LP", lp_factors))
+    if best_row_lp is not None:
+        case_specs.append(("GA (LP)", best_row_lp))
+    n_cases = len(case_specs)
 
     area_items = [
         ("Onshore wind",  "faconwin",   "onshore_wind"),
@@ -644,87 +770,80 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES")
         ("Solar thermal", "facsht",     "solar_thermal"),
     ]
 
-    def _area_km2(factor_val, base_key):
-        return factor_val * BASE_CAPACITIES_USA[base_key] * POWER_DENSITY_KM2_PER_MW[base_key]
+    def _area_km2(fac_val, base_key):
+        return fac_val * BASE_CAPACITIES_USA[base_key] * POWER_DENSITY_KM2_PER_MW[base_key]
 
-    labels    = [it[0] for it in area_items]
-    base_keys = [it[2] for it in area_items]
-    ga_areas  = [_area_km2(_ga(it[1]), it[2]) for it in area_items]
-    bl_areas  = [_area_km2(_bl(it[1].upper()), it[2]) for it in area_items]
-    ltype     = [LAND_TYPE[it[2]] for it in area_items]
-
-    ga_footprint = sum(a for a, lt in zip(ga_areas, ltype) if lt == "footprint")
-    bl_footprint = sum(a for a, lt in zip(bl_areas, ltype) if lt == "footprint")
-    ga_total = ga_footprint + FIXED_TOTAL_KM2
-    bl_total = bl_footprint + FIXED_TOTAL_KM2
-    ga_spacing = sum(a for a, lt in zip(ga_areas, ltype) if lt == "spacing")
-    bl_spacing = sum(a for a, lt in zip(bl_areas, ltype) if lt == "spacing")
-
+    labels = [it[0] for it in area_items]
+    ltype  = [LAND_TYPE[it[2]] for it in area_items]
     LAND_TYPE_COLORS = {
         "spacing": "tab:blue", "offshore": "tab:cyan",
         "rooftop": "tab:green", "footprint": "tab:orange",
     }
 
+    # Per-case areas: list of lists
+    all_areas = [
+        [_area_km2(_fac(fac, it[1]), it[2]) for it in area_items]
+        for _, fac in case_specs
+    ]
+    # Totals for panel B annotation
+    all_totals = [
+        sum(a for a, lt in zip(areas, ltype) if lt == "footprint") + FIXED_TOTAL_KM2
+        for areas in all_areas
+    ]
+
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
-    w = 0.38
+    w_total = 0.72
+    w = w_total / n_cases
+    offsets = [w_total/2 - w*(i + 0.5) for i in range(n_cases)]
     x = np.arange(len(labels))
 
-    # A) Per-technology (% of land area)
+    # A) Per-technology bars, color = land type, shading = case
     seen_lt = set()
-    for xi, (lbl, bla, gaa, lt) in enumerate(zip(labels, bl_areas, ga_areas, ltype)):
-        color = LAND_TYPE_COLORS[lt]
-        ax_a.bar(xi - w/2, bla / US_LAND_AREA_KM2 * 100, w, color=color,
-                 alpha=0.5, edgecolor="black", lw=0.5,
-                 label=lt.capitalize() if lt not in seen_lt else "_")
-        ax_a.bar(xi + w/2, gaa / US_LAND_AREA_KM2 * 100, w, color=color,
-                 alpha=0.95, edgecolor="black", lw=0.5)
-        seen_lt.add(lt)
+    for ci, ((cname, _), case_areas) in enumerate(zip(case_specs, all_areas)):
+        alpha = 0.35 + 0.15 * ci  # progressively darker
+        alpha = min(alpha, 0.95)
+        for xi, (lbl, area, lt) in enumerate(zip(labels, case_areas, ltype)):
+            color = LAND_TYPE_COLORS[lt]
+            ax_a.bar(xi + offsets[ci], area / US_LAND_AREA_KM2 * 100, w * 0.9,
+                     color=color, alpha=alpha, edgecolor="black", lw=0.4,
+                     label=lt.capitalize() if (lt not in seen_lt and ci == 0) else "_")
+            seen_lt.add(lt)
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
     ax_a.set_ylabel(f"Land area (% of {region_label} land)")
     ax_a.set_title("A)", loc="left", fontweight="bold")
-    land_type_handles = [h for h in ax_a.get_legend_handles_labels()[0]]
-    land_type_handles += [
-        Patch(facecolor="gray", alpha=0.5,  edgecolor="black", lw=0.5, label="Baseline"),
-        Patch(facecolor="gray", alpha=0.95, edgecolor="black", lw=0.5, label="GA optimal"),
-    ]
-    ax_a.legend(handles=land_type_handles,
+    lt_handles = ax_a.get_legend_handles_labels()[0]
+    case_handles = [Patch(facecolor="gray", alpha=0.35 + 0.15*i,
+                          edgecolor="black", lw=0.4, label=c)
+                    for i, (c, _) in enumerate(case_specs)]
+    ax_a.legend(handles=lt_handles + case_handles,
                 bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
-    # B) Stacked totals (% of land area) — footprint only (LANDALLTECH convention)
-    stacks = [
-        ("Fixed infra", FIXED_TOTAL_KM2, FIXED_TOTAL_KM2, "#A0A0A0"),
-        ("Utility PV",
-         _area_km2(_bl("FACUTILPV"), "utility_pv"),
-         _area_km2(_ga("facutilpv"), "utility_pv"), "#FF9900"),
-        ("CSP",
-         _area_km2(_bl("CSPTURBFAC"), "csp"),
-         _area_km2(_ga("cspturbfac"), "csp"), "#FF6600"),
-        ("Solar thermal",
-         _area_km2(_bl("FACSHT"), "solar_thermal"),
-         _area_km2(_ga("facsht"), "solar_thermal"), "#FFC000"),
+    # B) Stacked footprint totals
+    FOOTPRINT_STACKS = [
+        ("Fixed infra",   "#A0A0A0", lambda f: FIXED_TOTAL_KM2),
+        ("Utility PV",    "#FF9900", lambda f: _area_km2(_fac(f, "facutilpv"), "utility_pv")),
+        ("CSP",           "#FF6600", lambda f: _area_km2(_fac(f, "cspturbfac"), "csp")),
+        ("Solar thermal", "#FFC000", lambda f: _area_km2(_fac(f, "facsht"), "solar_thermal")),
     ]
-    bot_b, bot_g = 0.0, 0.0
-    for name, bv, gv, c in stacks:
-        ax_b.bar(0, bv / US_LAND_AREA_KM2 * 100, 0.5, bottom=bot_b / US_LAND_AREA_KM2 * 100,
-                 color=c, alpha=0.6, edgecolor="black", lw=0.5, label=name)
-        ax_b.bar(1, gv / US_LAND_AREA_KM2 * 100, 0.5, bottom=bot_g / US_LAND_AREA_KM2 * 100,
-                 color=c, alpha=0.95, edgecolor="black", lw=0.5)
-        bot_b += bv
-        bot_g += gv
-    ax_b.set_xticks([0, 1])
-    ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
+    bots = [0.0] * n_cases
+    for sname, sc, sfn in FOOTPRINT_STACKS:
+        vals = [sfn(fac) for _, fac in case_specs]
+        for ci, v in enumerate(vals):
+            ax_b.bar(ci, v / US_LAND_AREA_KM2 * 100, 0.55,
+                     bottom=bots[ci] / US_LAND_AREA_KM2 * 100,
+                     color=sc, alpha=0.85, edgecolor="black", lw=0.5,
+                     label=sname if ci == 0 else "_")
+            bots[ci] += v
+    ax_b.set_xticks(range(n_cases))
+    ax_b.set_xticklabels([c for c, _ in case_specs], fontsize=9)
     ax_b.set_ylabel(f"Land footprint (% of {region_label} land)")
     ax_b.set_title("B)", loc="left", fontweight="bold")
-    ax_b.annotate(f"BL: {bl_total/US_LAND_AREA_KM2*100:.2f}%\n({bl_total:,.0f} km²)",
-                  xy=(0, bl_total/US_LAND_AREA_KM2*100), xytext=(0.15, 0.2),
-                  textcoords=("axes fraction", "axes fraction"),
-                  ha="left", fontsize=9)
-    ax_b.annotate(f"GA: {ga_total/US_LAND_AREA_KM2*100:.2f}%\n({ga_total:,.0f} km²)",
-                  xy=(1, ga_total/US_LAND_AREA_KM2*100), xytext=(0.75, 0.2),
-                  textcoords=("axes fraction", "axes fraction"),
-                  ha="left", fontsize=9)
+    for ci, total in enumerate(all_totals):
+        ax_b.annotate(f"{total/US_LAND_AREA_KM2*100:.2f}%\n({total:,.0f} km²)",
+                      xy=(ci, total/US_LAND_AREA_KM2*100), xytext=(0, 6),
+                      textcoords="offset points", ha="center", va="bottom", fontsize=8)
     ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
@@ -735,65 +854,82 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES")
 # Figure 9 — Cost breakdown: GA-optimised vs baseline
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, save_dir):
+def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, save_dir,
+                        lp_costs=None, lp_energy=None, lp_ga_costs=None, lp_ga_energy=None):
     if not opt_costs or not bl_costs:
         _skip("Fig 9", "cost data not available (need both Fortran output files)")
         return
 
     def _group_bil(costs, energy_twh):
+        if not costs or energy_twh is None:
+            return None
         return {grp: sum(costs.get(lbl, 0.0) for lbl in lbls) * energy_twh / 100
                 for grp, lbls in COST_GROUPS.items()}
 
-    bl_grp  = _group_bil(bl_costs,  bl_energy)
-    opt_grp = _group_bil(opt_costs, opt_energy)
-    groups  = list(COST_GROUPS.keys())
-    bl_vals = [bl_grp[g]  for g in groups]
-    opt_vals = [opt_grp[g] for g in groups]
-    colors   = [GROUP_COLORS[g] for g in groups]
-    x = np.arange(len(groups))
-    w = 0.38
+    groups = list(COST_GROUPS.keys())
+    colors = [GROUP_COLORS[g] for g in groups]
 
-    bl_sum  = sum(bl_vals)
-    opt_sum = sum(opt_vals)
-    savings = bl_sum - opt_sum
+    # Build cases: only include those with real data
+    raw_cases = [
+        ("Baseline",  _group_bil(bl_costs,    bl_energy)),
+        ("LP",        _group_bil(lp_costs,    lp_energy)),
+        ("GA (bl)",   _group_bil(opt_costs,   opt_energy)),
+        ("GA (LP)",   _group_bil(lp_ga_costs, lp_ga_energy)),
+    ]
+    case_specs = [(cname, grp) for cname, grp in raw_cases if grp is not None]
+    n_cases = len(case_specs)
+
+    x = np.arange(len(groups))
+    w_total = 0.72
+    w = w_total / n_cases
+    offsets = [w_total/2 - w*(i + 0.5) for i in range(n_cases)]
 
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
 
-    for i, (bv, ov, c) in enumerate(zip(bl_vals, opt_vals, colors)):
-        ax_a.bar(i - w/2, bv, w, color=c, alpha=0.55, edgecolor="black", lw=0.5)
-        ax_a.bar(i + w/2, ov, w, color=c, alpha=0.95, edgecolor="black", lw=0.5)
-        if bv > 1e-3:
-            pct = 100 * (ov - bv) / bv
-            ax_a.annotate(f"{'+' if pct>=0 else ''}{pct:.1f}%",
-                          xy=(i + w/2, ov), xytext=(0, 3), textcoords="offset points",
-                          ha="center", va="bottom", fontsize=6, color="dimgray")
+    for ci, (cname, grp) in enumerate(case_specs):
+        color_case = _CASE_COLORS.get(cname, "gray")
+        alpha = _CASE_ALPHAS.get(cname, 0.8)
+        bl_grp = dict(raw_cases)[case_specs[0][0]]
+        for i, (g, c) in enumerate(zip(groups, colors)):
+            gv = grp[g]
+            bv = bl_grp[g]
+            ax_a.bar(i + offsets[ci], gv, w * 0.9, color=c, alpha=alpha * (0.4 + 0.15*ci),
+                     edgecolor="black", lw=0.4)
+            if ci > 0 and bv > 1e-3:
+                pct = 100 * (gv - bv) / bv
+                ax_a.annotate(f"{'+' if pct>=0 else ''}{pct:.0f}%",
+                              xy=(i + offsets[ci], gv), xytext=(0, 2),
+                              textcoords="offset points", ha="center", va="bottom",
+                              fontsize=5.5, color=color_case)
+
     ax_a.set_xticks(x)
-    ax_a.set_xticklabels(groups, rotation=30, ha="right", fontsize=9)
+    ax_a.set_xticklabels(groups, rotation=30, ha="right", fontsize=8)
     ax_a.set_ylabel(r"Annual cost (\$BIL yr$^{-1}$)")
     ax_a.set_title("A)", loc="left", fontweight="bold")
     ax_a.set_ylim(bottom=0)
     legend_elems = (
         [Patch(facecolor=GROUP_COLORS[g], label=g) for g in groups]
-        + [Patch(facecolor="gray", alpha=0.55, edgecolor="black", lw=0.5, label="Baseline"),
-           Patch(facecolor="gray", alpha=0.95, edgecolor="black", lw=0.5, label="GA optimal")]
+        + [Patch(facecolor=_CASE_COLORS.get(c, "gray"), alpha=_CASE_ALPHAS.get(c, 0.8),
+                 edgecolor="black", lw=0.4, label=c) for c, _ in case_specs]
     )
     ax_a.legend(handles=legend_elems,
                 bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
-    bot = np.zeros(2)
+    # Panel B — stacked totals per case
+    bots = np.zeros(n_cases)
     for g, c in zip(groups, colors):
-        vals = np.array([bl_grp[g], opt_grp[g]])
-        ax_b.bar([0, 1], vals, 0.5, bottom=bot, color=c, alpha=0.85,
+        vals = np.array([grp[g] for _, grp in case_specs])
+        ax_b.bar(range(n_cases), vals, 0.55, bottom=bots, color=c, alpha=0.85,
                  edgecolor="black", lw=0.5, label=g)
-        bot += vals
-    for xi, tot in enumerate([bl_sum, opt_sum]):
-        ax_b.annotate(f"${tot:.1f}B/yr", xy=(xi, tot), xytext=(0, 6),
+        bots += vals
+    for ci, ((cname, _), tot) in enumerate(zip(case_specs, bots)):
+        ax_b.annotate(f"${tot:.1f}B/yr", xy=(ci, tot), xytext=(0, 6),
                       textcoords="offset points", ha="center", va="bottom",
-                      fontsize=10, fontweight="bold")
-    ax_b.set_ylim(0, max(bl_sum, opt_sum) * 1.18)
-    ax_b.set_xticks([0, 1])
-    ax_b.set_xticklabels(["Baseline", "GA optimal"], fontsize=10)
+                      fontsize=9, fontweight="bold", color=_CASE_COLORS.get(cname, "black"))
+    ax_b.set_ylim(0, bots.max() * 1.18)
+    ax_b.set_xticks(range(n_cases))
+    ax_b.set_xticklabels([c for c, _ in case_specs], fontsize=9)
     ax_b.set_ylabel(r"Annual system cost (\$BIL yr$^{-1}$)")
     ax_b.set_title("B)", loc="left", fontweight="bold")
     ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
@@ -806,27 +942,25 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
 # Figure 10 — Generation capacity mix and ternary diagram
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STATES"):
+def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STATES",
+                       lp_factors=None, best_row_lp=None):
     is_us = region == "UNITED-STATES"
 
-    def _ga(col):
-        return float(best_row[col]) if col in best_row.index else PARAM_REGISTRY[col.upper()][0]
-    def _bl(key):
-        return baseline_factors.get(key, PARAM_REGISTRY[key][0])
-
-    def _build_cap_2050(fac_fn):
+    def _build_cap_2050(fac_src):
         return {
-            "onshore_wind":  fac_fn("faconwin")   * BASE_CAPACITIES_USA["onshore_wind"],
-            "offshore_wind": fac_fn("facoffwin")  * BASE_CAPACITIES_USA["offshore_wind"],
-            "res_pv":        fac_fn("facrespv")   * BASE_CAPACITIES_USA["res_rooftop_pv"],
-            "com_pv":        fac_fn("faccompv")   * BASE_CAPACITIES_USA["com_rooftop_pv"],
-            "utility_pv":    fac_fn("facutilpv")  * BASE_CAPACITIES_USA["utility_pv"],
-            "csp":           fac_fn("cspturbfac") * BASE_CAPACITIES_USA["csp"],
+            "onshore_wind":  _fac(fac_src, "faconwin")   * BASE_CAPACITIES_USA["onshore_wind"],
+            "offshore_wind": _fac(fac_src, "facoffwin")  * BASE_CAPACITIES_USA["offshore_wind"],
+            "res_pv":        _fac(fac_src, "facrespv")   * BASE_CAPACITIES_USA["res_rooftop_pv"],
+            "com_pv":        _fac(fac_src, "faccompv")   * BASE_CAPACITIES_USA["com_rooftop_pv"],
+            "utility_pv":    _fac(fac_src, "facutilpv")  * BASE_CAPACITIES_USA["utility_pv"],
+            "csp":           _fac(fac_src, "cspturbfac") * BASE_CAPACITIES_USA["csp"],
             **FIXED_2050_MW,
         }
 
-    bl_cap_2050 = _build_cap_2050(lambda k: _bl(k.upper()))
-    ga_cap_2050 = _build_cap_2050(lambda k: _ga(k))
+    bl_cap_2050 = _build_cap_2050(baseline_factors)
+    ga_cap_2050 = _build_cap_2050(best_row)
+    lp_cap_2050 = _build_cap_2050(lp_factors) if lp_factors else None
+    lp_ga_cap_2050 = _build_cap_2050(best_row_lp) if best_row_lp is not None else None
     tot_bl_2050 = sum(bl_cap_2050.values())
     tot_ga_2050 = sum(ga_cap_2050.values())
 
@@ -840,20 +974,20 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(18, 6),
                                             gridspec_kw={"width_ratios": [1, 1, 1.3]})
 
-    # A) Absolute capacity stacked bars
-    # The 2020 reference bar is US-specific data; skip it for other regions.
+    # A) Absolute capacity stacked bars — include all available cases
     if is_us:
         FOSSIL_2020_MW = TOTAL_2020_ALL_MW - sum(CAP_2020_MW.values())
         scenarios_bar = [
-            ("2020\n(incl. fossil)",  TOTAL_2020_ALL_MW, {**CAP_2020_MW, "fossil": FOSSIL_2020_MW}),
-            ("Baseline\n2050",        tot_bl_2050,        bl_cap_2050),
-            ("GA optimal\n2050",      tot_ga_2050,        ga_cap_2050),
+            ("2020\n(incl. fossil)", TOTAL_2020_ALL_MW, {**CAP_2020_MW, "fossil": FOSSIL_2020_MW}),
+            ("Baseline\n2050",       tot_bl_2050,        bl_cap_2050),
         ]
     else:
-        scenarios_bar = [
-            ("Baseline\n2050",   tot_bl_2050, bl_cap_2050),
-            ("GA optimal\n2050", tot_ga_2050, ga_cap_2050),
-        ]
+        scenarios_bar = [("Baseline\n2050", tot_bl_2050, bl_cap_2050)]
+    if lp_cap_2050:
+        scenarios_bar.append(("LP\n2050",    sum(lp_cap_2050.values()),    lp_cap_2050))
+    scenarios_bar.append(("GA (bl)\n2050", tot_ga_2050, ga_cap_2050))
+    if lp_ga_cap_2050:
+        scenarios_bar.append(("GA (LP)\n2050", sum(lp_ga_cap_2050.values()), lp_ga_cap_2050))
     for xi, (_, total, cap) in enumerate(scenarios_bar):
         bot = 0.0
         for _, keys, color in STACK_ORDER:
@@ -888,10 +1022,12 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     pts_scatter = []
     if is_us:
         pts_scatter.append(("2020", CAP_2020_MW, TOTAL_2020_ALL_MW, "o", "black", 80))
-    pts_scatter += [
-        ("Baseline 2050",   bl_cap_2050, tot_bl_2050, "s", "steelblue", 90),
-        ("GA optimal 2050", ga_cap_2050, tot_ga_2050, "^", "coral",     90),
-    ]
+    pts_scatter.append(("Baseline 2050", bl_cap_2050, tot_bl_2050, "s", _CASE_COLORS["Baseline"], 90))
+    if lp_cap_2050:
+        pts_scatter.append(("LP 2050", lp_cap_2050, sum(lp_cap_2050.values()), "D", _CASE_COLORS["LP"], 80))
+    pts_scatter.append(("GA (bl) 2050", ga_cap_2050, tot_ga_2050, "^", _CASE_COLORS["GA (bl)"], 90))
+    if lp_ga_cap_2050:
+        pts_scatter.append(("GA (LP) 2050", lp_ga_cap_2050, sum(lp_ga_cap_2050.values()), "v", _CASE_COLORS["GA (LP)"], 90))
     solar_vals = [_wind_solar_shares(c, t)[1] for _, c, t, *_ in pts_scatter]
     wind_vals  = [_wind_solar_shares(c, t)[0] for _, c, t, *_ in pts_scatter]
     x_max = max(solar_vals) * 1.12
@@ -960,10 +1096,13 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_c.text(1.06,  -0.02,        "Solar", ha="left",   va="top",
               fontsize=12, fontweight="bold", color="#FF9900")
 
-    for label, cap, marker, color, ms, (dx, dy) in [
-        ("Baseline 2050",   bl_cap_2050, "s", "steelblue", 90, ( 8,  8)),
-        ("GA optimal 2050", ga_cap_2050, "^", "coral",     90, ( 8,  8)),
-    ]:
+    ternary_pts = [("Baseline 2050", bl_cap_2050, "s", _CASE_COLORS["Baseline"], 90, (8, 8))]
+    if lp_cap_2050:
+        ternary_pts.append(("LP 2050", lp_cap_2050, "D", _CASE_COLORS["LP"], 80, (8, -12)))
+    ternary_pts.append(("GA (bl) 2050", ga_cap_2050, "^", _CASE_COLORS["GA (bl)"], 90, (-8, 8)))
+    if lp_ga_cap_2050:
+        ternary_pts.append(("GA (LP) 2050", lp_ga_cap_2050, "v", _CASE_COLORS["GA (LP)"], 90, (8, -12)))
+    for label, cap, marker, color, ms, (dx, dy) in ternary_pts:
         wind_  = cap.get("onshore_wind", 0) + cap.get("offshore_wind", 0)
         solar_ = (cap.get("res_pv", 0) + cap.get("com_pv", 0) +
                   cap.get("utility_pv", 0) + cap.get("csp", 0))
@@ -993,7 +1132,8 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
 # Figure 11 — Population diversity heatmap (final generation)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir):
+def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir,
+                            df_ga_lp=None, n_gens_lp=None, best_row_lp=None):
     last_gen = df_ga[(df_ga["gen"] == int(n_gens)) & (df_ga["feasible"] == True)].copy()
     if len(last_gen) < 2:
         _skip("Fig 11", "fewer than 2 feasible individuals in final generation")
@@ -1022,20 +1162,44 @@ def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir):
     mat_final = mat_sorted[:, param_order]
     param_labels = [cols[i].upper() for i in param_order]
 
-    fig, ax = plt.subplots(figsize=(max(10, len(cols) * 0.45), max(7, len(last_gen) * 0.22)))
-    im = ax.imshow(mat_final, aspect="auto", cmap="RdYlGn",
-                   vmin=0.5, vmax=1.5, interpolation="nearest")
-    ax.set_xticks(np.arange(len(param_labels)))
-    ax.set_xticklabels(param_labels, rotation=45, ha="right", fontsize=7)
-    ax.set_yticks(np.arange(len(last_gen)))
-    cost_labels = [f"#{i+1}  ${c:.1f}B" for i, c in enumerate(costs[order])]
-    ax.set_yticklabels(cost_labels, fontsize=7)
-    ax.set_xlabel("Parameter (sorted by CV, most constrained left)")
-    ax.set_ylabel("Individual (sorted by cost, best at top)")
-    cbar = fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
-    cbar.set_label("Value / GA-optimal", fontsize=9)
-    ax.axhline(-0.5, color="white", lw=0)  # padding
+    def _make_panel(ax_, mat_f, param_lbls, cost_vals, title):
+        im_ = ax_.imshow(mat_f, aspect="auto", cmap="RdYlGn",
+                         vmin=0.5, vmax=1.5, interpolation="nearest")
+        ax_.set_xticks(np.arange(len(param_lbls)))
+        ax_.set_xticklabels(param_lbls, rotation=45, ha="right", fontsize=7)
+        ax_.set_yticks(np.arange(len(cost_vals)))
+        ax_.set_yticklabels([f"#{i+1}  ${c:.1f}B" for i, c in enumerate(cost_vals)], fontsize=7)
+        ax_.set_xlabel("Parameter (sorted by CV, most constrained left)")
+        ax_.set_ylabel("Individual (sorted by cost, best at top)")
+        ax_.set_title(title, loc="left", fontweight="bold")
+        return im_
 
+    has_lp = (df_ga_lp is not None and n_gens_lp is not None and best_row_lp is not None)
+    ncols  = 2 if has_lp else 1
+    fig, axes = plt.subplots(1, ncols, figsize=(max(10, len(cols) * 0.45) * ncols,
+                                                 max(7, len(last_gen) * 0.22)))
+    if ncols == 1:
+        axes = [axes]
+
+    im = _make_panel(axes[0], mat_final, param_labels, costs[order], "A) GA (baseline)")
+
+    if has_lp:
+        last_lp = df_ga_lp[(df_ga_lp["gen"] == int(n_gens_lp)) & (df_ga_lp["feasible"] == True)].copy()
+        cols_lp = [c for c in FACTOR_COLUMNS if c in last_lp.columns and c.upper() not in DEFAULT_LOCKED]
+        if len(last_lp) >= 2 and cols_lp:
+            mat_lp = last_lp[cols_lp].values.astype(float)
+            opt_lp = np.array([_fac(best_row_lp, c) for c in cols_lp])
+            opt_lp = np.where(np.abs(opt_lp) < 1e-12, 1.0, opt_lp)
+            mat_lp_norm = mat_lp / opt_lp[np.newaxis, :]
+            costs_lp = last_lp["cost_mn_bil_per_year"].values
+            ord_lp   = np.argsort(costs_lp)
+            cv_lp    = np.std(mat_lp_norm, axis=0) / np.abs(np.mean(mat_lp_norm, axis=0) + 1e-12)
+            po_lp    = np.argsort(cv_lp)
+            _make_panel(axes[1], mat_lp_norm[ord_lp][:, po_lp],
+                        [cols_lp[i].upper() for i in po_lp], costs_lp[ord_lp], "B) GA (LP)")
+
+    cbar = fig.colorbar(im, ax=axes, fraction=0.01, pad=0.01)
+    cbar.set_label("Value / case-optimal", fontsize=9)
     _save(fig, "fig11_diversity_heatmap", save_dir)
 
 
@@ -1043,7 +1207,8 @@ def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir):
 # Figure 12 — Waterfall chart: baseline → GA cost savings by category
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
+def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
+                         lp_costs=None, lp_energy=None, lp_ga_costs=None, lp_ga_energy=None):
     if not bl_costs or not opt_costs:
         _skip("Fig 12", "cost data not available (need both Fortran output files)")
         return
@@ -1084,10 +1249,31 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
     heights.append(opt_total)
     bar_colors.append("coral")
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    def _group_bil(costs, energy_twh):
+        if not costs or energy_twh is None:
+            return None
+        return {grp: sum(costs.get(lbl, 0.0) for lbl in lbls) * energy_twh / 100
+                for grp, lbls in COST_GROUPS.items()}
+
+    # Build all available case totals for panel B
+    all_case_totals = [("Baseline", bl_total, _CASE_COLORS["Baseline"])]
+    if lp_costs and lp_energy:
+        lp_grp = _group_bil(lp_costs, lp_energy)
+        if lp_grp:
+            all_case_totals.append(("LP", sum(lp_grp.values()), _CASE_COLORS["LP"]))
+    all_case_totals.append(("GA (bl)", opt_total, _CASE_COLORS["GA (bl)"]))
+    if lp_ga_costs and lp_ga_energy:
+        lp_ga_grp = _group_bil(lp_ga_costs, lp_ga_energy)
+        if lp_ga_grp:
+            all_case_totals.append(("GA (LP)", sum(lp_ga_grp.values()), _CASE_COLORS["GA (LP)"]))
+
+    has_extra = len(all_case_totals) > 2
+    fig, axes = plt.subplots(1, 2 if has_extra else 1,
+                              figsize=(20 if has_extra else 13, 6))
+    ax = axes[0] if has_extra else axes
     x = np.arange(len(labels_wf))
-    bars = ax.bar(x, heights, 0.55, bottom=bottoms, color=bar_colors,
-                  edgecolor="black", lw=0.5, alpha=0.85)
+    ax.bar(x, heights, 0.55, bottom=bottoms, color=bar_colors,
+           edgecolor="black", lw=0.5, alpha=0.85)
 
     # Connector lines between bars
     running = bl_total
@@ -1098,7 +1284,7 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
                 color="gray", lw=0.7, ls="--", zorder=5)
         running += d
 
-    # Value labels above/below each bar
+    # Value labels
     for xi, (bot, ht, lbl) in enumerate(zip(bottoms, heights, labels_wf)):
         top = bot + ht
         if xi == 0 or xi == len(labels_wf) - 1:
@@ -1120,13 +1306,33 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir):
     ax.set_xticklabels(labels_wf, rotation=25, ha="right", fontsize=9)
     ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
     ax.set_ylim(0, bl_total * 1.12)
+    ax.set_title("A) Baseline → GA (bl) breakdown", loc="left", fontweight="bold")
     ax.legend(handles=[
-        Patch(facecolor="steelblue", label="Baseline total"),
+        Patch(facecolor=_CASE_COLORS["Baseline"], label="Baseline total"),
         Patch(facecolor="tab:green", label="Cost reduction"),
         Patch(facecolor="tab:red",   label="Cost increase"),
-        Patch(facecolor="coral",     label="GA optimal total"),
+        Patch(facecolor=_CASE_COLORS["GA (bl)"], label="GA (bl) total"),
     ], fontsize=9, bbox_to_anchor=(1.01, 1), loc="upper left",
        borderaxespad=0, frameon=False, ncol=1)
+
+    # Panel B — four-case total comparison
+    if has_extra:
+        ax2 = axes[1]
+        names = [c for c, _, _ in all_case_totals]
+        totals = [t for _, t, _ in all_case_totals]
+        cols   = [c for _, _, c in all_case_totals]
+        bars2  = ax2.bar(range(len(names)), totals, 0.55, color=cols,
+                         edgecolor="black", lw=0.5, alpha=0.85)
+        for xi, (tot, cname) in enumerate(zip(totals, names)):
+            pct = 100 * (tot - all_case_totals[0][1]) / all_case_totals[0][1]
+            label = f"${tot:.1f}B" + (f"\n({pct:+.1f}%)" if xi > 0 else "")
+            ax2.annotate(label, xy=(xi, tot), xytext=(0, 4),
+                         textcoords="offset points", ha="center", va="bottom", fontsize=9)
+        ax2.set_xticks(range(len(names)))
+        ax2.set_xticklabels(names, fontsize=10)
+        ax2.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
+        ax2.set_ylim(0, max(totals) * 1.20)
+        ax2.set_title("B) All-case total cost", loc="left", fontweight="bold")
 
     _save(fig, "fig12_cost_waterfall", save_dir)
 
@@ -1764,9 +1970,9 @@ def plot_all_regions(repo_root):
 # Data loading
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _load_ga_data(region, repo_root):
+def _load_ga_data(region, repo_root, log_name="factor_history.log"):
     save_dir  = repo_root / "data" / "results_verification" / region
-    log_path  = save_dir / "factor_history.log"
+    log_path  = save_dir / log_name
 
     if not log_path.exists():
         print(f"  [ERROR] factor_history.log not found: {log_path}")
@@ -1963,7 +2169,6 @@ def fig_input_data(region: str, save_dir: Path):
     ax.set_title("C)", loc="left", fontweight="bold")
     ax.grid(True, alpha=0.3, axis="y")
 
-    fig.suptitle(f"LP input data — {region}", fontsize=11, fontweight="bold")
     fig.tight_layout()
     _save(fig, "fig_input_data", save_dir)
 
@@ -2063,7 +2268,6 @@ def fig_lp_system_diagram(save_dir: Path):
     # Geo Heat → Heat
     arrow(ax, 11.6, 2.0, 3.0, 4.0, "Geo heat", "saddlebrown")
 
-    fig.suptitle("LoadMatch LP — Energy System Model", fontsize=12, fontweight="bold")
     fig.tight_layout()
     _save(fig, "fig_lp_system_diagram", save_dir)
 
@@ -2163,7 +2367,6 @@ def fig_four_case_comparison(region: str, save_dir: Path):
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3, axis="y")
 
-    fig.suptitle(f"Four-case comparison — {region}", fontsize=11, fontweight="bold")
     fig.tight_layout()
     _save(fig, "fig_four_case_comparison", save_dir)
 
@@ -2212,18 +2415,35 @@ def main(region=None):
     print(f"Region    : {region}")
     print(f"Repo root : {REPO_ROOT}")
 
-    # ── Load GA data ──────────────────────────────────────────────────────────
+    # ── Load baseline GA data ─────────────────────────────────────────────────
     result = _load_ga_data(region, REPO_ROOT)
     if result[0] is None:
         print("Cannot proceed without factor_history.log — exiting.")
         sys.exit(1)
     df_ga, df_gen, df_best, best_row, n_gens, records, save_dir = result
-
     print(f"Figures → {save_dir}\n")
 
+    # ── Load LP-GA data if available ──────────────────────────────────────────
+    lp_ga_log = save_dir / "lp_ga_factor_history.log"
+    df_ga_lp = df_gen_lp = df_best_lp = best_row_lp = n_gens_lp = None
+    if lp_ga_log.exists():
+        print("Loading LP-GA history...")
+        res_lp = _load_ga_data(region, REPO_ROOT, log_name="lp_ga_factor_history.log")
+        if res_lp[0] is not None:
+            df_ga_lp, df_gen_lp, df_best_lp, best_row_lp, n_gens_lp = res_lp[:5]
+            print(f"  LP-GA: {int(n_gens_lp)} gens, best=${best_row_lp['cost_mn_bil_per_year']:.2f}B/yr")
+    else:
+        print("  lp_ga_factor_history.log not found — LP-GA overlays skipped.")
+
+    # ── Load LP factors if available ──────────────────────────────────────────
+    lp_factors_path = REPO_ROOT / "data" / "results_python" / region / "fortran_factors.dat"
+    lp_factors = {}
+    if lp_factors_path.exists():
+        raw = _read_dat(str(lp_factors_path))
+        lp_factors = {k.upper(): float(v) for k, v in raw.items()}
+        print(f"  LP factors loaded from {lp_factors_path.name} ({len(lp_factors)} params)")
+
     # ── Load baseline factors ─────────────────────────────────────────────────
-    # Prefer region-specific file; fall back to Fortran-extracted defaults so
-    # fig2/fig4 always show the correct region's baseline, not the US file.
     region_bl_path = REPO_ROOT / "data" / "raw" / f"baseline_results.{region}.dat"
     legacy_bl_path = REPO_ROOT / "data" / "raw" / "baseline_results.dat"
     if region_bl_path.exists():
@@ -2256,48 +2476,83 @@ def main(region=None):
         })
     df_compare = pd.DataFrame(rows)
 
-    # ── Load Fortran cost data (Figs 9, 12, 13) ───────────────────────────────
+    # ── Load Fortran cost data for all 4 cases ────────────────────────────────
     bl_costs, opt_costs, bl_energy, opt_energy, baseline_out = \
         _load_fortran_costs(region, save_dir, REPO_ROOT, best_row)
 
+    lp_out     = save_dir / "fortran_lp_run.out"
+    lp_ga_out  = save_dir / "fortran_lp_ga_run.out"
+    lp_costs, lp_energy = {}, None
+    lp_ga_costs, lp_ga_energy = {}, None
+    if lp_out.exists():
+        lp_costs, lp_energy = _parse_fortran_costs(lp_out.read_text())
+        print(f"  LP Fortran output loaded: {lp_out.name}")
+    if lp_ga_out.exists():
+        lp_ga_costs, lp_ga_energy = _parse_fortran_costs(lp_ga_out.read_text())
+        print(f"  LP-GA Fortran output loaded: {lp_ga_out.name}")
+
+    # LP cost (for fig1 horizontal line)
+    lp_total_cost = None
+    _lp_json = save_dir / "lp_summary.json"
+    if _lp_json.exists():
+        try:
+            _d = json.loads(_lp_json.read_text())
+            lp_total_cost = _d.get("annual_cost_mn_bil_per_yr") or _d.get("cost_bn_per_yr")
+        except Exception:
+            pass
+
     # ── Generate figures ──────────────────────────────────────────────────────
     _try_fig("Fig  1 — Cost convergence",
-             fig1_convergence, df_gen, save_dir)
+             fig1_convergence, df_gen, save_dir,
+             df_gen_lp=df_gen_lp, lp_cost=lp_total_cost)
 
     _try_fig("Fig  2 — Capacity-factor trajectories",
-             fig2_capacity_factors, df_best, baseline_factors, n_gens, save_dir)
+             fig2_capacity_factors, df_best, baseline_factors, n_gens, save_dir,
+             df_best_lp=df_best_lp, lp_factors=lp_factors or None)
 
     _try_fig("Fig  3 — Non-capacity parameter trajectories",
-             fig3_parameter_trajectories, df_best, baseline_factors, n_gens, save_dir)
+             fig3_parameter_trajectories, df_best, baseline_factors, n_gens, save_dir,
+             df_best_lp=df_best_lp, lp_factors=lp_factors or None)
 
     _try_fig("Fig  4 — Baseline vs GA comparison",
-             fig4_baseline_vs_ga, df_compare, save_dir)
+             fig4_baseline_vs_ga, df_compare, save_dir,
+             lp_factors=lp_factors or None, best_row_lp=best_row_lp)
 
     _try_fig("Fig  5 — Cost distribution and capacity evolution",
              fig5_cost_and_capacity, df_ga, df_gen, df_best, best_row,
-             baseline_factors, n_gens, records, save_dir)
+             baseline_factors, n_gens, records, save_dir,
+             df_gen_lp=df_gen_lp, best_row_lp=best_row_lp)
 
     _try_fig("Fig  6 — Parameter CV (sensitivity)",
-             fig6_parameter_cv, df_ga, n_gens, save_dir)
+             fig6_parameter_cv, df_ga, n_gens, save_dir,
+             df_ga_lp=df_ga_lp, n_gens_lp=n_gens_lp)
 
     _try_fig("Fig  7 — Generation and storage capacities",
-             fig7_capacity_comparison, best_row, baseline_factors, save_dir)
+             fig7_capacity_comparison, best_row, baseline_factors, save_dir,
+             lp_factors=lp_factors or None, best_row_lp=best_row_lp)
 
     _try_fig("Fig  8 — Land area demand",
-             fig8_land_area, best_row, baseline_factors, save_dir, region=region)
+             fig8_land_area, best_row, baseline_factors, save_dir, region=region,
+             lp_factors=lp_factors or None, best_row_lp=best_row_lp)
 
     _try_fig("Fig  9 — Cost breakdown",
              fig9_cost_breakdown, bl_costs, opt_costs, bl_energy, opt_energy,
-             best_row, save_dir)
+             best_row, save_dir,
+             lp_costs=lp_costs or None, lp_energy=lp_energy,
+             lp_ga_costs=lp_ga_costs or None, lp_ga_energy=lp_ga_energy)
 
     _try_fig("Fig 10 — Capacity mix and ternary",
-             fig10_capacity_mix, best_row, baseline_factors, save_dir, region)
+             fig10_capacity_mix, best_row, baseline_factors, save_dir, region,
+             lp_factors=lp_factors or None, best_row_lp=best_row_lp)
 
     _try_fig("Fig 11 — Population diversity heatmap",
-             fig11_diversity_heatmap, df_ga, n_gens, best_row, save_dir)
+             fig11_diversity_heatmap, df_ga, n_gens, best_row, save_dir,
+             df_ga_lp=df_ga_lp, n_gens_lp=n_gens_lp, best_row_lp=best_row_lp)
 
     _try_fig("Fig 12 — Cost waterfall",
-             fig12_cost_waterfall, bl_costs, opt_costs, bl_energy, opt_energy, save_dir)
+             fig12_cost_waterfall, bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
+             lp_costs=lp_costs or None, lp_energy=lp_energy,
+             lp_ga_costs=lp_ga_costs or None, lp_ga_energy=lp_ga_energy)
 
     _try_fig("Fig 13a — Energy flow Sankey (baseline)",
              fig13_sankey, baseline_out, save_dir,
@@ -2310,7 +2565,19 @@ def main(region=None):
              scenario_label="GA-optimised scenario",
              filename="fig13b_sankey_energy_flow_optimal")
 
-    # ── Overview figures across all regions ──────────────────────────────────
+    if lp_out.exists():
+        _try_fig("Fig 13c — Energy flow Sankey (LP)",
+                 fig13_sankey, lp_out, save_dir,
+                 scenario_label="LP solution",
+                 filename="fig13c_sankey_energy_flow_lp")
+
+    if lp_ga_out.exists():
+        _try_fig("Fig 13d — Energy flow Sankey (GA-from-LP)",
+                 fig13_sankey, lp_ga_out, save_dir,
+                 scenario_label="GA from LP solution",
+                 filename="fig13d_sankey_energy_flow_ga_lp")
+
+    # ── Overview figures across all regions ───────────────────────────────────
     plot_all_regions(REPO_ROOT)
 
     print(f"\nDone. All figures in: {save_dir}")
