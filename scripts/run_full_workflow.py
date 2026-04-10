@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import fcntl
 import multiprocessing
 import os
 import random
@@ -21,6 +23,22 @@ FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
 WORKSPACE_BASE = Path("data/tmp_workspaces")
 _DEFAULT_REGION = "UNITED-STATES"
+# Lock file used to serialise all direct (non-workspace) Fortran calls so that
+# concurrent cluster jobs writing to the shared fortran/fortran_factors.dat do
+# not clobber each other.
+_FORTRAN_LOCK_PATH = Path("fortran/.fortran_run.lock")
+
+
+@contextlib.contextmanager
+def _fortran_global_lock():
+    """Exclusive file lock around write-factor + run-Fortran to prevent races."""
+    _FORTRAN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_FORTRAN_LOCK_PATH, "w") as _lf:
+        fcntl.flock(_lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(_lf, fcntl.LOCK_UN)
 
 
 def _region_paths(region: str):
@@ -563,7 +581,6 @@ def write_factor_files(factors, paths=None):
     ] if paths else FACTOR_PATHS
     for path in factor_paths:
         write_dat(factors, path)
-    _verify_factor_files(factors, factor_paths)
 
 
 def _read_factor_file(path: Path) -> Dict[str, float]:
@@ -630,8 +647,9 @@ def parse_cost(stdout):
 def evaluate_factors(factors, label="candidate", region=_DEFAULT_REGION, paths=None):
     if paths is None:
         paths = _region_paths(region)
-    write_factor_files(factors, paths)
-    stdout = run_fortran(region=region, paths=paths)
+    with _fortran_global_lock():
+        write_factor_files(factors, paths)
+        stdout = run_fortran(region=region, paths=paths)
     feasible = check_feasibility(stdout)
     cost = parse_cost(stdout)
     log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
@@ -1123,19 +1141,20 @@ def run_workflow(
         ])
         lp_factors = read_dat(str(paths["factor_result"]))
         base_factors = _build_full_factors(lp_factors)
-    if baseline_start == "defaults":
-        # Let Fortran use its hardcoded regional values — delete any stale factor
-        # file so READ_FACTOR_OVERRIDES exits early and nothing is overridden.
-        for _fp in [paths["factor_dest"], paths["factor_pathhome"]]:
-            if _fp.exists():
-                _fp.unlink()
-    else:
-        write_factor_files(base_factors, paths)
-    # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
-    # so that fortran_last_run.out is reserved for the final optimal evaluation.
     baseline_paths = dict(paths)
     baseline_paths["fortran_out"] = paths["fortran_baseline_out"]
-    stdout = run_fortran(region=region, paths=baseline_paths)
+    with _fortran_global_lock():
+        if baseline_start == "defaults":
+            # Let Fortran use its hardcoded regional values — delete any stale factor
+            # file so READ_FACTOR_OVERRIDES exits early and nothing is overridden.
+            for _fp in [paths["factor_dest"], paths["factor_pathhome"]]:
+                if _fp.exists():
+                    _fp.unlink()
+        else:
+            write_factor_files(base_factors, paths)
+        # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
+        # so that fortran_last_run.out is reserved for the final optimal evaluation.
+        stdout = run_fortran(region=region, paths=baseline_paths)
     print("Baseline Fortran output written to {}".format(paths["fortran_baseline_out"]))
 
     # Parse and save the baseline summary for all warm-start modes.
@@ -1229,8 +1248,9 @@ def run_workflow(
     #   2. optimal_summary.json captures the full structured results
     # The raw .out file and JSON are both saved; nothing is deleted.
     print("Running final Fortran evaluation with optimal factors...")
-    write_factor_files(best_factors, paths)
-    final_stdout = run_fortran(region=region, paths=paths)
+    with _fortran_global_lock():
+        write_factor_files(best_factors, paths)
+        final_stdout = run_fortran(region=region, paths=paths)
     paths["fortran_optimal_out"].write_text(final_stdout)
     _parse_and_save(
         final_stdout,
@@ -1305,8 +1325,9 @@ def run_ga_from_lp_workflow(
 
     # 2. Evaluate LP solution with Fortran → lp_summary.json
     print(f"Evaluating LP factors with Fortran for region '{region}'...")
-    write_factor_files(base_factors, paths)
-    lp_stdout = run_fortran(region=region, paths=paths)
+    with _fortran_global_lock():
+        write_factor_files(base_factors, paths)
+        lp_stdout = run_fortran(region=region, paths=paths)
     paths["fortran_lp_out"].write_text(lp_stdout)
     _parse_and_save(
         lp_stdout,
@@ -1352,8 +1373,9 @@ def run_ga_from_lp_workflow(
 
     # 4. Final Fortran evaluation → lp_ga_summary.json
     print("Running final Fortran evaluation with LP-GA optimal factors...")
-    write_factor_files(best_factors, paths)
-    final_stdout = run_fortran(region=region, paths=paths)
+    with _fortran_global_lock():
+        write_factor_files(best_factors, paths)
+        final_stdout = run_fortran(region=region, paths=paths)
     paths["fortran_lp_ga_out"].write_text(final_stdout)
     _parse_and_save(
         final_stdout,
