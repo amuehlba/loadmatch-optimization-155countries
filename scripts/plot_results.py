@@ -308,6 +308,7 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir,
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
               frameon=False, ncol=1, fontsize=7)
     ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0)
     note = "Dotted = baseline"
     if lp_factors:
         note += "  |  dash-dot = LP solution"
@@ -371,7 +372,7 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir,
         n_gens_plot = n_gens
         if df_best_lp is not None and "gen" in df_best_lp.columns and len(df_best_lp) > 0:
             n_gens_plot = max(n_gens, df_best_lp["gen"].max())
-        ax.set_xlim(1, n_gens_plot)
+        ax.set_xlim(0, n_gens_plot)
     # Hide unused 6th panel
     axes.flatten()[-1].set_visible(False)
     # Add style legend
@@ -496,7 +497,26 @@ def fig4_baseline_vs_ga(df_compare, save_dir, lp_factors=None, best_row_lp=None)
                             xy=(max(float(v), 0) + 0.02, y_pos),
                             fontsize=6.5, va="center", color="dimgray")
     all_vals = np.concatenate([df[f"_norm_{c}"].fillna(0).values for c, _ in cases_avail])
-    ax.set_xlim(left=0, right=max(np.nanmax(all_vals) * 1.35, 2.0))
+    finite_pos = all_vals[np.isfinite(all_vals) & (all_vals > 0)]
+    if len(finite_pos) > 0:
+        # Use 95th-percentile-based clip so extreme outliers (e.g. FACSHT near-zero baseline)
+        # don't collapse all other bars to invisible dots.
+        xlim_right = max(np.percentile(finite_pos, 95) * 1.6, 2.0)
+    else:
+        xlim_right = 2.0
+    ax.set_xlim(left=0, right=xlim_right)
+    # Annotate bars whose true value exceeds the clipped x-axis
+    for i, (_, r) in enumerate(df.iterrows()):
+        for ci, (cname, _) in enumerate(cases_avail):
+            norm_col = f"_norm_{cname}"
+            v = r.get(norm_col, np.nan) if norm_col in r.index else np.nan
+            if not np.isfinite(v) or v <= xlim_right:
+                continue
+            color = _CASE_COLORS.get(cname, "gray")
+            ax.annotate(f"→ {v:.2g}×",
+                        xy=(xlim_right, i + offsets[ci]),
+                        ha="left", va="center", fontsize=6.0, color=color,
+                        xycoords="data")
     _save(fig, "fig4_baseline_vs_ga", save_dir)
 
 
@@ -509,99 +529,126 @@ def _to_gw(record, factor_col, base_key):
 
 
 def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n_gens,
-                            records, save_dir, df_gen_lp=None, best_row_lp=None):
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(16, 6))
+                            records, save_dir, df_gen_lp=None, best_row_lp=None,
+                            df_ga_lp=None, n_gens_lp=None):
+    has_lp = df_gen_lp is not None and df_ga_lp is not None
 
-    # A) Population cost distribution per generation
-    gen_costs, gen_positions = [], []
-    for g in range(1, int(n_gens) + 1):
-        feas = df_ga[(df_ga["gen"] == g) & (df_ga["feasible"] == True)]["cost_mn_bil_per_year"]
-        feas = feas[feas < float("inf")]
-        if len(feas) >= 2:
-            gen_costs.append(feas.values)
-            gen_positions.append(g)
-    ax_a.boxplot(gen_costs, positions=gen_positions, widths=0.6, patch_artist=True,
-                 showfliers=False, boxprops=dict(facecolor=OKABE_ITO[1], alpha=0.5),
-                 medianprops=dict(color=OKABE_ITO[4], lw=1.5))
-    valid = df_gen[df_gen["cum_best_cost"] < float("inf")]
-    ax_a.plot(valid["gen"], valid["cum_best_cost"], "-", color="#1A5276", lw=2,
-              label="GA (bl) cumulative best", zorder=5)
-    if df_gen_lp is not None:
-        valid_lp = df_gen_lp[df_gen_lp["cum_best_cost"] < float("inf")]
-        ax_a.plot(valid_lp["gen"], valid_lp["cum_best_cost"], "--", color="#2ECC71", lw=2,
-                  label="GA (LP) cumulative best", zorder=5)
-    ax_a.set_xlabel("Generation")
-    ax_a.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
-    ax_a.set_title("A)", loc="left", fontweight="bold")
-    ax_a.legend(loc="upper right", fontsize=7)
-    ax_a.set_xlim(0.5, n_gens + 0.5)
-    tick_gens = list(range(10, int(n_gens) + 1, 10))
-    ax_a.set_xticks(tick_gens)
-    ax_a.set_xticklabels([str(g) for g in tick_gens])
-
-    # B) Capacity evolution stacked bars at milestones:
-    #    Left bars (x - 0.22): generation capacity (GW, left y-axis)
-    #    Right bars (x + 0.22): energy storage capacity (TWh, right y-axis)
-    milestones = [("Baseline", records[0])]
-    for r in records:
-        if r.get("label", "").startswith("inflate") and r.get("feasible"):
-            milestones.append(("First feasible", r))
-            break
-    for g in range(10, int(n_gens) + 1, 10):
-        gen_df = df_ga[(df_ga["gen"] == g) & (df_ga["feasible"] == True)]
-        if len(gen_df):
-            row = gen_df.loc[gen_df["cost_mn_bil_per_year"].idxmin()]
-            milestones.append((f"Gen {g}", row.to_dict()))
-    milestones.append(("GA (bl) opt", best_row.to_dict()))
-    if best_row_lp is not None:
-        milestones.append(("GA (LP) opt", best_row_lp.to_dict()))
-
-    n_ms = len(milestones)
-    x = np.arange(n_ms)
-    bar_w = 0.38
-    cmap_b = plt.cm.Set2(np.linspace(0, 1, len(FACTOR_TO_BASE)))
-
-    # Generation capacity bars (GW) — left axis
-    bottom_gw = np.zeros(n_ms)
-    for j, (fcol, (bkey, tname)) in enumerate(FACTOR_TO_BASE.items()):
-        caps = np.array([_to_gw(ms[1], fcol, bkey) for ms in milestones])
-        ax_b.bar(x - bar_w / 2, caps, bar_w, bottom=bottom_gw, label=tname,
-                 color=cmap_b[j], edgecolor="white", lw=0.4)
-        bottom_gw += caps
-    ax_b.set_ylabel("Generation capacity (GW)")
-    ax_b.set_ylim(0, bottom_gw.max() * 1.15)
-
-    # Energy storage bars (TWh) — right axis
     STORAGE_TWH = [
         ("Battery",           lambda r: r.get("batdisch", 0) * r.get("storhbat", 0)),
         ("H\u2082 long-term", lambda r: r.get("fcdisch", 0) * r.get("dayh2stor", 0) * 24),
         ("Heat battery",      lambda r: r.get("hbtdisch", 0) * r.get("storhhbt", 0)),
     ]
-    ax_b2 = ax_b.twinx()
-    ax_b2.spines["right"].set_visible(True)
-    bottom_twh = np.zeros(n_ms)
     stor_colors = [OKABE_ITO[0], OKABE_ITO[2], OKABE_ITO[5]]
-    for k, (sname, sfn) in enumerate(STORAGE_TWH):
-        vals = np.array([sfn(ms[1]) for ms in milestones])
-        ax_b2.bar(x + bar_w / 2, vals, bar_w, bottom=bottom_twh,
-                  label=sname, color=stor_colors[k], edgecolor="white", lw=0.4,
-                  hatch="//")
-        bottom_twh += vals
-    ax_b2.set_ylabel("Energy storage (TWh)")
-    ax_b2.set_ylim(0, bottom_twh.max() * 1.15 if bottom_twh.max() > 0 else 1)
+    cmap_b = plt.cm.Set2(np.linspace(0, 1, len(FACTOR_TO_BASE)))
 
-    ax_b.set_xticks(x)
-    ax_b.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
-    ax_b.set_title("B)", loc="left", fontweight="bold")
+    ncols = 2 if has_lp else 1
+    fig, axes = plt.subplots(2, ncols, figsize=(9 * ncols, 12),
+                             gridspec_kw={"height_ratios": [1, 1]})
+    if ncols == 1:
+        axes = axes.reshape(2, 1)
 
-    # Combined legend: generation sources + storage types
+    panel_labels = iter("ABCDEFGH")
+
+    def _plot_trajectory(ax, df_ga_data, df_gen_data, n_gens_data, box_color,
+                         line_color, label_prefix, panel_label):
+        gen_costs, gen_positions = [], []
+        for g in range(1, int(n_gens_data) + 1):
+            feas = df_ga_data[(df_ga_data["gen"] == g) & (df_ga_data["feasible"] == True)]["cost_mn_bil_per_year"]
+            feas = feas[feas < float("inf")]
+            if len(feas) >= 2:
+                gen_costs.append(feas.values)
+                gen_positions.append(g)
+        if gen_costs:
+            ax.boxplot(gen_costs, positions=gen_positions, widths=0.6, patch_artist=True,
+                       showfliers=False, boxprops=dict(facecolor=box_color, alpha=0.4),
+                       medianprops=dict(color=line_color, lw=1.5))
+        valid = df_gen_data[df_gen_data["cum_best_cost"] < float("inf")]
+        ax.plot(valid["gen"], valid["cum_best_cost"], "-", color=line_color, lw=2,
+                label=f"{label_prefix} cumulative best", zorder=5)
+        ax.set_xlabel("Generation")
+        ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
+        ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
+        ax.legend(loc="upper right", fontsize=7)
+        ax.set_xlim(0, n_gens_data + 0.5)
+
+    def _plot_capacity(ax, df_ga_data, n_gens_data, best_row_data, records_data,
+                       panel_label):
+        milestones = [("Baseline", records_data[0])]
+        for r in records_data:
+            if r.get("label", "").startswith("inflate") and r.get("feasible"):
+                milestones.append(("First\nfeasible", r))
+                break
+        for g in range(10, int(n_gens_data) + 1, 10):
+            gdf = df_ga_data[(df_ga_data["gen"] == g) & (df_ga_data["feasible"] == True)]
+            if len(gdf):
+                row = gdf.loc[gdf["cost_mn_bil_per_year"].idxmin()]
+                milestones.append((f"Gen {g}", row.to_dict()))
+        milestones.append(("Optimal", best_row_data.to_dict()))
+
+        n_ms = len(milestones)
+        x = np.arange(n_ms)
+        bar_w = 0.38
+        bottom_gw = np.zeros(n_ms)
+        for j, (fcol, (bkey, tname)) in enumerate(FACTOR_TO_BASE.items()):
+            caps = np.array([_to_gw(ms[1], fcol, bkey) for ms in milestones])
+            ax.bar(x - bar_w / 2, caps, bar_w, bottom=bottom_gw, label=tname,
+                   color=cmap_b[j], edgecolor="white", lw=0.4)
+            bottom_gw += caps
+        ax.set_ylabel("Generation capacity (GW)")
+
+        ax_r = ax.twinx()
+        ax_r.spines["right"].set_visible(True)
+        bottom_twh = np.zeros(n_ms)
+        for k, (sname, sfn) in enumerate(STORAGE_TWH):
+            vals = np.array([sfn(ms[1]) for ms in milestones])
+            ax_r.bar(x + bar_w / 2, vals, bar_w, bottom=bottom_twh,
+                     label=sname, color=stor_colors[k], edgecolor="white", lw=0.4, hatch="//")
+            bottom_twh += vals
+        ax_r.set_ylabel("Energy storage (TWh)")
+        ax_r.set_ylim(0, bottom_twh.max() * 1.15 if bottom_twh.max() > 0 else 1)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
+        ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
+        return bottom_gw.max()
+
+    # ── Top row: trajectories ───────────────────────────────────────────────────
+    _plot_trajectory(axes[0, 0], df_ga, df_gen, n_gens,
+                     OKABE_ITO[1], "#1A5276", "GA (bl)", next(panel_labels))
+    if has_lp:
+        _plot_trajectory(axes[0, 1], df_ga_lp, df_gen_lp, n_gens_lp,
+                         OKABE_ITO[3], "#2ECC71", "GA (LP)", next(panel_labels))
+
+    # Equalise top-row y-axis limits
+    y_tops = [axes[0, c].get_ylim()[1] for c in range(ncols)]
+    for c in range(ncols):
+        axes[0, c].set_ylim(bottom=0, top=max(y_tops))
+
+    # ── Bottom row: capacity bars ───────────────────────────────────────────────
+    gw_max_bl = _plot_capacity(axes[1, 0], df_ga, n_gens, best_row, records,
+                               next(panel_labels))
+    gw_max = gw_max_bl
+    if has_lp and best_row_lp is not None:
+        # Need records_lp — approximate by treating first df_ga_lp row as starting record
+        # Extract a minimal records list from df_ga_lp
+        first_lp = df_ga_lp.iloc[0].to_dict() if len(df_ga_lp) else best_row_lp.to_dict()
+        records_lp_approx = [first_lp]
+        gw_max_lp = _plot_capacity(axes[1, 1], df_ga_lp, n_gens_lp, best_row_lp,
+                                   records_lp_approx, next(panel_labels))
+        gw_max = max(gw_max_bl, gw_max_lp)
+
+    # Equalise bottom-row left-axis y-limits
+    for c in range(ncols):
+        axes[1, c].set_ylim(0, gw_max * 1.15)
+
+    # Shared legend for capacity panels
     gen_handles = [Patch(facecolor=cmap_b[j], label=tn, edgecolor="white")
                    for j, (_, (_, tn)) in enumerate(FACTOR_TO_BASE.items())]
     stor_handles = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
                     for k, (sn, _) in enumerate(STORAGE_TWH)]
-    ax_b.legend(handles=gen_handles + stor_handles,
-                bbox_to_anchor=(1.18, 1), loc="upper left", borderaxespad=0,
-                frameon=False, ncol=1, fontsize=7)
+    axes[1, 0].legend(handles=gen_handles + stor_handles,
+                      bbox_to_anchor=(0.0, -0.28), loc="upper left", borderaxespad=0,
+                      frameon=False, ncol=3, fontsize=7)
 
     _save(fig, "fig5_cost_and_capacity", save_dir)
 
@@ -640,6 +687,7 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir, df_ga_lp=None, n_gens_lp=None):
     if ncols == 1:
         axes = [axes]
 
+    _panel_letters = "ABCDEFGH"
     for ax_i, (cname, col_key) in enumerate([("GA (bl)", "GA (bl)"), ("GA (LP)", "GA (LP)")] if has_lp else [("GA (bl)", "GA (bl)")]):
         ax = axes[ax_i]
         vals = df_cv[col_key].values
@@ -649,7 +697,7 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir, df_ga_lp=None, n_gens_lp=None):
         ax.set_yticklabels(df_cv.index.tolist(), fontsize=8)
         ax.set_xlabel("Coefficient of variation (%)")
         ax.invert_yaxis()
-        ax.set_title(cname, loc="left", fontweight="bold")
+        ax.set_title(f"{_panel_letters[ax_i]})", loc="left", fontweight="bold")
         ax.legend(handles=[
             Patch(facecolor="tab:green", label="CV < 5%"),
             Patch(facecolor="tab:orange", label="5–20%"),
@@ -888,15 +936,19 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
 
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
 
+    # Case hatches: each case gets a distinct pattern so group colour + hatch = unambiguous
+    _CASE_HATCHES = {"Baseline": "", "LP": "//", "GA (bl)": "xx", "GA (LP)": ".."}
+
+    bl_grp = dict(raw_cases)[case_specs[0][0]]
     for ci, (cname, grp) in enumerate(case_specs):
         color_case = _CASE_COLORS.get(cname, "gray")
         alpha = _CASE_ALPHAS.get(cname, 0.8)
-        bl_grp = dict(raw_cases)[case_specs[0][0]]
+        hatch = _CASE_HATCHES.get(cname, "")
         for i, (g, c) in enumerate(zip(groups, colors)):
             gv = grp[g]
             bv = bl_grp[g]
-            ax_a.bar(i + offsets[ci], gv, w * 0.9, color=c, alpha=alpha * (0.4 + 0.15*ci),
-                     edgecolor="black", lw=0.4)
+            ax_a.bar(i + offsets[ci], gv, w * 0.9, color=c, alpha=alpha,
+                     edgecolor=color_case, lw=0.8, hatch=hatch)
             if ci > 0 and bv > 1e-3:
                 pct = 100 * (gv - bv) / bv
                 ax_a.annotate(f"{'+' if pct>=0 else ''}{pct:.0f}%",
@@ -909,12 +961,12 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     ax_a.set_ylabel(r"Annual cost (\$BIL yr$^{-1}$)")
     ax_a.set_title("A)", loc="left", fontweight="bold")
     ax_a.set_ylim(bottom=0)
-    legend_elems = (
-        [Patch(facecolor=GROUP_COLORS[g], label=g) for g in groups]
-        + [Patch(facecolor=_CASE_COLORS.get(c, "gray"), alpha=_CASE_ALPHAS.get(c, 0.8),
-                 edgecolor="black", lw=0.4, label=c) for c, _ in case_specs]
-    )
-    ax_a.legend(handles=legend_elems,
+    # Legend: group colours (filled, no hatch) + case indicators (gray fill + hatch)
+    group_handles = [Patch(facecolor=GROUP_COLORS[g], label=g, edgecolor="none") for g in groups]
+    case_handles  = [Patch(facecolor="white", edgecolor=_CASE_COLORS.get(c, "gray"), lw=1.2,
+                           hatch=_CASE_HATCHES.get(c, ""), label=c)
+                     for c, _ in case_specs]
+    ax_a.legend(handles=group_handles + case_handles,
                 bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
                 frameon=False, fontsize=8, ncol=1)
 
@@ -1047,7 +1099,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_b.text(2, y_max * 0.97, "Wind+Solar\nshare of total",
               ha="left", va="top", fontsize=7, color="gray", style="italic")
 
-    annot_offsets = [(5, 8), (5, 8), (5, 8)]
+    annot_offsets = [(5, 8), (5, 8), (-5, -12), (5, 8), (-5, -12)]
     for (label, cap, total, marker, color, ms), (dx, dy) in zip(pts_scatter, annot_offsets):
         w_, s_ = _wind_solar_shares(cap, total)
         ax_b.scatter(s_, w_, marker=marker, color=color, s=ms,
@@ -1211,45 +1263,9 @@ def fig11_diversity_heatmap(df_ga, n_gens, best_row, save_dir,
 
 def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
                          lp_costs=None, lp_energy=None, lp_ga_costs=None, lp_ga_energy=None):
-    if not bl_costs or not opt_costs:
-        _skip("Fig 12", "cost data not available (need both Fortran output files)")
+    if not bl_costs:
+        _skip("Fig 12", "baseline cost data not available")
         return
-
-    def _group_bil(costs, energy_twh):
-        return {grp: sum(costs.get(lbl, 0.0) for lbl in lbls) * energy_twh / 100
-                for grp, lbls in COST_GROUPS.items()}
-
-    bl_grp  = _group_bil(bl_costs,  bl_energy)
-    opt_grp = _group_bil(opt_costs, opt_energy)
-
-    bl_total  = sum(bl_grp.values())
-    opt_total = sum(opt_grp.values())
-    groups    = list(COST_GROUPS.keys())
-
-    # Waterfall: deltas per category, sorted largest saving first
-    deltas = {g: opt_grp[g] - bl_grp[g] for g in groups}
-    sorted_groups = sorted(groups, key=lambda g: deltas[g])  # largest saving first
-
-    # Build waterfall x positions: start, each category, end
-    labels_wf = ["Baseline"] + sorted_groups + ["GA optimal"]
-    running   = bl_total
-    bottoms   = [0.0]
-    heights   = [bl_total]
-    bar_colors = ["steelblue"]
-
-    for g in sorted_groups:
-        d = deltas[g]
-        if d < 0:
-            bottoms.append(running + d)
-        else:
-            bottoms.append(running)
-        heights.append(abs(d))
-        bar_colors.append("tab:green" if d < 0 else "tab:red")
-        running += d
-
-    bottoms.append(0.0)
-    heights.append(opt_total)
-    bar_colors.append("coral")
 
     def _group_bil(costs, energy_twh):
         if not costs or energy_twh is None:
@@ -1257,84 +1273,98 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
         return {grp: sum(costs.get(lbl, 0.0) for lbl in lbls) * energy_twh / 100
                 for grp, lbls in COST_GROUPS.items()}
 
-    # Build all available case totals for panel B
-    all_case_totals = [("Baseline", bl_total, _CASE_COLORS["Baseline"])]
-    if lp_costs and lp_energy:
-        lp_grp = _group_bil(lp_costs, lp_energy)
-        if lp_grp:
-            all_case_totals.append(("LP", sum(lp_grp.values()), _CASE_COLORS["LP"]))
-    all_case_totals.append(("GA (bl)", opt_total, _CASE_COLORS["GA (bl)"]))
-    if lp_ga_costs and lp_ga_energy:
-        lp_ga_grp = _group_bil(lp_ga_costs, lp_ga_energy)
-        if lp_ga_grp:
-            all_case_totals.append(("GA (LP)", sum(lp_ga_grp.values()), _CASE_COLORS["GA (LP)"]))
+    bl_grp = _group_bil(bl_costs, bl_energy)
+    if bl_grp is None:
+        _skip("Fig 12", "baseline cost groups could not be computed")
+        return
 
-    has_extra = len(all_case_totals) > 2
-    fig, axes = plt.subplots(1, 2 if has_extra else 1,
-                              figsize=(20 if has_extra else 13, 6))
-    ax = axes[0] if has_extra else axes
-    x = np.arange(len(labels_wf))
-    ax.bar(x, heights, 0.55, bottom=bottoms, color=bar_colors,
-           edgecolor="black", lw=0.5, alpha=0.85)
+    bl_total = sum(bl_grp.values())
+    groups   = list(COST_GROUPS.keys())
 
-    # Connector lines between bars
-    running = bl_total
-    for i, g in enumerate(sorted_groups, start=1):
-        d = deltas[g]
-        y_conn = running + d if d < 0 else running
-        ax.plot([x[i] - 0.28, x[i] + 0.28], [y_conn, y_conn],
-                color="gray", lw=0.7, ls="--", zorder=5)
-        running += d
+    # Build comparison cases (skip if data absent)
+    comparison_cases = []
+    lp_grp = _group_bil(lp_costs, lp_energy)
+    if lp_grp is not None:
+        comparison_cases.append(("LP", lp_grp, _CASE_COLORS["LP"]))
+    ga_bl_grp = _group_bil(opt_costs, opt_energy)
+    if ga_bl_grp is not None:
+        comparison_cases.append(("GA (bl)", ga_bl_grp, _CASE_COLORS["GA (bl)"]))
+    ga_lp_grp = _group_bil(lp_ga_costs, lp_ga_energy)
+    if ga_lp_grp is not None:
+        comparison_cases.append(("GA (LP)", ga_lp_grp, _CASE_COLORS["GA (LP)"]))
 
-    # Value labels
-    for xi, (bot, ht, lbl) in enumerate(zip(bottoms, heights, labels_wf)):
-        top = bot + ht
-        if xi == 0 or xi == len(labels_wf) - 1:
-            ax.annotate(f"${ht:.1f}B", xy=(xi, top), xytext=(0, 4),
-                        textcoords="offset points", ha="center", va="bottom",
-                        fontsize=9, fontweight="bold")
-        else:
-            g = sorted_groups[xi - 1]
+    if not comparison_cases:
+        _skip("Fig 12", "no comparison case data available")
+        return
+
+    ncols = len(comparison_cases)
+    fig, axes = plt.subplots(1, ncols, figsize=(9 * ncols, 6))
+    if ncols == 1:
+        axes = [axes]
+
+    def _draw_waterfall(ax, case_grp, case_total, case_color, panel_label):
+        deltas       = {g: case_grp[g] - bl_grp[g] for g in groups}
+        sorted_grps  = sorted(groups, key=lambda g: deltas[g])
+        labels_wf    = ["Baseline"] + sorted_grps + ["Case total"]
+        running      = bl_total
+        bottoms, heights, bar_colors = [0.0], [bl_total], [_CASE_COLORS["Baseline"]]
+
+        for g in sorted_grps:
             d = deltas[g]
-            sign = "−" if d < 0 else "+"
-            y_anchor = top if d >= 0 else bot
-            offset   = (0, 4) if d >= 0 else (0, -4)
-            va       = "bottom" if d >= 0 else "top"
-            ax.annotate(f"{sign}${abs(d):.1f}B", xy=(xi, y_anchor), xytext=offset,
-                        textcoords="offset points", ha="center", va=va,
-                        fontsize=8, color="tab:green" if d < 0 else "tab:red")
+            bottoms.append(running + d if d < 0 else running)
+            heights.append(abs(d))
+            bar_colors.append("tab:green" if d < 0 else "tab:red")
+            running += d
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels_wf, rotation=25, ha="right", fontsize=9)
-    ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
-    ax.set_ylim(0, bl_total * 1.12)
-    ax.set_title("A) Baseline → GA (bl) breakdown", loc="left", fontweight="bold")
-    ax.legend(handles=[
-        Patch(facecolor=_CASE_COLORS["Baseline"], label="Baseline total"),
-        Patch(facecolor="tab:green", label="Cost reduction"),
-        Patch(facecolor="tab:red",   label="Cost increase"),
-        Patch(facecolor=_CASE_COLORS["GA (bl)"], label="GA (bl) total"),
-    ], fontsize=9, bbox_to_anchor=(1.01, 1), loc="upper left",
-       borderaxespad=0, frameon=False, ncol=1)
+        bottoms.append(0.0)
+        heights.append(case_total)
+        bar_colors.append(case_color)
 
-    # Panel B — four-case total comparison
-    if has_extra:
-        ax2 = axes[1]
-        names = [c for c, _, _ in all_case_totals]
-        totals = [t for _, t, _ in all_case_totals]
-        cols   = [c for _, _, c in all_case_totals]
-        bars2  = ax2.bar(range(len(names)), totals, 0.55, color=cols,
-                         edgecolor="black", lw=0.5, alpha=0.85)
-        for xi, (tot, cname) in enumerate(zip(totals, names)):
-            pct = 100 * (tot - all_case_totals[0][1]) / all_case_totals[0][1]
-            label = f"${tot:.1f}B" + (f"\n({pct:+.1f}%)" if xi > 0 else "")
-            ax2.annotate(label, xy=(xi, tot), xytext=(0, 4),
-                         textcoords="offset points", ha="center", va="bottom", fontsize=9)
-        ax2.set_xticks(range(len(names)))
-        ax2.set_xticklabels(names, fontsize=10)
-        ax2.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
-        ax2.set_ylim(0, max(totals) * 1.20)
-        ax2.set_title("B) All-case total cost", loc="left", fontweight="bold")
+        x = np.arange(len(labels_wf))
+        ax.bar(x, heights, 0.55, bottom=bottoms, color=bar_colors,
+               edgecolor="black", lw=0.5, alpha=0.85)
+
+        # Connector lines
+        running = bl_total
+        for i, g in enumerate(sorted_grps, start=1):
+            d = deltas[g]
+            y_conn = running + d if d < 0 else running
+            ax.plot([x[i] - 0.28, x[i] + 0.28], [y_conn, y_conn],
+                    color="gray", lw=0.7, ls="--", zorder=5)
+            running += d
+
+        # Value labels
+        for xi, (bot, ht, lbl) in enumerate(zip(bottoms, heights, labels_wf)):
+            top = bot + ht
+            if xi == 0 or xi == len(labels_wf) - 1:
+                ax.annotate(f"${ht:.1f}B", xy=(xi, top), xytext=(0, 4),
+                            textcoords="offset points", ha="center", va="bottom",
+                            fontsize=9, fontweight="bold")
+            else:
+                g   = sorted_grps[xi - 1]
+                d   = deltas[g]
+                sgn = "−" if d < 0 else "+"
+                y_a = top if d >= 0 else bot
+                off = (0, 4) if d >= 0 else (0, -4)
+                va  = "bottom" if d >= 0 else "top"
+                ax.annotate(f"{sgn}${abs(d):.1f}B", xy=(xi, y_a), xytext=off,
+                            textcoords="offset points", ha="center", va=va,
+                            fontsize=8, color="tab:green" if d < 0 else "tab:red")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels_wf, rotation=25, ha="right", fontsize=9)
+        ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
+        ax.set_ylim(0, bl_total * 1.12)
+        ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
+        ax.legend(handles=[
+            Patch(facecolor=_CASE_COLORS["Baseline"], label="Baseline"),
+            Patch(facecolor="tab:green",              label="Cost reduction"),
+            Patch(facecolor="tab:red",                label="Cost increase"),
+            Patch(facecolor=case_color,               label="Case total"),
+        ], fontsize=8, loc="upper right", frameon=False)
+
+    for pi, (cname, cgrp, ccolor) in enumerate(comparison_cases):
+        _draw_waterfall(axes[pi], cgrp, sum(cgrp.values()), ccolor, "ABC"[pi])
 
     _save(fig, "fig12_cost_waterfall", save_dir)
 
@@ -2274,7 +2304,7 @@ def fig_lp_system_diagram(save_dir: Path):
     _save(fig, "fig_lp_system_diagram", save_dir)
 
 
-def fig_four_case_comparison(region: str, save_dir: Path):
+def fig14_four_case_comparison(region: str, save_dir: Path):
     """Four-case comparison per region: baseline / LP-eval / GA-from-baseline / GA-from-LP.
 
     Reads the four JSON summary files.  Missing cases are shown as empty bars
@@ -2370,7 +2400,7 @@ def fig_four_case_comparison(region: str, save_dir: Path):
     ax.grid(True, alpha=0.3, axis="y")
 
     fig.tight_layout()
-    _save(fig, "fig_four_case_comparison", save_dir)
+    _save(fig, "fig14_four_case_comparison", save_dir)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2411,7 +2441,7 @@ def main(region=None):
         print(f"LP figures → {save_dir}\n")
         _try_fig("Input data",         fig_input_data,         region, save_dir)
         _try_fig("LP system diagram",  fig_lp_system_diagram,  save_dir)
-        _try_fig("Four-case comparison", fig_four_case_comparison, region, save_dir)
+        _try_fig("Fig 14 — Four-case comparison", fig14_four_case_comparison, region, save_dir)
         return
 
     print(f"Region    : {region}")
@@ -2523,7 +2553,8 @@ def main(region=None):
     _try_fig("Fig  5 — Cost distribution and capacity evolution",
              fig5_cost_and_capacity, df_ga, df_gen, df_best, best_row,
              baseline_factors, n_gens, records, save_dir,
-             df_gen_lp=df_gen_lp, best_row_lp=best_row_lp)
+             df_gen_lp=df_gen_lp, best_row_lp=best_row_lp,
+             df_ga_lp=df_ga_lp, n_gens_lp=n_gens_lp)
 
     _try_fig("Fig  6 — Parameter CV (sensitivity)",
              fig6_parameter_cv, df_ga, n_gens, save_dir,
@@ -2546,10 +2577,6 @@ def main(region=None):
     _try_fig("Fig 10 — Capacity mix and ternary",
              fig10_capacity_mix, best_row, baseline_factors, save_dir, region,
              lp_factors=lp_factors or None, best_row_lp=best_row_lp)
-
-    _try_fig("Fig 11 — Population diversity heatmap",
-             fig11_diversity_heatmap, df_ga, n_gens, best_row, save_dir,
-             df_ga_lp=df_ga_lp, n_gens_lp=n_gens_lp, best_row_lp=best_row_lp)
 
     _try_fig("Fig 12 — Cost waterfall",
              fig12_cost_waterfall, bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
