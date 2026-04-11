@@ -252,9 +252,8 @@ def fig1_convergence(df_gen, save_dir, df_gen_lp=None, lp_cost=None):
         gv_lp = df_gen_lp[df_gen_lp["gen_best_cost"] < float("inf")]
         ax.scatter(gv_lp["gen"], gv_lp["gen_best_cost"],
                    s=18, c="#2ECC71", alpha=0.35, zorder=3)
-    if lp_cost is not None and lp_cost < float("inf"):
-        ax.axhline(lp_cost, color="#F28C28", lw=1.4, ls=":", label=f"LP solution: ${lp_cost:.1f}B")
     ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
+    ax.set_xlim(left=0)
     ax.legend(loc="upper right", fontsize=7)
     ax.set_title("A)", loc="left", fontweight="bold")
 
@@ -267,6 +266,7 @@ def fig1_convergence(df_gen, save_dir, df_gen_lp=None, lp_cost=None):
         ax2.legend(fontsize=7)
     ax2.set_ylabel("Feasible (%)")
     ax2.set_xlabel("Generation")
+    ax2.set_xlim(left=0)
     ax2.set_ylim(0, 105)
     ax2.set_title("B)", loc="left", fontweight="bold")
 
@@ -496,6 +496,27 @@ def fig4_baseline_vs_ga(df_compare, save_dir, lp_factors=None, best_row_lp=None)
                 ax.annotate(f"{r['GA optimal']:.3g}  ({pct:+.0f}%)",
                             xy=(max(float(v), 0) + 0.02, y_pos),
                             fontsize=6.5, va="center", color="dimgray")
+    # Annotate GA (LP) values for unlocked params
+    ga_lp_norm_col = "_norm_GA (LP)"
+    ga_lp_case_idx = next((ci for ci, (c, _) in enumerate(cases_avail) if c == "GA (LP)"), None)
+    if ga_lp_norm_col in df.columns and ga_lp_case_idx is not None and best_row_lp is not None:
+        for i, (_, r) in enumerate(df.iterrows()):
+            if r["Locked"]:
+                continue
+            v = r[ga_lp_norm_col] if ga_lp_norm_col in r.index else np.nan
+            if not (isinstance(v, float) and np.isnan(v)):
+                actual = _fac(best_row_lp, r["Parameter"])
+                pct = (float(v) - 1.0) * 100
+                y_pos = i + offsets[ga_lp_case_idx]
+                ax.annotate(f"{actual:.3g}  ({pct:+.0f}%)",
+                            xy=(max(float(v), 0) + 0.02, y_pos),
+                            fontsize=6.5, va="center", color=_CASE_COLORS["GA (LP)"])
+    # Note: GA (LP) is warm-started from the LP solution; similar-looking bars
+    # reflect convergence close to (but not identical to) the LP starting point.
+    if best_row_lp is not None:
+        ax.annotate("GA (LP) warm-started from LP — bars may overlap LP if convergence is close",
+                    xy=(0.01, 0.01), xycoords="axes fraction",
+                    fontsize=6.5, va="bottom", color="gray", style="italic")
     all_vals = np.concatenate([df[f"_norm_{c}"].fillna(0).values for c, _ in cases_avail])
     finite_pos = all_vals[np.isfinite(all_vals) & (all_vals > 0)]
     if len(finite_pos) > 0:
@@ -538,6 +559,13 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
         ("H\u2082 long-term", lambda r: r.get("fcdisch", 0) * r.get("dayh2stor", 0) * 24),
         ("Heat battery",      lambda r: r.get("hbtdisch", 0) * r.get("storhhbt", 0)),
     ]
+    # Discharge power (TW → GW for primary axis)
+    STORAGE_DISCH_GW = [
+        ("Battery disch.",    lambda r: r.get("batdisch", 0) * 1000),
+        ("H\u2082 FC disch.", lambda r: r.get("fcdisch",  0) * 1000),
+        ("Heat bat. disch.",  lambda r: r.get("hbtdisch", 0) * 1000),
+    ]
+    disch_colors = [OKABE_ITO[0], OKABE_ITO[2], OKABE_ITO[5]]
     stor_colors = [OKABE_ITO[0], OKABE_ITO[2], OKABE_ITO[5]]
     cmap_b = plt.cm.Set2(np.linspace(0, 1, len(FACTOR_TO_BASE)))
 
@@ -587,21 +615,31 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
 
         n_ms = len(milestones)
         x = np.arange(n_ms)
-        bar_w = 0.38
+        bar_w = 0.27   # three groups side-by-side
+        # Group 1 (left): generation capacity (GW) — primary axis
         bottom_gw = np.zeros(n_ms)
         for j, (fcol, (bkey, tname)) in enumerate(FACTOR_TO_BASE.items()):
             caps = np.array([_to_gw(ms[1], fcol, bkey) for ms in milestones])
-            ax.bar(x - bar_w / 2, caps, bar_w, bottom=bottom_gw, label=tname,
+            ax.bar(x - bar_w, caps, bar_w, bottom=bottom_gw, label=tname,
                    color=cmap_b[j], edgecolor="white", lw=0.4)
             bottom_gw += caps
-        ax.set_ylabel("Generation capacity (GW)")
+        # Group 2 (centre): storage discharge power (TW → GW) — primary axis
+        bottom_disch = np.zeros(n_ms)
+        for k, (sname, sfn) in enumerate(STORAGE_DISCH_GW):
+            vals = np.array([sfn(ms[1]) for ms in milestones])
+            ax.bar(x, vals, bar_w, bottom=bottom_disch, label=sname,
+                   color=disch_colors[k], edgecolor="white", lw=0.4, hatch="\\\\")
+            bottom_disch += vals
+        ax.set_ylabel("Capacity (GW)")
+        gw_top = max(bottom_gw.max(), bottom_disch.max())
 
+        # Group 3 (right): energy storage (TWh) — right axis
         ax_r = ax.twinx()
         ax_r.spines["right"].set_visible(True)
         bottom_twh = np.zeros(n_ms)
         for k, (sname, sfn) in enumerate(STORAGE_TWH):
             vals = np.array([sfn(ms[1]) for ms in milestones])
-            ax_r.bar(x + bar_w / 2, vals, bar_w, bottom=bottom_twh,
+            ax_r.bar(x + bar_w, vals, bar_w, bottom=bottom_twh,
                      label=sname, color=stor_colors[k], edgecolor="white", lw=0.4, hatch="//")
             bottom_twh += vals
         ax_r.set_ylabel("Energy storage (TWh)")
@@ -610,7 +648,7 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
         ax.set_xticks(x)
         ax.set_xticklabels([ms[0] for ms in milestones], rotation=30, ha="right")
         ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
-        return bottom_gw.max()
+        return gw_top
 
     # ── Top row: trajectories ───────────────────────────────────────────────────
     _plot_trajectory(axes[0, 0], df_ga, df_gen, n_gens,
@@ -642,12 +680,14 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
         axes[1, c].set_ylim(0, gw_max * 1.15)
 
     # Shared legend for capacity panels
-    gen_handles = [Patch(facecolor=cmap_b[j], label=tn, edgecolor="white")
-                   for j, (_, (_, tn)) in enumerate(FACTOR_TO_BASE.items())]
-    stor_handles = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
-                    for k, (sn, _) in enumerate(STORAGE_TWH)]
-    axes[1, 0].legend(handles=gen_handles + stor_handles,
-                      bbox_to_anchor=(0.0, -0.28), loc="upper left", borderaxespad=0,
+    gen_handles   = [Patch(facecolor=cmap_b[j], label=tn, edgecolor="white")
+                     for j, (_, (_, tn)) in enumerate(FACTOR_TO_BASE.items())]
+    disch_handles = [Patch(facecolor=disch_colors[k], label=sn, edgecolor="white", hatch="\\\\")
+                     for k, (sn, _) in enumerate(STORAGE_DISCH_GW)]
+    stor_handles  = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
+                     for k, (sn, _) in enumerate(STORAGE_TWH)]
+    axes[1, 0].legend(handles=gen_handles + disch_handles + stor_handles,
+                      bbox_to_anchor=(0.0, -0.30), loc="upper left", borderaxespad=0,
                       frameon=False, ncol=3, fontsize=7)
 
     _save(fig, "fig5_cost_and_capacity", save_dir)
@@ -791,6 +831,12 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir,
     leg_handles = [Patch(facecolor=_CASE_COLORS.get(c, "gray"), alpha=_CASE_ALPHAS.get(c, 0.8),
                          edgecolor="black", lw=0.4, label=c) for c, _ in case_specs]
     ax1.legend(handles=leg_handles, loc="upper right", frameon=True, fontsize=7)
+
+    if best_row_lp is not None:
+        fig.text(0.5, 0.01,
+                 "GA (LP) is warm-started from the LP solution — bars may closely overlap LP "
+                 "if the GA converged near its starting point.",
+                 ha="center", va="bottom", fontsize=7, color="gray", style="italic")
 
     _save(fig, "fig7_capacity_comparison", save_dir)
 
@@ -1099,21 +1145,53 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_b.text(2, y_max * 0.97, "Wind+Solar\nshare of total",
               ha="left", va="top", fontsize=7, color="gray", style="italic")
 
-    annot_offsets = [(5, 8), (5, 8), (-5, -12), (5, 8), (-5, -12)]
-    for (label, cap, total, marker, color, ms), (dx, dy) in zip(pts_scatter, annot_offsets):
-        w_, s_ = _wind_solar_shares(cap, total)
+    # Compute data coords and spread annotations to avoid overlap
+    _pts_data = [(label, cap, total, marker, color, ms,
+                  *_wind_solar_shares(cap, total))   # solar, wind
+                 for label, cap, total, marker, color, ms in pts_scatter]
+
+    def _spread_annots(points_xy, min_sep=2.5, iters=80):
+        """Iteratively repel annotation positions (in data units) until no overlap."""
+        pos = [list(p) for p in points_xy]
+        for _ in range(iters):
+            moved = False
+            for i in range(len(pos)):
+                for j in range(i + 1, len(pos)):
+                    dx_ = pos[i][0] - pos[j][0]
+                    dy_ = pos[i][1] - pos[j][1]
+                    dist = (dx_**2 + dy_**2) ** 0.5
+                    if dist < min_sep and dist > 1e-9:
+                        push = (min_sep - dist) / 2
+                        nx, ny = dx_ / dist * push, dy_ / dist * push
+                        pos[i][0] += nx; pos[i][1] += ny
+                        pos[j][0] -= nx; pos[j][1] -= ny
+                        moved = True
+            if not moved:
+                break
+        return pos
+
+    raw_xy  = [(s_, w_) for *_, s_, w_ in _pts_data]
+    # Offset seeds: alternate above/below to give the spread algo a head start
+    seed_off = [(3, 5), (-3, -5), (3, 5), (-3, -5), (3, 5)]
+    seed_pos = [(s + seed_off[i % len(seed_off)][0],
+                 w + seed_off[i % len(seed_off)][1])
+                for i, (s, w) in enumerate(raw_xy)]
+    spread   = _spread_annots(seed_pos, min_sep=max(x_max, y_max) * 0.18)
+
+    for i, (label, cap, total, marker, color, ms, s_, w_) in enumerate(_pts_data):
         ax_b.scatter(s_, w_, marker=marker, color=color, s=ms,
                      edgecolors="black", lw=0.8, zorder=5, label=label)
         ax_b.annotate(
             f"{label}\nSolar {s_:.1f}%  Wind {w_:.1f}%\nTotal {s_+w_:.1f}%",
-            xy=(s_, w_), xytext=(dx, dy), textcoords="offset points", fontsize=7.5,
-            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.8, lw=0),
-            arrowprops=dict(arrowstyle="-", color="gray", lw=0.6),
+            xy=(s_, w_), xytext=spread[i], textcoords="data", fontsize=7,
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, lw=0.4,
+                      edgecolor=color),
+            arrowprops=dict(arrowstyle="-", color=color, lw=0.8),
         )
     ax_b.set_xlabel("Solar share of total installed capacity (%)")
     ax_b.set_ylabel("Wind share of total installed capacity (%)")
-    ax_b.set_xlim(0, x_max)
-    ax_b.set_ylim(0, y_max)
+    ax_b.set_xlim(0, x_max * 1.05)
+    ax_b.set_ylim(0, y_max * 1.05)
     ax_b.set_title("B)", loc="left", fontweight="bold")
     ax_b.legend(fontsize=8, loc="lower right")
 
@@ -1150,27 +1228,41 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_c.text(1.06,  -0.02,        "Solar", ha="left",   va="top",
               fontsize=12, fontweight="bold", color="#FF9900")
 
-    ternary_pts = [("Baseline 2050", bl_cap_2050, "s", _CASE_COLORS["Baseline"], 90, (8, 8))]
+    ternary_pts = [("Baseline 2050", bl_cap_2050, "s", _CASE_COLORS["Baseline"], 90)]
     if lp_cap_2050:
-        ternary_pts.append(("LP 2050", lp_cap_2050, "D", _CASE_COLORS["LP"], 80, (8, -12)))
-    ternary_pts.append(("GA (bl) 2050", ga_cap_2050, "^", _CASE_COLORS["GA (bl)"], 90, (-8, 8)))
+        ternary_pts.append(("LP 2050", lp_cap_2050, "D", _CASE_COLORS["LP"], 80))
+    ternary_pts.append(("GA (bl) 2050", ga_cap_2050, "^", _CASE_COLORS["GA (bl)"], 90))
     if lp_ga_cap_2050:
-        ternary_pts.append(("GA (LP) 2050", lp_ga_cap_2050, "v", _CASE_COLORS["GA (LP)"], 90, (8, -12)))
-    for label, cap, marker, color, ms, (dx, dy) in ternary_pts:
+        ternary_pts.append(("GA (LP) 2050", lp_ga_cap_2050, "v", _CASE_COLORS["GA (LP)"], 90))
+
+    # Compute ternary coords for each point
+    tern_data = []
+    for label, cap, marker, color, ms in ternary_pts:
         wind_  = cap.get("onshore_wind", 0) + cap.get("offshore_wind", 0)
         solar_ = (cap.get("res_pv", 0) + cap.get("com_pv", 0) +
                   cap.get("utility_pv", 0) + cap.get("csp", 0))
         water_ = cap.get("hydro", 0) + cap.get("wave", 0) + cap.get("tidal", 0)
         tot_   = wind_ + solar_ + water_
         xp, yp = _t2c(wind_, solar_, water_)
+        tern_data.append((label, cap, marker, color, ms, xp, yp, wind_, solar_, water_, tot_))
+
+    # Spread annotation positions in ternary coord space
+    raw_txy = [(xp, yp) for *_, xp, yp, _w, _s, _wa, _t in tern_data]
+    t_seed_off = [(0.06, 0.06), (-0.06, -0.06), (0.06, 0.06), (-0.06, -0.06)]
+    t_seed = [(xp + t_seed_off[i % 4][0], yp + t_seed_off[i % 4][1])
+              for i, (xp, yp) in enumerate(raw_txy)]
+    t_spread = _spread_annots(t_seed, min_sep=0.18)
+
+    for i, (label, cap, marker, color, ms, xp, yp, wind_, solar_, water_, tot_) in enumerate(tern_data):
         ax_c.scatter(xp, yp, marker=marker, color=color, s=ms,
                      edgecolors="black", lw=0.8, zorder=5, label=label)
         ax_c.annotate(
             f"{label}\nW {wind_/tot_*100:.1f}%  S {solar_/tot_*100:.1f}%  "
             f"Wat {water_/tot_*100:.1f}%",
-            xy=(xp, yp), xytext=(dx, dy), textcoords="offset points", fontsize=7.5,
-            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.8, lw=0),
-            arrowprops=dict(arrowstyle="-", color="gray", lw=0.6),
+            xy=(xp, yp), xytext=t_spread[i], textcoords="data", fontsize=7,
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, lw=0.4,
+                      edgecolor=color),
+            arrowprops=dict(arrowstyle="-", color=color, lw=0.8),
         )
 
     ax_c.set_xlim(-0.10, 1.10)
@@ -1298,14 +1390,17 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
         return
 
     ncols = len(comparison_cases)
-    fig, axes = plt.subplots(1, ncols, figsize=(9 * ncols, 6))
+    # Extra bottom margin for legend; wider per panel to give bars room
+    fig, axes = plt.subplots(1, ncols, figsize=(11 * ncols, 7),
+                             gridspec_kw={"wspace": 0.35})
     if ncols == 1:
         axes = [axes]
 
-    def _draw_waterfall(ax, case_grp, case_total, case_color, panel_label):
+    def _draw_waterfall(ax, case_grp, case_total, case_color, case_name, panel_label):
         deltas       = {g: case_grp[g] - bl_grp[g] for g in groups}
         sorted_grps  = sorted(groups, key=lambda g: deltas[g])
-        labels_wf    = ["Baseline"] + sorted_grps + ["Case total"]
+        # Use the case name for the final bar label instead of generic "Case total"
+        labels_wf    = ["Baseline"] + sorted_grps + [case_name]
         running      = bl_total
         bottoms, heights, bar_colors = [0.0], [bl_total], [_CASE_COLORS["Baseline"]]
 
@@ -1320,23 +1415,26 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
         heights.append(case_total)
         bar_colors.append(case_color)
 
-        x = np.arange(len(labels_wf))
-        ax.bar(x, heights, 0.55, bottom=bottoms, color=bar_colors,
+        n_bars = len(labels_wf)
+        x = np.arange(n_bars)
+        bar_w = min(0.55, 6.0 / n_bars)   # narrow bars when many categories
+        ax.bar(x, heights, bar_w, bottom=bottoms, color=bar_colors,
                edgecolor="black", lw=0.5, alpha=0.85)
+        ax.set_xlim(-0.6, n_bars - 0.4)   # padding so end bars aren't clipped
 
         # Connector lines
         running = bl_total
         for i, g in enumerate(sorted_grps, start=1):
             d = deltas[g]
             y_conn = running + d if d < 0 else running
-            ax.plot([x[i] - 0.28, x[i] + 0.28], [y_conn, y_conn],
+            ax.plot([x[i] - bar_w / 2, x[i] + bar_w / 2], [y_conn, y_conn],
                     color="gray", lw=0.7, ls="--", zorder=5)
             running += d
 
         # Value labels
         for xi, (bot, ht, lbl) in enumerate(zip(bottoms, heights, labels_wf)):
             top = bot + ht
-            if xi == 0 or xi == len(labels_wf) - 1:
+            if xi == 0 or xi == n_bars - 1:
                 ax.annotate(f"${ht:.1f}B", xy=(xi, top), xytext=(0, 4),
                             textcoords="offset points", ha="center", va="bottom",
                             fontsize=9, fontweight="bold")
@@ -1352,20 +1450,23 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
                             fontsize=8, color="tab:green" if d < 0 else "tab:red")
 
         ax.set_xticks(x)
-        ax.set_xticklabels(labels_wf, rotation=25, ha="right", fontsize=9)
+        ax.set_xticklabels(labels_wf, rotation=30, ha="right", fontsize=8)
         ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
         ax.set_ylim(0, bl_total * 1.12)
         ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
+        # Legend at bottom-center of each panel
         ax.legend(handles=[
             Patch(facecolor=_CASE_COLORS["Baseline"], label="Baseline"),
             Patch(facecolor="tab:green",              label="Cost reduction"),
             Patch(facecolor="tab:red",                label="Cost increase"),
-            Patch(facecolor=case_color,               label="Case total"),
-        ], fontsize=8, loc="upper right", frameon=False)
+            Patch(facecolor=case_color,               label=f"{case_name} total"),
+        ], fontsize=8, loc="lower center", frameon=False, ncol=2,
+           bbox_to_anchor=(0.5, -0.22))
 
     for pi, (cname, cgrp, ccolor) in enumerate(comparison_cases):
-        _draw_waterfall(axes[pi], cgrp, sum(cgrp.values()), ccolor, "ABC"[pi])
+        _draw_waterfall(axes[pi], cgrp, sum(cgrp.values()), ccolor, cname, "ABC"[pi])
 
+    fig.subplots_adjust(bottom=0.22)
     _save(fig, "fig12_cost_waterfall", save_dir)
 
 
@@ -2049,7 +2150,15 @@ def _load_ga_data(region, repo_root, log_name="factor_history.log"):
         })
     df_gen = pd.DataFrame(gen_best)
 
-    best_row = df[(df["feasible"] == True) & (df["cost_mn_bil_per_year"] < float("inf"))]
+    # Restrict to GA-iteration rows only so warm-start seed entries (e.g. "LP-eval")
+    # never masquerade as the GA-optimal solution.
+    best_row = df_ga[(df_ga["feasible"] == True) & (df_ga["cost_mn_bil_per_year"] < float("inf"))]
+    if best_row.empty:
+        # Fallback: accept any feasible row (covers edge cases like a single inflate candidate)
+        best_row = df[(df["feasible"] == True) & (df["cost_mn_bil_per_year"] < float("inf"))]
+    if best_row.empty:
+        print("  [WARN] No feasible row found in history log")
+        return (None,) * 7
     best_row = best_row.loc[best_row["cost_mn_bil_per_year"].idxmin()]
     print(f"Best feasible: {best_row['label']}  cost=${best_row['cost_mn_bil_per_year']:.2f}B/yr")
 
