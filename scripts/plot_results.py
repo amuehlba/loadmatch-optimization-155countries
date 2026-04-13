@@ -236,7 +236,7 @@ GROUP_COLORS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fig1_convergence(df_gen, save_dir, df_gen_lp=None, lp_cost=None):
-    fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True,
+    fig, axes = plt.subplots(2, 1, figsize=(7.0, 5.25), sharex=True,
                              gridspec_kw={"height_ratios": [3, 1]})
     ax = axes[0]
     valid = df_gen[df_gen["cum_best_cost"] < float("inf")]
@@ -288,7 +288,7 @@ def fig2_capacity_factors(df_best, baseline_factors, n_gens, save_dir,
         "cspturbfac": "CSP",
         "facsht":     "Solar thermal",
     }
-    fig, ax = plt.subplots(figsize=(10, 4.5))
+    fig, ax = plt.subplots(figsize=(7.0, 3.5))
     color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for ci, (col, label) in enumerate(CAP_LABELS.items()):
         color = color_cycle[ci % len(color_cycle)]
@@ -349,7 +349,7 @@ def fig3_parameter_trajectories(df_best, baseline_factors, n_gens, save_dir,
             "mxhrdrm": "Max DR shift (h)",
         },
     }
-    fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(7.0, 9.0))
     color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for ax, (panel_title, param_dict) in zip(axes.flatten(), PANEL_GROUPS.items()):
         for ci, (col, label) in enumerate(param_dict.items()):
@@ -453,7 +453,7 @@ def fig4_baseline_vs_ga(df_compare, save_dir, lp_factors=None, best_row_lp=None)
     h = h_total / n_cases
     offsets = [h_total/2 - h*(i + 0.5) for i in range(n_cases)]
 
-    fig, ax = plt.subplots(figsize=(12, max(8, len(df) * 0.30)))
+    fig, ax = plt.subplots(figsize=(7.0, max(5.25, len(df) * 0.25)))
     y = np.arange(len(df))
 
     for ci, (cname, _) in enumerate(cases_avail):
@@ -570,7 +570,7 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     cmap_b = plt.cm.Set2(np.linspace(0, 1, len(FACTOR_TO_BASE)))
 
     ncols = 2 if has_lp else 1
-    fig, axes = plt.subplots(2, ncols, figsize=(9 * ncols, 12),
+    fig, axes = plt.subplots(2, ncols, figsize=(7.0 * ncols, 9.0),
                              gridspec_kw={"height_ratios": [1, 1]})
     if ncols == 1:
         axes = axes.reshape(2, 1)
@@ -687,8 +687,8 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
     stor_handles  = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
                      for k, (sn, _) in enumerate(STORAGE_TWH)]
     axes[1, 0].legend(handles=gen_handles + disch_handles + stor_handles,
-                      bbox_to_anchor=(0.0, -0.30), loc="upper left", borderaxespad=0,
-                      frameon=False, ncol=3, fontsize=7)
+                      loc="upper right", frameon=True, framealpha=0.9,
+                      ncol=2, fontsize=8)
 
     _save(fig, "fig5_cost_and_capacity", save_dir)
 
@@ -722,7 +722,7 @@ def fig6_parameter_cv(df_ga, n_gens, save_dir, df_ga_lp=None, n_gens_lp=None):
         df_cv = df_cv_bl.sort_values("GA (bl)", ascending=True)
 
     ncols = 2 if has_lp else 1
-    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, max(8, len(df_cv) * 0.28)),
+    fig, axes = plt.subplots(1, ncols, figsize=(7.0 * ncols, max(5.25, len(df_cv) * 0.25)),
                               sharey=True)
     if ncols == 1:
         axes = [axes]
@@ -786,7 +786,7 @@ def fig7_capacity_comparison(best_row, baseline_factors, save_dir,
     ]
     se_labels = [it[0] for it in stor_ene_items]
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(16, 6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(10.5, 4.5))
     w_total = 0.72
     w = w_total / n_cases
     offsets = [w_total/2 - w*(i + 0.5) for i in range(n_cases)]
@@ -887,7 +887,7 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES",
         for areas in all_areas
     ]
 
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(7.0, 4.5))
     w_total = 0.72
     w = w_total / n_cases
     offsets = [w_total/2 - w*(i + 0.5) for i in range(n_cases)]
@@ -980,7 +980,7 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     w = w_total / n_cases
     offsets = [w_total/2 - w*(i + 0.5) for i in range(n_cases)]
 
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(7.0, 4.5))
 
     # Case hatches: each case gets a distinct pattern so group colour + hatch = unambiguous
     _CASE_HATCHES = {"Baseline": "", "LP": "//", "GA (bl)": "xx", "GA (LP)": ".."}
@@ -1071,7 +1071,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
         w, s = wind / tot, solar / tot
         return s + w * 0.5, w * _S3 / 2
 
-    fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(18, 6),
+    fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(10.5, 4.5),
                                             gridspec_kw={"width_ratios": [1, 1, 1.3]})
 
     # A) Absolute capacity stacked bars — include all available cases
@@ -1170,7 +1170,9 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
                 break
         return pos
 
-    raw_xy  = [(s_, w_) for *_, s_, w_ in _pts_data]
+    # _wind_solar_shares returns (wind, solar); unpack as (w_, s_) so s_=solar (x-axis)
+    # and w_=wind (y-axis) matching the axis labels and x_max/y_max computations.
+    raw_xy  = [(s_, w_) for *_, w_, s_ in _pts_data]
     # Offset seeds: alternate above/below to give the spread algo a head start
     seed_off = [(3, 5), (-3, -5), (3, 5), (-3, -5), (3, 5)]
     seed_pos = [(s + seed_off[i % len(seed_off)][0],
@@ -1178,7 +1180,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
                 for i, (s, w) in enumerate(raw_xy)]
     spread   = _spread_annots(seed_pos, min_sep=max(x_max, y_max) * 0.18)
 
-    for i, (label, cap, total, marker, color, ms, s_, w_) in enumerate(_pts_data):
+    for i, (label, cap, total, marker, color, ms, w_, s_) in enumerate(_pts_data):
         ax_b.scatter(s_, w_, marker=marker, color=color, s=ms,
                      edgecolors="black", lw=0.8, zorder=5, label=label)
         ax_b.annotate(
@@ -1391,7 +1393,7 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
 
     ncols = len(comparison_cases)
     # Extra bottom margin for legend; wider per panel to give bars room
-    fig, axes = plt.subplots(1, ncols, figsize=(11 * ncols, 7),
+    fig, axes = plt.subplots(1, ncols, figsize=(5.5 * ncols, 6.0),
                              gridspec_kw={"wspace": 0.35})
     if ncols == 1:
         axes = [axes]
@@ -1452,7 +1454,7 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
         ax.set_xticks(x)
         ax.set_xticklabels(labels_wf, rotation=30, ha="right", fontsize=8)
         ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
-        ax.set_ylim(0, bl_total * 1.12)
+        ax.set_ylim(0, max(bl_total, case_total) * 1.12)
         ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
         # Legend at bottom-center of each panel
         ax.legend(handles=[
@@ -2413,6 +2415,177 @@ def fig_lp_system_diagram(save_dir: Path):
     _save(fig, "fig_lp_system_diagram", save_dir)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure LP-path — LP → first-feasible inflate → GA(LP)-optimal progression
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fig15_lp_feasibility_path(records_lp, best_row_lp, save_dir, lp_factors=None):
+    """Three-step progression: raw LP solution → first LOADMATCH-feasible → GA(LP)-optimal.
+
+    Uses the records from lp_ga_factor_history.log which contains:
+      - label="LP-eval": raw LP solution evaluated in Fortran
+      - label="inflate-N": inflate_until_feasible candidates
+      - label="GA-gen*-ind*": GA iterations
+
+    Panel A: Cost comparison across the three steps.
+    Panel B: Key capacity factors (generation) for each step.
+    Panel C: Key storage parameters for each step.
+    """
+    if records_lp is None or best_row_lp is None:
+        _skip("Fig LP-path", "LP-GA records or best_row_lp not available")
+        return
+
+    # ── Find key records ─────────────────────────────────────────────────────
+    lp_eval_rec  = None
+    first_feasible_rec = None
+    for rec in records_lp:
+        lbl = rec.get("label", "")
+        if lbl == "LP-eval" and lp_eval_rec is None:
+            lp_eval_rec = rec
+        if lbl.startswith("inflate") and rec.get("feasible") and first_feasible_rec is None:
+            first_feasible_rec = rec
+
+    if lp_eval_rec is None and lp_factors is not None:
+        # Synthesise LP-eval record from lp_factors dict (uppercase keys)
+        lp_eval_rec = {k.lower(): v for k, v in lp_factors.items()}
+        lp_eval_rec["label"]   = "LP-eval"
+        lp_eval_rec["feasible"] = False
+        lp_eval_rec["cost_mn_bil_per_year"] = float("inf")
+
+    if lp_eval_rec is None and first_feasible_rec is None:
+        _skip("Fig LP-path", "no LP-eval or inflate records found in LP-GA log")
+        return
+
+    # ── Build steps list ─────────────────────────────────────────────────────
+    steps = []
+    if lp_eval_rec is not None:
+        steps.append(("LP (raw)", lp_eval_rec, _CASE_COLORS["LP"], False))
+    if first_feasible_rec is not None:
+        steps.append(("First feasible\n(inflate)", first_feasible_rec, "#8E44AD", True))
+    if best_row_lp is not None:
+        steps.append(("GA (LP)\noptimal", best_row_lp.to_dict()
+                      if hasattr(best_row_lp, "to_dict") else best_row_lp,
+                      _CASE_COLORS["GA (LP)"], True))
+
+    if len(steps) < 2:
+        _skip("Fig LP-path", "need at least 2 steps to compare")
+        return
+
+    def _get(rec, key):
+        k_lo = key.lower()
+        if hasattr(rec, "get"):
+            v = rec.get(k_lo, rec.get(key.upper()))
+        elif hasattr(rec, "__getitem__"):
+            v = rec.get(k_lo, rec.get(key.upper(), None)) if hasattr(rec, "get") else None
+        else:
+            # pandas Series
+            v = rec[k_lo] if k_lo in rec.index else None
+        if v is None:
+            return PARAM_REGISTRY.get(key.upper(), (0.0,))[0]
+        return float(v)
+
+    # ── Capacity params to show in panel B ───────────────────────────────────
+    CAP_PARAMS = [
+        ("faconwin",   "onshore_wind",   "Onshore wind (GW)"),
+        ("facoffwin",  "offshore_wind",  "Offshore wind (GW)"),
+        ("facutilpv",  "utility_pv",     "Utility PV (GW)"),
+        ("facrespv",   "res_rooftop_pv", "Res. PV (GW)"),
+        ("faccompv",   "com_rooftop_pv", "Com. PV (GW)"),
+        ("cspturbfac", "csp",            "CSP (GW)"),
+    ]
+
+    # ── Storage params to show in panel C ────────────────────────────────────
+    STOR_PARAMS = [
+        ("batdisch",  "Battery disch. (TW)"),
+        ("storhbat",  "Battery dur. (h)"),
+        ("fcdisch",   "H₂ FC disch. (TW)"),
+        ("dayh2stor", "H₂ stor. (days)"),
+        ("fccharg",   "Electrolyser (TW)"),
+        ("hbtdisch",  "Heat bat. (TW)"),
+    ]
+
+    n_steps = len(steps)
+    x = np.arange(n_steps)
+    w = 0.6
+    colors_s = [s[2] for s in steps]
+    labels_s = [s[0] for s in steps]
+    feasible_s = [s[3] for s in steps]
+
+    # ── Costs ─────────────────────────────────────────────────────────────────
+    costs = [_get(rec, "cost_mn_bil_per_year") for _, rec, _, _ in steps]
+    finite_costs = [c for c in costs if np.isfinite(c)]
+
+    # ── Cap and stor values ───────────────────────────────────────────────────
+    cap_vals = {
+        label: [_get(rec, fp) * BASE_CAPACITIES_USA[bk] / 1000
+                for fp, bk, _ in CAP_PARAMS]
+        for label, rec, _, _ in steps
+    }
+    stor_vals = {
+        label: [_get(rec, sp) for sp, _ in STOR_PARAMS]
+        for label, rec, _, _ in steps
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 4.5))
+
+    # Panel A — cost
+    ax = axes[0]
+    for i, (lbl, c, feas) in enumerate(zip(labels_s, costs, feasible_s)):
+        color_bar = colors_s[i] if feas else "#CCCCCC"
+        if np.isfinite(c):
+            bar = ax.bar(i, c, w, color=color_bar, edgecolor="black", lw=0.5, alpha=0.85)
+            ax.text(i, c + (max(finite_costs) * 0.02 if finite_costs else 1),
+                    f"${c:.1f}B", ha="center", va="bottom", fontsize=8, fontweight="bold",
+                    color=colors_s[i])
+        else:
+            ax.bar(i, 0, w, color=color_bar, edgecolor="black", lw=0.5, alpha=0.3)
+            ax.text(i, 0.5, "infeasible\nin Fortran", ha="center", va="bottom",
+                    fontsize=7, color="gray", style="italic", rotation=0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels_s, fontsize=8)
+    ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
+    ax.set_title("A)", loc="left", fontweight="bold")
+    if finite_costs:
+        ax.set_ylim(0, max(finite_costs) * 1.18)
+
+    # Panel B — generation capacities
+    ax = axes[1]
+    n_cap = len(CAP_PARAMS)
+    xc = np.arange(n_cap)
+    wc = 0.7 / n_steps
+    offsets_c = [0.7 / 2 - wc * (i + 0.5) for i in range(n_steps)]
+    cmap_cap = plt.cm.Set2(np.linspace(0, 1, n_steps))
+    for ci, (lbl, _, _, _) in enumerate(steps):
+        vals = cap_vals[lbl]
+        ax.bar(xc + offsets_c[ci], vals, wc * 0.9,
+               color=colors_s[ci], edgecolor="black", lw=0.3, alpha=0.85, label=lbl)
+    ax.set_xticks(xc)
+    ax.set_xticklabels([cp[2].replace(" (GW)", "") for cp in CAP_PARAMS],
+                       rotation=30, ha="right", fontsize=7)
+    ax.set_ylabel("Installed capacity (GW)")
+    ax.set_title("B)", loc="left", fontweight="bold")
+    ax.set_ylim(bottom=0)
+    ax.legend(loc="upper right", fontsize=7, frameon=True, framealpha=0.9)
+
+    # Panel C — storage parameters
+    ax = axes[2]
+    ns = len(STOR_PARAMS)
+    xs = np.arange(ns)
+    ws = 0.7 / n_steps
+    offsets_s = [0.7 / 2 - ws * (i + 0.5) for i in range(n_steps)]
+    for ci, (lbl, _, _, _) in enumerate(steps):
+        vals = stor_vals[lbl]
+        ax.bar(xs + offsets_s[ci], vals, ws * 0.9,
+               color=colors_s[ci], edgecolor="black", lw=0.3, alpha=0.85, label=lbl)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([sp[1] for sp in STOR_PARAMS], rotation=30, ha="right", fontsize=7)
+    ax.set_ylabel("Parameter value")
+    ax.set_title("C)", loc="left", fontweight="bold")
+    ax.set_ylim(bottom=0)
+
+    _save(fig, "fig15_lp_feasibility_path", save_dir)
+
+
 def fig14_four_case_comparison(region: str, save_dir: Path):
     """Four-case comparison per region: baseline / LP-eval / GA-from-baseline / GA-from-LP.
 
@@ -2459,7 +2632,7 @@ def fig14_four_case_comparison(region: str, save_dir: Path):
     x  = np.arange(len(labels))
     bw = 0.6
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.5))
 
     # Panel A — system cost
     ax = axes[0]
@@ -2551,6 +2724,23 @@ def main(region=None):
         _try_fig("Input data",         fig_input_data,         region, save_dir)
         _try_fig("LP system diagram",  fig_lp_system_diagram,  save_dir)
         _try_fig("Fig 14 — Four-case comparison", fig14_four_case_comparison, region, save_dir)
+
+        # Fig 15 — load LP-GA records and best_row_lp for the feasibility path figure
+        lp_ga_log_lp = save_dir / "lp_ga_factor_history.log"
+        records_lp_lp = best_row_lp_lp = None
+        if lp_ga_log_lp.exists():
+            res_lp15 = _load_ga_data(region, REPO_ROOT, log_name="lp_ga_factor_history.log")
+            if res_lp15[0] is not None:
+                best_row_lp_lp = res_lp15[3]
+                records_lp_lp  = res_lp15[5]
+        lp_factors_path_lp = REPO_ROOT / "data" / "results_python" / region / "fortran_factors.dat"
+        lp_factors_lp = {}
+        if lp_factors_path_lp.exists():
+            from src.io.dat_parser import read_dat as _rd
+            lp_factors_lp = {k.upper(): float(v) for k, v in _rd(str(lp_factors_path_lp)).items()}
+        _try_fig("Fig 15 — LP feasibility path",
+                 fig15_lp_feasibility_path, records_lp_lp, best_row_lp_lp, save_dir,
+                 lp_factors=lp_factors_lp or None)
         return
 
     print(f"Region    : {region}")
@@ -2566,12 +2756,12 @@ def main(region=None):
 
     # ── Load LP-GA data if available ──────────────────────────────────────────
     lp_ga_log = save_dir / "lp_ga_factor_history.log"
-    df_ga_lp = df_gen_lp = df_best_lp = best_row_lp = n_gens_lp = None
+    df_ga_lp = df_gen_lp = df_best_lp = best_row_lp = n_gens_lp = records_lp = None
     if lp_ga_log.exists():
         print("Loading LP-GA history...")
         res_lp = _load_ga_data(region, REPO_ROOT, log_name="lp_ga_factor_history.log")
         if res_lp[0] is not None:
-            df_ga_lp, df_gen_lp, df_best_lp, best_row_lp, n_gens_lp = res_lp[:5]
+            df_ga_lp, df_gen_lp, df_best_lp, best_row_lp, n_gens_lp, records_lp = res_lp[:6]
             print(f"  LP-GA: {int(n_gens_lp)} gens, best=${best_row_lp['cost_mn_bil_per_year']:.2f}B/yr")
     else:
         print("  lp_ga_factor_history.log not found — LP-GA overlays skipped.")
@@ -2714,6 +2904,10 @@ def main(region=None):
                  fig13_sankey, lp_ga_out, save_dir,
                  scenario_label="GA from LP solution",
                  filename="fig13d_sankey_energy_flow_ga_lp")
+
+    _try_fig("Fig 15 — LP → feasible → GA(LP) progression",
+             fig15_lp_feasibility_path, records_lp, best_row_lp, save_dir,
+             lp_factors=lp_factors or None)
 
     # ── Overview figures across all regions ───────────────────────────────────
     plot_all_regions(REPO_ROOT)
