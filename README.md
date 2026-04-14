@@ -28,14 +28,13 @@ publication-quality figures.
    evaluations per generation across all CPU cores — minimising annual system
    cost while maintaining feasibility (all demand met).
 
-5. **Generates a complete figure set** (13 main figures + 3 multi-region
+5. **Generates a complete figure set** (15 main figures + 3 multi-region
    overview figures) automatically at the end of every run:
-   - Energy supply/demand breakdowns
-   - Storage configuration
-   - Capacity factor comparison (baseline vs GA)
-   - Land and water use
-   - Cost breakdown and convergence
-   - Wind/solar/water Sankey energy-flow diagrams (baseline and GA-optimal)
+   - GA cost convergence, capacity-factor and parameter trajectories
+   - Generation and storage capacity comparison across four cases (Baseline, LP, GA (bl), GA (LP))
+   - Land area demand, cost breakdown, and cost waterfall by category
+   - Wind/solar/water Sankey energy-flow diagrams for all four cases
+   - LP → first-feasible → GA-optimal feasibility progression (Fig 15, LP warm-start only)
    - Cross-region convergence, wind/solar scatter, and ternary composition plots
 
 6. **Scales to any supported world region** via command-line argument — no
@@ -285,33 +284,6 @@ When `lp_warmstart: false` (default), the GA starts from:
 
 ---
 
-## Optimised parameters and Fortran constraints
-
-The GA tunes the ~30 parameters listed in `PARAM_REGISTRY` in
-`scripts/run_full_workflow.py`.  Parameters with category `"fixed"` are
-**locked** — they are passed to Fortran but never mutated by the GA.
-
-### Parameters locked due to Fortran internal overrides
-
-Three parameters are always locked because `powerworld.f` ignores the
-externally-supplied value and computes its own:
-
-| Parameter | Fortran behaviour | Reason for locking |
-|-----------|-------------------|--------------------|
-| `STORHHFC` | Initialised to `0` at line 1138 and only meaningful when `IMERGH2=2`. The model runs with `IMERGH2=1` (merged grid/non-grid H₂), so this variable is never used. | Inert — optimising it wastes GA budget. |
-| `HBTDISCH` | Overwritten at runtime by `HOTINDDEM = BLOADHIT × FRCBRICK − H2LDIND` (industrial hi-temp heat demand). The written value from `fortran_factors.dat` is discarded. | Inert — runtime override makes it non-optimisable. |
-| `STORHHBT` | Heat battery energy capacity = `HBTDISCH × STORHHBT`. Since `HBTDISCH` is overwritten by the load data, `STORHHBT` also has no independent effect. | Consequentially inert. |
-
-These parameters appear as **greyed-out fixed bars** in Fig 4 and are excluded
-from the coefficient-of-variation analysis in Fig 6.
-
-> **Note:** `FACSHT` (solar thermal scaling) is *not* locked — it is a genuine
-> economic parameter.  The GA consistently finds near-zero values for the
-> United States because the model prefers heat-pump-based heating (driven by
-> cheap PV/wind electricity) over dedicated solar thermal collector capacity.
-
----
-
 ## Running the workflow (standalone, without Snakemake)
 
 ### Single region (local or Sherlock interactive)
@@ -400,24 +372,84 @@ Cross-region overview figures are saved to `data/results_verification/`:
 
 ---
 
-## Tunable parameters (PARAM_REGISTRY)
+## Parameters (PARAM_REGISTRY)
 
-The GA optimises 27 tunable parameters.  Eight additional parameters are
-**fixed** (locked from optimisation) because they represent policy constraints
-or physical constants that should not be treated as engineering design variables.
+All parameters are registered in `PARAM_REGISTRY` in `scripts/run_full_workflow.py`.
+Parameters with category `"fixed"` are **locked** — they are passed to Fortran but never
+mutated by the GA.  Fixed parameters still appear in Fig 4 with a greyed-out style.
 
-| Category | Parameters |
-|----------|-----------|
-| **Capacity factors** (dimensionless scaling) | `FACONWIN`, `FACOFFWIN`, `FACUTILPV`, `FACRESPV`, `FACCOMPV`, `CSPTURBFAC`, `FACSHT` |
-| **Storage / CSP** | `CSPSTORGAT`, `MXHRDRM`, `BATDISCH`, `HCHARCSP`, `STORHBAT`, `STORHCOLD`, `STORHHWAT`, `STORHPHS` |
-| **UTES / H2 storage** | `UGFAC`, `STORUGDYS`, `DAYH2STOR` |
-| **Hydropower** | `HPTURBRAT`, `DAYBASHYD` |
-| **H2 fuel cells** | `FCDISCH`, `FCCHARG`, `STORHHFC` |
-| **Heat systems** | `HWFAC`, `HBTDISCH`, `STORHHBT`, `CPERFORM` |
-| **Fixed (not optimised)** | `FRSTORINIT`, `DAMCAPRAT`, `PHSMIN`, `FDISTHEAT`, `COOLSTES`, `FHEATFLX`, `FCOLDFLX`, `FRCIHFLEX` |
+### Optimised parameters (GA design variables)
 
-Fixed parameters are still shown in Fig 4 (parameter comparison) with a
-`[fixed]` label and grey styling.
+These 14 parameters are actively mutated during optimisation.  The default values listed
+are the CONUS (United States) hardcoded Fortran defaults; region-specific defaults are
+parsed at runtime from `powerworld.f` by `extract_fortran_region_defaults()`.
+
+| Parameter | Default (CONUS) | Unit | Description |
+|-----------|----------------|------|-------------|
+| `FACONWIN` | 1.0 | — | Onshore wind capacity scaling factor |
+| `FACOFFWIN` | 1.0 | — | Offshore wind capacity scaling factor |
+| `FACUTILPV` | 1.0 | — | Utility-scale PV capacity scaling factor |
+| `FACRESPV` | 1.0 | — | Residential rooftop PV capacity scaling factor |
+| `FACCOMPV` | 1.0 | — | Commercial rooftop PV capacity scaling factor |
+| `CSPTURBFAC` | 1.0 | — | CSP turbine capacity ratio |
+| `FACSHT` | 1.0 | — | Solar thermal heat collector scaling factor |
+| `BATDISCH` | 1.55 | TW | Battery max discharge rate |
+| `STORHBAT` | 4.0 | h | Battery storage duration |
+| `STORHCOLD` | 14.0 | h | Cold storage hours (PCM-ice + chilled-water STES) |
+| `STORHHWAT` | 14.0 | h | Hot-water STES storage hours |
+| `STORHPHS` | 14.0 | h | Pumped-hydro storage hours |
+| `STORUGDYS` | 60.0 | days | UTES seasonal heat storage days |
+| `DAYH2STOR` | 40.0 | days | H₂ gas storage days |
+| `FCDISCH` | 0.091 | TW | H₂ fuel-cell max discharge rate |
+| `FCCHARG` | 0.091 | TW | H₂ electrolyser max charge rate |
+| `CPERFORM` | 4.0 | kWh-th/kWh-el | Heat pump coefficient of performance (COP) |
+
+> **Note on `FACSHT`:** The GA consistently finds near-zero values for some regions
+> (e.g. the United States) because the model prefers heat-pump-based heating — driven
+> by cheap wind/solar electricity — over dedicated solar thermal collectors.  This is a
+> genuine economic result, not a Fortran artefact.
+
+### Fixed parameters (not optimised)
+
+These parameters are held at their default values throughout the run.  They are divided
+into three sub-groups: parameters locked because Fortran internally overrides them
+regardless of the factor file; parameters that represent policy or structural constraints
+that should not be treated as design variables; and numerical/tuning constants.
+
+#### Locked due to Fortran internal overrides
+
+| Parameter | Default | Unit | Fortran behaviour | Reason for locking |
+|-----------|---------|------|-------------------|--------------------|
+| `STORHHFC` | 0.0 | h | Initialised to `0` at line 1138 of `powerworld.f` and only meaningful when `IMERGH2=2`. The model runs with `IMERGH2=1` (merged grid/non-grid H₂), so this field is never used. | Inert — optimising it wastes GA budget. |
+| `HBTDISCH` | 0.0 | TW | Overwritten at runtime by `HOTINDDEM` (industrial hi-temp heat demand, line 10073), regardless of the value supplied in `fortran_factors.dat`. | Inert — runtime override makes it non-optimisable. |
+| `STORHHBT` | 15.0 | h | Heat battery energy capacity = `HBTDISCH × STORHHBT`. Since `HBTDISCH` is overwritten by load data, `STORHHBT` has no independent effect. | Consequentially inert. |
+
+#### Policy / structural constraints
+
+| Parameter | Default | Unit | Description | Reason for locking |
+|-----------|---------|------|-------------|--------------------|
+| `CSPSTORGAT` | 2.61244594 | — | CSP storage charge/discharge ratio | Physical property of molten-salt CSP storage; not a design variable. |
+| `HCHARCSP` | 14.0 | h | CSP max charge hours | Fixed by CSP plant design; not an independent optimisation target. |
+| `UGFAC` | 3.0 | — | UTES charge rate factor (relative to discharge) | Structural constraint of underground thermal energy storage. |
+| `HPTURBRAT` | 10.0 | — | Hydro turbine discharge ratio (nameplate / mean annual) | Physical/regulatory constraint on hydro dam operation. |
+| `DAMCAPRAT` | 0.583 | — | Hydro dam capacity / annual energy output | Derived from existing dam inventory; not a design variable. |
+| `DAYBASHYD` | 360.0 | days | Baseload hydro storage days | Reflects existing reservoir capacity. |
+| `MXHRDRM` | 11.0 | h | Maximum demand-response shift hours | Policy/consumer constraint; not varied. |
+| `COOLSTES` | 0.4 | — | Fraction of AC cooling supplied by chilled-water STES vs PCM-ice | Infrastructure split; treated as given. |
+| `PHSMIN` | 0.016 | TW | Minimum pumped-hydro nameplate capacity | Numerical floor to prevent degenerate solutions. |
+| `FHEATFLX` | 0.15 | — | Flexible heat load fraction (demand response) | Policy assumption; fixed for comparability across regions. |
+| `FCOLDFLX` | 0.15 | — | Flexible cold load fraction (demand response) | Policy assumption; fixed for comparability across regions. |
+| `FRSTORINIT` | 0.5 | — | Initial storage fill fraction at simulation start | Initial condition; arbitrary but symmetric. |
+| `FDISTHEAT` | 0.2 | — | District heating penetration fraction | Structural assumption about building stock. |
+| `FRCIHFLEX` | 0.5 | — | Flexible industrial heat fraction | Policy assumption; fixed for all regions. |
+
+#### Numerical / health constants
+
+| Parameter | Default | Unit | Description | Reason for locking |
+|-----------|---------|------|-------------|--------------------|
+| `HWFAC` | 1.0 | — | Hot-water STES charge rate factor | Scaling identity; not a meaningful design variable. |
+| `HCDDADD` | 1.0 | — | HDD/CDD daily minimum (numerical safeguard) | Prevents division-by-zero in heating/cooling degree-day calculations. |
+| `FMORTBAU` | 0.9 | — | BAU air-pollution mortality fraction | Epidemiological input; fixed by scenario definition. |
 
 ---
 
@@ -563,28 +595,36 @@ Each region requires `data/raw/wwssupworld.<REGION>` and optionally
 All figures are saved as both `.pdf` and `.png` using SKILL.md publication defaults
 (8 pt Helvetica/Arial, Okabe-Ito CVD-safe palette, no top/right spines, 300 dpi).
 
-| Figure | Filename stem | Contents |
-|--------|---------------|----------|
-| 1 | `fig1_cost_convergence` | GA cost convergence + feasibility rate per generation |
-| 2 | `fig2_capacity_factors` | Capacity-factor trajectories of the best feasible individual |
-| 3 | `fig3_parameter_trajectories` | Optimised (non-fixed) parameter trajectories, 5 panels |
-| 4 | `fig4_baseline_vs_ga` | Baseline vs GA-optimal: all parameters, fixed params sorted to bottom |
-| 5 | `fig5_cost_and_capacity` | Cost distribution boxplots (A) + generation GW & energy storage TWh at milestones (B) |
-| 6 | `fig6_parameter_sensitivity` | Coefficient of variation across final-generation feasible population |
-| 7 | `fig7_capacity_comparison` | Generation & storage capacities: baseline vs GA-optimal (3 panels) |
-| 8 | `fig8_area_comparison` | Land area demand by technology and total footprint |
-| 9 | `fig9_cost_comparison` | Annual cost breakdown by category: baseline vs GA-optimal |
-| 10 | `fig10_capacity_mix` | Installed capacity mix, wind/solar scatter, and ternary diagram |
-| 11 | `fig11_diversity_heatmap` | Population diversity heatmap (final GA generation) |
-| 12 | `fig12_cost_waterfall` | Cost waterfall: contribution of each parameter change |
-| 13a | `fig13_sankey_energy_flow` | Sankey energy-flow diagram — baseline scenario |
-| 13b | `fig13_sankey_energy_flow_optimal` | Sankey energy-flow diagram — GA-optimal scenario |
-| A1 | `figA1_all_regions_convergence` | *(cross-region)* Cost reduction (%) vs GA generation |
-| A2 | `figA2_all_regions_wind_solar` | *(cross-region)* Wind vs solar energy share scatter |
-| A3 | `figA3_all_regions_ternary` | *(cross-region)* Wind–Solar–Water ternary composition |
+Per-region figures (fig1–fig15) are generated by the `plot_region` and
+`plot_four_cases` Snakemake rules (or by `scripts/plot_results.py` standalone).
+Figures 14 and 15 require `lp_warmstart: true` in `config/workflow.yaml`.
 
-Cross-region figures (figA1–A3) are regenerated automatically each time any
-region finishes, accumulating all available results.
+| Figure | Filename stem | Rule | Contents |
+|--------|---------------|------|----------|
+| 1 | `fig1_cost_convergence` | `plot_region` | GA cost convergence curve + feasibility rate per generation |
+| 2 | `fig2_capacity_factors` | `plot_region` | Capacity-factor trajectories of the best feasible individual per generation |
+| 3 | `fig3_parameter_trajectories` | `plot_region` | All optimised parameter trajectories, grouped into 5 panels |
+| 4 | `fig4_baseline_vs_ga` | `plot_region` | Baseline vs GA-optimal bar comparison for every parameter; fixed params greyed-out at bottom |
+| 5 | `fig5_cost_and_capacity` | `plot_region` | A: cost-distribution boxplots; B: total annual cost; C/D: generation capacity (GW) and energy storage (TWh) at baseline, intermediate, and GA-optimal milestones |
+| 6 | `fig6_parameter_sensitivity` | `plot_region` | Coefficient of variation (CV) of each optimised parameter across the final feasible GA population |
+| 7 | `fig7_capacity_comparison` | `plot_region` | Generation capacity (GW), storage power (TW), and storage energy (TWh): baseline vs GA-optimal, 3 panels |
+| 8 | `fig8_area_comparison` | `plot_region` | Land area demand by technology and total footprint: baseline vs GA-optimal |
+| 9 | `fig9_cost_comparison` | `plot_region` | Annual cost breakdown by category (capital + O&M + fuel + health): baseline vs GA-optimal |
+| 10 | `fig10_capacity_mix` | `plot_region` | A: installed capacity mix; B: wind vs solar share scatter across all candidates; C: Wind–Solar–Water ternary diagram |
+| 11 | `fig11_diversity_heatmap` | `plot_region` | Parameter diversity heatmap across the final GA generation (feasible individuals only) |
+| 12 | `fig12_cost_waterfall` | `plot_region` | Cost waterfall: contribution of each parameter change from baseline to GA-optimal |
+| 13a | `fig13_sankey_energy_flow` | `plot_region` | Sankey energy-flow diagram — baseline scenario |
+| 13b | `fig13_sankey_energy_flow_optimal` | `plot_region` | Sankey energy-flow diagram — GA-optimal scenario |
+| 13c | `fig13_sankey_energy_flow_lp` | `plot_four_cases` | Sankey energy-flow diagram — LP-optimal scenario |
+| 13d | `fig13_sankey_energy_flow_lp_ga` | `plot_four_cases` | Sankey energy-flow diagram — GA-from-LP-optimal scenario |
+| 14 | `fig14_four_case_comparison` | `plot_four_cases` | Four-case bar comparison: Baseline, LP-optimal, GA(baseline), GA(LP) — cost, generation, storage |
+| 15 | `fig15_lp_feasibility_path` | `plot_four_cases` | Three-step path from raw LP solution → first inflate-feasible → GA(LP)-optimal, showing cost, generation capacity, and storage parameters |
+| A1 | `figA1_all_regions_convergence` | `plot_overview` | *(cross-region)* Cost reduction (%) vs GA generation for all regions |
+| A2 | `figA2_all_regions_wind_solar` | `plot_overview` | *(cross-region)* Wind vs solar energy share scatter across all regions |
+| A3 | `figA3_all_regions_ternary` | `plot_overview` | *(cross-region)* Wind–Solar–Water ternary composition across all regions |
+
+Cross-region figures (figA1–A3) are regenerated automatically after all regions finish
+and accumulate all available results.
 
 ---
 
