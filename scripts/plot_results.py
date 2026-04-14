@@ -686,9 +686,11 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
                      for k, (sn, _) in enumerate(STORAGE_DISCH_GW)]
     stor_handles  = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
                      for k, (sn, _) in enumerate(STORAGE_TWH)]
+    # Place legend inside the top-left of panel C).  Upper-right is occupied by the
+    # twinx right-axis label, so upper-left is the safe in-axes corner.
     axes[1, 0].legend(handles=gen_handles + disch_handles + stor_handles,
-                      loc="upper right", frameon=True, framealpha=0.9,
-                      ncol=2, fontsize=8)
+                      loc="upper left", frameon=True, framealpha=0.9,
+                      ncol=3, fontsize=7)
 
     _save(fig, "fig5_cost_and_capacity", save_dir)
 
@@ -1454,7 +1456,10 @@ def fig12_cost_waterfall(bl_costs, opt_costs, bl_energy, opt_energy, save_dir,
         ax.set_xticks(x)
         ax.set_xticklabels(labels_wf, rotation=30, ha="right", fontsize=8)
         ax.set_ylabel(r"Annual system cost (\$B yr$^{-1}$)")
-        ax.set_ylim(0, max(bl_total, case_total) * 1.12)
+        # Derive ylim from actual bar tops — covers baseline, all delta bars, and
+        # the case-total bar; any of these can be the tallest depending on data.
+        y_top = max(b + h for b, h in zip(bottoms, heights))
+        ax.set_ylim(0, y_top * 1.18)
         ax.set_title(f"{panel_label})", loc="left", fontweight="bold")
         # Legend at bottom-center of each panel
         ax.legend(handles=[

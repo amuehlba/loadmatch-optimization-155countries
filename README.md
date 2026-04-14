@@ -285,6 +285,33 @@ When `lp_warmstart: false` (default), the GA starts from:
 
 ---
 
+## Optimised parameters and Fortran constraints
+
+The GA tunes the ~30 parameters listed in `PARAM_REGISTRY` in
+`scripts/run_full_workflow.py`.  Parameters with category `"fixed"` are
+**locked** — they are passed to Fortran but never mutated by the GA.
+
+### Parameters locked due to Fortran internal overrides
+
+Three parameters are always locked because `powerworld.f` ignores the
+externally-supplied value and computes its own:
+
+| Parameter | Fortran behaviour | Reason for locking |
+|-----------|-------------------|--------------------|
+| `STORHHFC` | Initialised to `0` at line 1138 and only meaningful when `IMERGH2=2`. The model runs with `IMERGH2=1` (merged grid/non-grid H₂), so this variable is never used. | Inert — optimising it wastes GA budget. |
+| `HBTDISCH` | Overwritten at runtime by `HOTINDDEM = BLOADHIT × FRCBRICK − H2LDIND` (industrial hi-temp heat demand). The written value from `fortran_factors.dat` is discarded. | Inert — runtime override makes it non-optimisable. |
+| `STORHHBT` | Heat battery energy capacity = `HBTDISCH × STORHHBT`. Since `HBTDISCH` is overwritten by the load data, `STORHHBT` also has no independent effect. | Consequentially inert. |
+
+These parameters appear as **greyed-out fixed bars** in Fig 4 and are excluded
+from the coefficient-of-variation analysis in Fig 6.
+
+> **Note:** `FACSHT` (solar thermal scaling) is *not* locked — it is a genuine
+> economic parameter.  The GA consistently finds near-zero values for the
+> United States because the model prefers heat-pump-based heating (driven by
+> cheap PV/wind electricity) over dedicated solar thermal collector capacity.
+
+---
+
 ## Running the workflow (standalone, without Snakemake)
 
 ### Single region (local or Sherlock interactive)

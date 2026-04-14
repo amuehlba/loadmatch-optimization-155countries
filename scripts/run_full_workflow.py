@@ -141,9 +141,15 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "HWFAC":       (1.0,          "fixed",     "HW-STES charge rate factor"),
     "FCDISCH":     (0.091,        "tw",        "H2 fuel-cell discharge rate (TW)"),
     "FCCHARG":     (0.091,        "tw",        "H2 electrolyser charge rate (TW)"),
-    "STORHHFC":    (13.0,         "hours",     "H2 electricity storage hours"),
-    "HBTDISCH":    (0.0,          "tw",        "Heat battery discharge rate (TW)"),
-    "STORHHBT":    (15.0,         "hours",     "Heat battery storage hours"),
+    # STORHHFC is only meaningful when IMERGH2=2 (separate grid/non-grid H2 storage).
+    # The model runs with IMERGH2=1 (merged), where STORHHFC is initialised to 0 and
+    # never read back — optimising it has no effect.  Locked to avoid wasting GA budget.
+    "STORHHFC":    (0.0,          "fixed",     "H2 elec storage hours [inert: IMERGH2=1 overrides to 0]"),
+    # HBTDISCH is overwritten at runtime by HOTINDDEM (industrial hi-temp heat demand)
+    # regardless of the value written to fortran_factors.dat.  Same applies to STORHHBT
+    # (capacity = HBTDISCH × STORHHBT).  Locked so plots and GA reflect reality.
+    "HBTDISCH":    (0.0,          "fixed",     "Heat battery discharge rate [inert: overwritten by HOTINDDEM]"),
+    "STORHHBT":    (15.0,         "fixed",     "Heat battery storage hours [inert: depends on HBTDISCH override]"),
     # --- Industrial heat flexibility ---
     "FRCIHFLEX":   (0.5,          "fixed",     "Flexible industrial heat fraction"),
 }
