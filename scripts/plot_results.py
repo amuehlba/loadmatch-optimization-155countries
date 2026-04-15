@@ -1073,8 +1073,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
         fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left",
         borderaxespad=0, frameon=False, ncol=1)
     if not is_us:
-        ax_a.text(0.5, -0.22, "Note: GW values use US reference base capacities\n"
-                  "(region-specific 2020 data not available)",
+        ax_a.text(0.5, -0.14, "Note: GW values use US reference\nbase capacities",
                   transform=ax_a.transAxes, ha="center", va="top",
                   fontsize=7, color="gray", style="italic")
 
@@ -1161,7 +1160,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_b.set_xlim(0, x_max * 1.05)
     ax_b.set_ylim(0, y_max * 1.05)
     ax_b.set_title("B)", loc="left", fontweight="bold")
-    ax_b.legend(fontsize=8, loc="lower right")
+    # No individual legend — shared legend for B+C placed below both panels
 
     # C) Ternary (2050 scenarios only)
     tri = np.array([[0, 0], [1, 0], [0.5, _S3 / 2], [0, 0]])
@@ -1203,7 +1202,9 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     if lp_ga_cap_2050:
         ternary_pts.append(("GA (LP) 2050", lp_ga_cap_2050, "v", _CASE_COLORS["GA (LP)"], 90))
 
-    # Compute ternary coords for each point
+    # Compute ternary coords for each point — NO text annotations in C):
+    # the shared legend below B+C identifies each marker, and the grid lines
+    # allow reading off the Wind/Solar/Water fractions directly.
     tern_data = []
     for label, cap, marker, color, ms in ternary_pts:
         wind_  = cap.get("onshore_wind", 0) + cap.get("offshore_wind", 0)
@@ -1214,33 +1215,26 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
         xp, yp = _t2c(wind_, solar_, water_)
         tern_data.append((label, cap, marker, color, ms, xp, yp, wind_, solar_, water_, tot_))
 
-    # Fixed cardinal-direction offsets (pts) for ternary annotations — same
-    # rationale as panel B: repulsion fails when all scenarios cluster together.
-    _C_OFFSETS = [(65, 45), (-65, 45), (65, -45), (-65, -45)]
-
-    for i, (label, cap, marker, color, ms, xp, yp, wind_, solar_, water_, tot_) in enumerate(tern_data):
+    for i, (label, cap, marker, color, ms, xp, yp, *_) in enumerate(tern_data):
         ax_c.scatter(xp, yp, marker=marker, color=color, s=ms,
                      edgecolors="black", lw=0.8, zorder=5, label=label)
-        dx, dy = _C_OFFSETS[i % len(_C_OFFSETS)]
-        ax_c.annotate(
-            f"{label}\nW {wind_/tot_*100:.1f}%  S {solar_/tot_*100:.1f}%  "
-            f"Wat {water_/tot_*100:.1f}%",
-            xy=(xp, yp), xytext=(dx, dy), textcoords="offset points", fontsize=7,
-            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, lw=0.4,
-                      edgecolor=color),
-            arrowprops=dict(arrowstyle="-", color=color, lw=0.8),
-        )
 
     ax_c.set_xlim(-0.10, 1.10)
     ax_c.set_ylim(-0.16, _S3/2 + 0.14)
     ax_c.set_aspect("equal", adjustable="box")
     ax_c.axis("off")
     ax_c.set_title("C)", loc="left", fontweight="bold")
-    # Legend placed in the upper-right corner of the panel — the region to the
-    # right of the triangle apex is empty with set_aspect("equal").
-    ax_c.legend(fontsize=8, loc="upper right", frameon=True, framealpha=0.9,
-                edgecolor="lightgray",
-                bbox_to_anchor=(1.0, 1.0), bbox_transform=ax_c.transAxes)
+
+    # Shared single-line legend for B) and C) placed below both panels.
+    # B() scatters were labelled; collect handles now.
+    b_handles, b_labels = ax_b.get_legend_handles_labels()
+    # B+C together occupy the right ~3/4 of the figure (width_ratios [1,1,2] → 3/4).
+    # Centre their shared legend at figure x ≈ 0.62 (midpoint of columns 1–2).
+    fig.legend(handles=b_handles, labels=b_labels,
+               loc="lower center", ncol=len(b_handles), fontsize=8,
+               frameon=True, framealpha=0.9,
+               bbox_to_anchor=(0.62, 0.01))
+    fig.subplots_adjust(bottom=0.13)
 
     _save(fig, "fig10_capacity_mix", save_dir)
 
