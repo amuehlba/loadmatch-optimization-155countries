@@ -655,10 +655,8 @@ def fig5_cost_and_capacity(df_ga, df_gen, df_best, best_row, baseline_factors, n
                      for k, (sn, _) in enumerate(STORAGE_DISCH_GW)]
     stor_handles  = [Patch(facecolor=stor_colors[k], label=sn, edgecolor="white", hatch="//")
                      for k, (sn, _) in enumerate(STORAGE_TWH)]
-    # Place legend inside the top-left of panel C).  Upper-right is occupied by the
-    # twinx right-axis label, so upper-left is the safe in-axes corner.
     axes[1, 0].legend(handles=gen_handles + disch_handles + stor_handles,
-                      loc="upper left", frameon=True, framealpha=0.9,
+                      loc="upper right", frameon=True, framealpha=0.9,
                       ncol=3, fontsize=7)
 
     _save(fig, "fig5_cost_and_capacity", save_dir)
@@ -884,8 +882,8 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES",
                           edgecolor="black", lw=0.4, label=c)
                     for i, (c, _) in enumerate(case_specs)]
     ax_a.legend(handles=lt_handles + case_handles,
-                bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-                frameon=False, fontsize=8, ncol=1)
+                loc="upper right", frameon=True, framealpha=0.9,
+                fontsize=8, ncol=1)
 
     # B) Stacked footprint totals
     FOOTPRINT_STACKS = [
@@ -907,8 +905,7 @@ def fig8_land_area(best_row, baseline_factors, save_dir, region="UNITED-STATES",
     ax_b.set_xticklabels([c for c, _ in case_specs], fontsize=9)
     ax_b.set_ylabel(f"Land footprint (% of {region_label} land)")
     ax_b.set_title("B)", loc="left", fontweight="bold")
-    ax_b.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-                frameon=False, fontsize=8, ncol=1)
+    ax_b.legend(loc="lower right", frameon=True, framealpha=0.9, fontsize=8, ncol=1)
     # Secondary y-axis: absolute km² (scales linearly with the primary %)
     ax_b2 = ax_b.twinx()
     ax_b2.spines["right"].set_visible(True)
@@ -966,11 +963,10 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     for ci, (cname, grp) in enumerate(case_specs):
         # Progressively darker alpha by case index — same scheme as fig8 A)
         alpha = min(0.35 + 0.15 * ci, 0.95)
-        hatch = _CASE_HATCHES.get(cname, "")
         for i, (g, c) in enumerate(zip(groups, colors)):
             gv = grp[g]
             ax_a.bar(i + offsets[ci], gv, w * 0.9, color=c, alpha=alpha,
-                     edgecolor="black", lw=0.4, hatch=hatch)
+                     edgecolor="black", lw=0.4)
 
     ax_a.set_xticks(x)
     ax_a.set_xticklabels(groups, rotation=30, ha="right", fontsize=8)
@@ -980,10 +976,10 @@ def fig9_cost_breakdown(bl_costs, opt_costs, bl_energy, opt_energy, best_row, sa
     ax_a.tick_params(axis="y", labelrotation=90)
     for lbl in ax_a.get_yticklabels():
         lbl.set_verticalalignment("center")
-    # Legend: group colours + case shading (gray patches, progressively darker)
+    # Legend: group colours + case shading (progressively darker gray patches, no hatch)
     group_handles = [Patch(facecolor=GROUP_COLORS[g], label=g, edgecolor="none") for g in groups]
     case_handles  = [Patch(facecolor="gray", alpha=min(0.35 + 0.15*ci, 0.95),
-                           hatch=_CASE_HATCHES.get(c, ""), edgecolor="black", lw=0.4, label=c)
+                           edgecolor="black", lw=0.4, label=c)
                      for ci, (c, _) in enumerate(case_specs)]
     ax_a.legend(handles=group_handles + case_handles,
                 bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
@@ -1044,7 +1040,7 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
         return s + w * 0.5, w * _S3 / 2
 
     fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(10.5, 4.5),
-                                            gridspec_kw={"width_ratios": [1, 1, 1.3]})
+                                            gridspec_kw={"width_ratios": [1, 1, 2]})
 
     # A) Absolute capacity stacked bars — include all available cases
     if is_us:
@@ -1145,20 +1141,17 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
 
     # _wind_solar_shares returns (wind, solar); unpack as (w_, s_) so s_=solar (x-axis)
     # and w_=wind (y-axis) matching the axis labels and x_max/y_max computations.
-    raw_xy  = [(s_, w_) for *_, w_, s_ in _pts_data]
-    # Offset seeds: spread in 4 quadrant directions to give the repulsion algo room
-    seed_off = [(9, 9), (-9, 9), (9, -9), (-9, -9), (9, 9)]
-    seed_pos = [(s + seed_off[i % len(seed_off)][0],
-                 w + seed_off[i % len(seed_off)][1])
-                for i, (s, w) in enumerate(raw_xy)]
-    spread   = _spread_annots(seed_pos, min_sep=max(x_max, y_max) * 0.30, iters=150)
+    # Fixed cardinal-direction offsets (pts) cycling per point; more reliable than
+    # a repulsion algorithm when data points cluster (which varies by region).
+    _B_OFFSETS = [(65, 35), (-65, 35), (65, -35), (-65, -35), (0, 55)]
 
     for i, (label, cap, total, marker, color, ms, w_, s_) in enumerate(_pts_data):
         ax_b.scatter(s_, w_, marker=marker, color=color, s=ms,
                      edgecolors="black", lw=0.8, zorder=5, label=label)
+        dx, dy = _B_OFFSETS[i % len(_B_OFFSETS)]
         ax_b.annotate(
             f"{label}\nSolar {s_:.1f}%  Wind {w_:.1f}%\nTotal {s_+w_:.1f}%",
-            xy=(s_, w_), xytext=spread[i], textcoords="data", fontsize=7,
+            xy=(s_, w_), xytext=(dx, dy), textcoords="offset points", fontsize=7,
             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, lw=0.4,
                       edgecolor=color),
             arrowprops=dict(arrowstyle="-", color=color, lw=0.8),
@@ -1221,20 +1214,18 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
         xp, yp = _t2c(wind_, solar_, water_)
         tern_data.append((label, cap, marker, color, ms, xp, yp, wind_, solar_, water_, tot_))
 
-    # Spread annotation positions in ternary coord space
-    raw_txy = [(xp, yp) for *_, xp, yp, _w, _s, _wa, _t in tern_data]
-    t_seed_off = [(0.12, 0.12), (-0.12, 0.10), (0.10, -0.12), (-0.10, -0.10)]
-    t_seed = [(xp + t_seed_off[i % 4][0], yp + t_seed_off[i % 4][1])
-              for i, (xp, yp) in enumerate(raw_txy)]
-    t_spread = _spread_annots(t_seed, min_sep=0.28, iters=150)
+    # Fixed cardinal-direction offsets (pts) for ternary annotations — same
+    # rationale as panel B: repulsion fails when all scenarios cluster together.
+    _C_OFFSETS = [(65, 45), (-65, 45), (65, -45), (-65, -45)]
 
     for i, (label, cap, marker, color, ms, xp, yp, wind_, solar_, water_, tot_) in enumerate(tern_data):
         ax_c.scatter(xp, yp, marker=marker, color=color, s=ms,
                      edgecolors="black", lw=0.8, zorder=5, label=label)
+        dx, dy = _C_OFFSETS[i % len(_C_OFFSETS)]
         ax_c.annotate(
             f"{label}\nW {wind_/tot_*100:.1f}%  S {solar_/tot_*100:.1f}%  "
             f"Wat {water_/tot_*100:.1f}%",
-            xy=(xp, yp), xytext=t_spread[i], textcoords="data", fontsize=7,
+            xy=(xp, yp), xytext=(dx, dy), textcoords="offset points", fontsize=7,
             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, lw=0.4,
                       edgecolor=color),
             arrowprops=dict(arrowstyle="-", color=color, lw=0.8),
@@ -1245,8 +1236,11 @@ def fig10_capacity_mix(best_row, baseline_factors, save_dir, region="UNITED-STAT
     ax_c.set_aspect("equal", adjustable="box")
     ax_c.axis("off")
     ax_c.set_title("C)", loc="left", fontweight="bold")
+    # Legend placed in the upper-right corner of the panel — the region to the
+    # right of the triangle apex is empty with set_aspect("equal").
     ax_c.legend(fontsize=8, loc="upper right", frameon=True, framealpha=0.9,
-                edgecolor="lightgray")
+                edgecolor="lightgray",
+                bbox_to_anchor=(1.0, 1.0), bbox_transform=ax_c.transAxes)
 
     _save(fig, "fig10_capacity_mix", save_dir)
 
