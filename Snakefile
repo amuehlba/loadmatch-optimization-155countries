@@ -104,6 +104,7 @@ def _all_targets():
             "data/results_verification/figA1_all_regions_convergence.pdf",
             "data/results_verification/figA2_all_regions_wind_solar.pdf",
             "data/results_verification/figA3_all_regions_ternary.pdf",
+            "data/results_verification/results_export.xlsx",
         ]
     )
     if LP_WARMSTART:
@@ -473,5 +474,47 @@ rule plot_four_cases:
         python -m scripts.plot_results \
             --region      {wildcards.region} \
             --lp-figures \
+            2>&1 | tee {log}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: export_results — export all results to XLSX
+# ---------------------------------------------------------------------------
+
+rule export_results:
+    """Export all regional results (all four cases per region) to a single
+    colour-coded XLSX file for inspection in Excel / LibreOffice Calc.
+
+    Waits for every region's GA result (optimal_summary.json) before running.
+    LP result files (lp_summary.json, lp_ga_summary.json) are included
+    automatically when present but not required — missing cases are left blank.
+
+    Produces:
+      data/results_verification/results_export.xlsx
+
+    Can also be regenerated at any time without re-running the full workflow:
+        snakemake --cores 1 data/results_verification/results_export.xlsx
+    """
+    input:
+        ga_summaries = expand(
+            "data/results_verification/{region}/optimal_summary.json",
+            region=REGIONS,
+        ),
+    output:
+        xlsx = "data/results_verification/results_export.xlsx",
+    log:
+        "logs/export_results.log",
+    resources:
+        mem_mb  = 4000,
+        runtime = 10,
+    threads: 1
+    params:
+        regions = " ".join(REGIONS),
+    shell:
+        """
+        python -m scripts.export_results \
+            --regions {params.regions} \
+            --out     {output.xlsx} \
             2>&1 | tee {log}
         """
