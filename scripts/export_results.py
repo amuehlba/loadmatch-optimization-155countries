@@ -415,12 +415,53 @@ def _write_xlsx(regions: List[str], out_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CSV writer
+# ---------------------------------------------------------------------------
+
+def _write_csv(regions: List[str], out_path: Path) -> None:
+    """Write a flat CSV with one header row and four data rows per region."""
+    import csv
+
+    cost_cats = _collect_cost_categories(regions)
+    col_spec  = _build_col_spec(cost_cats)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+
+        # Single header row: group/column name pairs joined with "/"
+        header = []
+        for grp, key, disp, _ in col_spec:
+            header.append(f"{grp}/{disp}")
+        writer.writerow(header)
+
+        for region in regions:
+            cases = _cases_for_region(region)
+            for case_label, data in cases:
+                row = []
+                for grp, key, disp, _ in col_spec:
+                    if key == "region":
+                        row.append(region)
+                    elif key == "case":
+                        row.append(case_label)
+                    elif data is None:
+                        row.append("")
+                    else:
+                        val = _get_value(data, key)
+                        row.append("" if val is None else val)
+                writer.writerow(row)
+
+    n_rows = len(regions) * 4
+    print(f"Saved {out_path}  ({n_rows} data rows, {len(col_spec)} columns)")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Export LoadMatch results to XLSX."
+        description="Export LoadMatch results to XLSX and/or CSV."
     )
     parser.add_argument(
         "--regions", nargs="+", default=None,
@@ -431,6 +472,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--out", type=Path, default=DEFAULT_OUT,
         metavar="PATH",
         help=f"Output XLSX path (default: {DEFAULT_OUT})",
+    )
+    parser.add_argument(
+        "--csv", type=Path, default=None,
+        metavar="PATH",
+        help="Also write a flat CSV to this path (optional)",
     )
     args = parser.parse_args(argv)
 
@@ -451,6 +497,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     print(f"Exporting {len(regions)} region(s) → {args.out}")
     _write_xlsx(regions, args.out)
+
+    if args.csv:
+        print(f"Writing CSV → {args.csv}")
+        _write_csv(regions, args.csv)
 
 
 if __name__ == "__main__":

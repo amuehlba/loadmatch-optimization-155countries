@@ -105,6 +105,7 @@ def _all_targets():
             "data/results_verification/figA2_all_regions_wind_solar.pdf",
             "data/results_verification/figA3_all_regions_ternary.pdf",
             "data/results_verification/results_export.xlsx",
+            "data/results_verification/results_export.csv",
         ]
     )
     if LP_WARMSTART:
@@ -483,15 +484,15 @@ rule plot_four_cases:
 # ---------------------------------------------------------------------------
 
 rule export_results:
-    """Export all regional results (all four cases per region) to a single
-    colour-coded XLSX file for inspection in Excel / LibreOffice Calc.
+    """Export all regional results (all four cases per region) to XLSX + CSV.
 
     Waits for every region's GA result (optimal_summary.json) before running.
     LP result files (lp_summary.json, lp_ga_summary.json) are included
     automatically when present but not required — missing cases are left blank.
 
     Produces:
-      data/results_verification/results_export.xlsx
+      data/results_verification/results_export.xlsx  (formatted, for inspection)
+      data/results_verification/results_export.csv   (flat, machine-readable)
 
     Can also be regenerated at any time without re-running the full workflow:
         snakemake --cores 1 data/results_verification/results_export.xlsx
@@ -503,6 +504,7 @@ rule export_results:
         ),
     output:
         xlsx = "data/results_verification/results_export.xlsx",
+        csv  = "data/results_verification/results_export.csv",
     log:
         "logs/export_results.log",
     resources:
@@ -516,5 +518,6 @@ rule export_results:
         python -m scripts.export_results \
             --regions {params.regions} \
             --out     {output.xlsx} \
+            --csv     {output.csv} \
             2>&1 | tee {log}
         """
