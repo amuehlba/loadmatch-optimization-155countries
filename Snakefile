@@ -72,24 +72,17 @@ LP_WARMSTART       = config.get("lp_warmstart",  False)
 def _baseline_start(wildcards):
     """Return --baseline-start argument for run_ga.
 
+    run_ga always runs GA from the Fortran baseline (to produce optimal_summary.json
+    = GA-from-baseline case).  GA-from-LP is handled by the separate run_ga_from_lp
+    rule, which produces lp_ga_summary.json.
+
     Priority order:
-      1. LP factors file  (when lp_warmstart: true)
-      2. Pre-computed baseline results file  (data/raw/baseline_results.REGION.dat)
-      3. 'defaults'       (use Fortran hardcoded region constants)
+      1. Pre-computed baseline results file  (data/raw/baseline_results.REGION.dat)
+      2. 'defaults'       (use Fortran hardcoded region constants)
     """
     region = str(wildcards.region).strip()
-    if LP_WARMSTART:
-        return f"data/results_python/{region}/fortran_factors.dat"
     candidate = Path(f"data/raw/baseline_results.{region}.dat")
     return str(candidate) if candidate.exists() else "defaults"
-
-
-def _lp_factors(wildcards):
-    """Return LP factors file as a dependency only when lp_warmstart is enabled."""
-    region = str(wildcards.region).strip()
-    if LP_WARMSTART:
-        return [f"data/results_python/{region}/fortran_factors.dat"]
-    return []
 
 
 
@@ -290,7 +283,6 @@ rule run_ga:
         binary       = "fortran/bin/powerworld",
         checked      = "data/results_verification/{region}/.check_inputs_done",
         preprocessed = "data/results_verification/{region}/.preprocess_done",
-        lp_factors   = _lp_factors,
     output:
         summary     = "data/results_verification/{region}/optimal_summary.json",
         bl_summary  = "data/results_verification/{region}/baseline_summary.json",
