@@ -450,7 +450,7 @@ def parse_baseline_factors(path: Path) -> Dict[str, float]:
 
 
 def load_baseline_start(path: Path) -> Dict[str, float]:
-    """Build a complete factor dict from a baseline file.
+    """Build a complete optimised-param dict from a baseline file.
 
     Accepts two formats:
     1. Simple KEY = VALUE format (same as fortran_factors.dat) — preferred for
@@ -458,9 +458,14 @@ def load_baseline_start(path: Path) -> Dict[str, float]:
     2. Legacy multi-value format from the original CONUS publication
        (e.g. 'STORHBAT BATDISCH = 4.0 0.84').
 
-    In both cases, any parameter not present in the file is filled from
-    PARAM_REGISTRY defaults.
+    In both cases, only FACTOR_KEYS (non-fixed) params are loaded from the
+    file.  Fixed params are intentionally excluded — write_factor_files()
+    injects them at their PARAM_REGISTRY defaults so that all four comparison
+    cases (baseline, LP, GA-bl, GA-LP) use identical fixed-param values in
+    every Fortran evaluation.
     """
+    _factor_key_set = set(FACTOR_KEYS)
+
     # Try the simple KEY = VALUE format first.
     # read_dat returns a dict; check how many keys match PARAM_REGISTRY.
     simple_raw = read_dat(str(path))
@@ -470,13 +475,15 @@ def load_baseline_start(path: Path) -> Dict[str, float]:
     if len(simple_hits) >= 5:
         # Looks like a plain fortran_factors.dat-style file.
         full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-        full.update(simple_hits)
-        parsed = simple_hits
+        # Only overlay FACTOR_KEYS values — skip fixed params from the file.
+        full.update({k: v for k, v in simple_hits.items() if k in _factor_key_set})
+        parsed = {k: v for k, v in simple_hits.items() if k in _factor_key_set}
     else:
         # Fall back to legacy multi-value publication format.
-        parsed = parse_baseline_factors(path)
+        raw_parsed = parse_baseline_factors(path)
         full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-        full.update(parsed)
+        full.update({k: v for k, v in raw_parsed.items() if k in _factor_key_set})
+        parsed = {k: v for k, v in raw_parsed.items() if k in _factor_key_set}
 
     print(f"Loaded {len(parsed)} baseline factors from {path}")
     for k, v in sorted(parsed.items()):
@@ -580,13 +587,20 @@ def run_fortran(region=_DEFAULT_REGION, paths=None):
 
 
 def write_factor_files(factors, paths=None):
+    """Write factor files to all three Fortran input paths.
+    Fixed params are always written at their PARAM_REGISTRY defaults to ensure
+    consistent Fortran evaluations across all four cases (Baseline/LP/GA(bl)/GA(LP)).
+    Optimised params (FACTOR_KEYS only) come from the provided factors dict."""
+    _factor_key_set = set(FACTOR_KEYS)
+    to_write = {k: default for k, (default, cat, _) in PARAM_REGISTRY.items() if cat == "fixed"}
+    to_write.update({k: v for k, v in factors.items() if k in _factor_key_set})
     factor_paths = [
         paths["factor_result"],
         paths["factor_dest"],
         paths["factor_pathhome"],
     ] if paths else FACTOR_PATHS
     for path in factor_paths:
-        write_dat(factors, path)
+        write_dat(to_write, path)
 
 
 def _read_factor_file(path: Path) -> Dict[str, float]:
@@ -1078,9 +1092,14 @@ def genetic_search(
 # ---------------------------------------------------------------------------
 
 def _build_full_factors(lp_factors: Dict[str, float]) -> Dict[str, float]:
-    """Merge LP capacity factors with Fortran CONUS defaults for all other params."""
+    """Build a complete optimised-param dict from LP DAT output.
+    Only FACTOR_KEYS (non-fixed) params are accepted from lp_factors.
+    Fixed params are intentionally excluded — write_factor_files()
+    injects them at their PARAM_REGISTRY defaults."""
+    _factor_key_set = set(FACTOR_KEYS)
     all_factors = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-    all_factors.update({k: float(v) for k, v in lp_factors.items()})
+    lp_upper = {k.upper(): float(v) for k, v in lp_factors.items()}
+    all_factors.update({k: v for k, v in lp_upper.items() if k in _factor_key_set})
     return all_factors
 
 
