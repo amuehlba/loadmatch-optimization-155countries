@@ -87,8 +87,36 @@ def _baseline_start(wildcards):
 
 
 # ---------------------------------------------------------------------------
-# Rule: all — top-level target
+# Input helpers: export and top-level targets
 # ---------------------------------------------------------------------------
+
+def _export_inputs():
+    """All result files that must exist before export_results can run.
+
+    When lp_warmstart: true, the export is gated on ALL four cases per region:
+      baseline_summary.json  — produced by run_ga
+      optimal_summary.json   — produced by run_ga
+      lp_summary.json        — produced by run_ga_from_lp
+      lp_ga_summary.json     — produced by run_ga_from_lp
+
+    Without lp_warmstart, only the two run_ga outputs are required.
+    This prevents the export from running with incomplete data.
+    """
+    inputs = (
+        expand("data/results_verification/{region}/optimal_summary.json",
+               region=REGIONS)
+        + expand("data/results_verification/{region}/baseline_summary.json",
+                 region=REGIONS)
+    )
+    if LP_WARMSTART:
+        inputs += (
+            expand("data/results_verification/{region}/lp_summary.json",
+                   region=REGIONS)
+            + expand("data/results_verification/{region}/lp_ga_summary.json",
+                     region=REGIONS)
+        )
+    return inputs
+
 
 def _all_targets():
     targets = (
@@ -449,7 +477,13 @@ rule plot_four_cases:
     """Generate LP input data, LP system diagram, four-case comparison (fig14),
     and LP feasibility path (fig15).
 
-    Requires all four result files to exist.  Only active when lp_warmstart: true.
+    Requires all four result files.  run_lp always produces fortran_factors.dat
+    (using PARAM_REGISTRY defaults as a fallback if the LP solver fails), so
+    run_ga_from_lp always runs and always produces lp_summary.json and
+    lp_ga_summary.json — even when the LP was infeasible.  This guarantees
+    plot_four_cases can always run once all upstream jobs complete.
+
+    Only active when lp_warmstart: true.
     """
     input:
         baseline   = "data/results_verification/{region}/baseline_summary.json",
@@ -481,22 +515,21 @@ rule plot_four_cases:
 rule export_results:
     """Export all regional results (all four cases per region) to XLSX + CSV.
 
-    Waits for every region's GA result (optimal_summary.json) before running.
-    LP result files (lp_summary.json, lp_ga_summary.json) are included
-    automatically when present but not required — missing cases are left blank.
+    When lp_warmstart: true, waits for ALL four result files per region
+    (baseline_summary.json, optimal_summary.json, lp_summary.json,
+    lp_ga_summary.json) before running.  Without lp_warmstart, waits for the
+    two run_ga outputs.  This prevents a partial export where LP / GA(LP) rows
+    appear blank because run_ga_from_lp had not yet finished.
 
     Produces:
       data/results_verification/results_export.xlsx  (formatted, for inspection)
       data/results_verification/results_export.csv   (flat, machine-readable)
 
-    Can also be regenerated at any time without re-running the full workflow:
+    Can also be regenerated at any time once all results exist:
         snakemake --cores 1 data/results_verification/results_export.xlsx
     """
     input:
-        ga_summaries = expand(
-            "data/results_verification/{region}/optimal_summary.json",
-            region=REGIONS,
-        ),
+        summaries = _export_inputs(),
     output:
         xlsx = "data/results_verification/results_export.xlsx",
         csv  = "data/results_verification/results_export.csv",

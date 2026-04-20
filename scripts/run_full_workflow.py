@@ -121,11 +121,15 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "STORUGDYS":   (60.0,         "days",      "UTES seasonal heat storage days"),
     "DAYH2STOR":   (40.0,         "days",      "H2 storage days"),
     # --- Hydropower ---
-    "HPTURBRAT":   (10.0,         "fixed",     "Hydro turbine discharge ratio"),
+    # HPTURBRAT: 10.0 for CONUS; 1.0 for every other region in powerworld.f.
+    # MXHRDRM:   11   for CONUS; 8   for every other region in powerworld.f.
+    # These values are NOT written to factor files (write_factor_files omits fixed
+    # params), so Fortran always uses its region-specific hardcoded value.
+    "HPTURBRAT":   (10.0,         "fixed",     "Hydro turbine discharge ratio (CONUS=10; all others=1)"),
     "DAMCAPRAT":   (0.583,        "fixed",     "Hydro dam capacity / annual output"),
     "DAYBASHYD":   (360.0,        "fixed",     "Baseload hydro storage days"),
     # --- Demand response ---
-    "MXHRDRM":     (11.0,         "fixed",     "Max demand-response shift hours"),
+    "MXHRDRM":     (11.0,         "fixed",     "Max demand-response shift hours (CONUS=11; all others=8)"),
     # --- Thermal storage and demand response ---
     "COOLSTES":    (0.4,          "fixed",     "Fraction AC from CW-STES vs ice"),
     "PHSMIN":      (0.016,        "fixed",     "Min PHS nameplate capacity (TW)"),
@@ -588,12 +592,18 @@ def run_fortran(region=_DEFAULT_REGION, paths=None):
 
 def write_factor_files(factors, paths=None):
     """Write factor files to all three Fortran input paths.
-    Fixed params are always written at their PARAM_REGISTRY defaults to ensure
-    consistent Fortran evaluations across all four cases (Baseline/LP/GA(bl)/GA(LP)).
-    Optimised params (FACTOR_KEYS only) come from the provided factors dict."""
+
+    Only non-fixed params (FACTOR_KEYS) are written.  Fixed params (HPTURBRAT,
+    MXHRDRM, DAMCAPRAT, DAYBASHYD, UGFAC, …) are intentionally omitted so that
+    Fortran falls back to its own region-specific hardcoded values — which differ
+    from the CONUS defaults stored in PARAM_REGISTRY (e.g. HPTURBRAT=1.0 for all
+    non-US regions vs 10.0 for CONUS; MXHRDRM=8 for non-US vs 11 for CONUS).
+
+    This keeps serial evaluations (baseline, LP-eval, GA final) consistent with
+    the parallel workspace evaluations in run_fortran_worker, which also write
+    only FACTOR_KEYS to their workspace-local factor files."""
     _factor_key_set = set(FACTOR_KEYS)
-    to_write = {k: default for k, (default, cat, _) in PARAM_REGISTRY.items() if cat == "fixed"}
-    to_write.update({k: v for k, v in factors.items() if k in _factor_key_set})
+    to_write = {k: v for k, v in factors.items() if k in _factor_key_set}
     factor_paths = [
         paths["factor_result"],
         paths["factor_dest"],
@@ -1630,14 +1640,29 @@ def main():
     if args.run_lp_only:
         # Run LP optimisation + factor export, then exit.
         # Output: data/results_python/<REGION>/fortran_factors.dat
+        #
+        # On LP failure (infeasible, no solver, etc.) we write PARAM_REGISTRY
+        # defaults for all FACTOR_KEYS to fortran_factors.dat and a placeholder
+        # summary.dat so that run_ga_from_lp can always proceed.  This keeps
+        # the Snakemake dependency graph unblocked; the lp_summary.json written
+        # by run_ga_from_lp will carry lp_failed=1 to flag the fallback.
         paths = _region_paths(args.region)
         paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
-        run_python_model.main(region=args.region, output_dir=paths["lp_summary"].parent)
-        export_fortran_factors.main([
-            "--summary", str(paths["lp_summary"]),
-            "--output",  str(paths["factor_result"]),
-        ])
-        print(f"LP factors written to: {paths['factor_result']}")
+        try:
+            run_python_model.main(region=args.region, output_dir=paths["lp_summary"].parent)
+            export_fortran_factors.main([
+                "--summary", str(paths["lp_summary"]),
+                "--output",  str(paths["factor_result"]),
+            ])
+            print(f"LP factors written to: {paths['factor_result']}")
+        except Exception as exc:
+            print(f"[WARN] LP solver failed for {args.region}: {exc}")
+            print(f"  Writing PARAM_REGISTRY defaults as fallback to {paths['factor_result']}")
+            fallback_factors = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+            write_dat(fallback_factors, str(paths["factor_result"]))
+            write_dat({"objective_cost": float("inf"), "lp_failed": 1},
+                      str(paths["lp_summary"]))
+            print(f"  Fallback factor file written; downstream run_ga_from_lp will proceed.")
         return
 
     if args.run_ga_from_lp:
