@@ -402,6 +402,9 @@ rule run_ga_from_lp:
         checked      = "data/results_verification/{region}/.check_inputs_done",
         preprocessed = "data/results_verification/{region}/.preprocess_done",
         lp_factors   = "data/results_python/{region}/fortran_factors.dat",
+        # Must wait for run_ga to finish so the two jobs don't race on shared
+        # factor files (data/raw/fortran_factors.dat, fortran/fortran_factors.dat).
+        ga_done      = "data/results_verification/{region}/optimal_summary.json",
     output:
         lp_eval  = "data/results_verification/{region}/lp_summary.json",
         lp_ga    = "data/results_verification/{region}/lp_ga_summary.json",
