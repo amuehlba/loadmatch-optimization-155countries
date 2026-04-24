@@ -28,3 +28,5 @@ logs/*
 
 # Gurobi auto-generated log (recreated on each LP run)
 gurobi.log
+
+CLAUDE.md

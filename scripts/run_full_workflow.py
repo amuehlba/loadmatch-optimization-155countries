@@ -604,8 +604,11 @@ def write_factor_files(factors, paths=None):
     only FACTOR_KEYS to their workspace-local factor files."""
     _factor_key_set = set(FACTOR_KEYS)
     to_write = {k: v for k, v in factors.items() if k in _factor_key_set}
+    # Only write to the two paths that Fortran reads at runtime.
+    # paths["factor_result"] (data/results_python/{region}/fortran_factors.dat) is
+    # the LP solver output file; writing GA factors there would corrupt the LP
+    # factors that run_ga_from_lp_workflow reads after run_ga completes.
     factor_paths = [
-        paths["factor_result"],
         paths["factor_dest"],
         paths["factor_pathhome"],
     ] if paths else FACTOR_PATHS
