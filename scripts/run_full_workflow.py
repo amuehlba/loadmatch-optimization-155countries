@@ -226,10 +226,10 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     def _currently_active():
         return all(frame[0] for frame in cond_stack)
 
-    # Regex for recognising known conditionals (IMERGH2 or IFEGS .EQ. N)
-    _IF_RE     = re.compile(r"IF\s*\(\s*(IMERGH2|IFEGS)\s*\.EQ\.\s*(\d+)\s*\)\s*THEN",
+    # Regex for recognising known conditionals (IMERGH2 or IFEGS .EQ. / .NE. N)
+    _IF_RE     = re.compile(r"IF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
                              re.IGNORECASE)
-    _ELIF_RE   = re.compile(r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.EQ\.\s*(\d+)\s*\)\s*THEN",
+    _ELIF_RE   = re.compile(r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
                              re.IGNORECASE)
     # Plain IF(...) THEN only (not ELSEIF) — used to open unrecognized blocks
     _ANY_PLAIN_IF_RE = re.compile(r"^IF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
@@ -258,19 +258,21 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
         # IF (...) THEN on a known variable — only when not inside an opaque block
         mif = _IF_RE.match(su)
         if mif and unrecognized_depth == 0:
-            var, val = mif.group(1).upper(), int(mif.group(2))
+            var, op, val = mif.group(1).upper(), mif.group(2).upper(), int(mif.group(3))
             outer_ok = _currently_active()
-            branch_ok = outer_ok and (_ctrl_val[var] == val)
+            cond_true = (_ctrl_val[var] == val) if op == "EQ" else (_ctrl_val[var] != val)
+            branch_ok = outer_ok and cond_true
             cond_stack.append([branch_ok, branch_ok])
             continue
 
         # ELSEIF (...) THEN on a known variable — must be inside an open frame
         melif = _ELIF_RE.match(su)
         if melif and cond_stack and unrecognized_depth == 0:
-            var, val = melif.group(1).upper(), int(melif.group(2))
+            var, op, val = melif.group(1).upper(), melif.group(2).upper(), int(melif.group(3))
             already = cond_stack[-1][1]
             outer_ok = all(frame[0] for frame in cond_stack[:-1])
-            branch_ok = outer_ok and (not already) and (_ctrl_val[var] == val)
+            cond_true = (_ctrl_val[var] == val) if op == "EQ" else (_ctrl_val[var] != val)
+            branch_ok = outer_ok and (not already) and cond_true
             if branch_ok:
                 cond_stack[-1][1] = True
             cond_stack[-1][0] = branch_ok
