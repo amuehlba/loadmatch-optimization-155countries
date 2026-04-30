@@ -231,6 +231,17 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
                              re.IGNORECASE)
     _ELIF_RE   = re.compile(r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
                              re.IGNORECASE)
+    # Compound OR conditional on known variables: IF (VAR.OP.N1.OR.VAR.OP.N2) THEN
+    _IF_OR_RE  = re.compile(
+        r"IF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\.OR\."
+        r"\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
+        re.IGNORECASE,
+    )
+    _ELIF_OR_RE = re.compile(
+        r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\.OR\."
+        r"\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
+        re.IGNORECASE,
+    )
     # Plain IF(...) THEN only (not ELSEIF) — used to open unrecognized blocks
     _ANY_PLAIN_IF_RE = re.compile(r"^IF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
     # Any ELSEIF(...) THEN — used to detect unrecognized continuation branches
@@ -265,6 +276,18 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
             cond_stack.append([branch_ok, branch_ok])
             continue
 
+        # IF (VAR.OP.N1.OR.VAR.OP.N2) THEN — compound OR on known variables
+        mif_or = _IF_OR_RE.match(su)
+        if mif_or and unrecognized_depth == 0:
+            var1, op1, val1 = mif_or.group(1).upper(), mif_or.group(2).upper(), int(mif_or.group(3))
+            var2, op2, val2 = mif_or.group(4).upper(), mif_or.group(5).upper(), int(mif_or.group(6))
+            outer_ok = _currently_active()
+            cond1 = (_ctrl_val[var1] == val1) if op1 == "EQ" else (_ctrl_val[var1] != val1)
+            cond2 = (_ctrl_val[var2] == val2) if op2 == "EQ" else (_ctrl_val[var2] != val2)
+            branch_ok = outer_ok and (cond1 or cond2)
+            cond_stack.append([branch_ok, branch_ok])
+            continue
+
         # ELSEIF (...) THEN on a known variable — must be inside an open frame
         melif = _ELIF_RE.match(su)
         if melif and cond_stack and unrecognized_depth == 0:
@@ -273,6 +296,21 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
             outer_ok = all(frame[0] for frame in cond_stack[:-1])
             cond_true = (_ctrl_val[var] == val) if op == "EQ" else (_ctrl_val[var] != val)
             branch_ok = outer_ok and (not already) and cond_true
+            if branch_ok:
+                cond_stack[-1][1] = True
+            cond_stack[-1][0] = branch_ok
+            continue
+
+        # ELSEIF (VAR.OP.N1.OR.VAR.OP.N2) THEN — compound OR on known variables
+        melif_or = _ELIF_OR_RE.match(su)
+        if melif_or and cond_stack and unrecognized_depth == 0:
+            var1, op1, val1 = melif_or.group(1).upper(), melif_or.group(2).upper(), int(melif_or.group(3))
+            var2, op2, val2 = melif_or.group(4).upper(), melif_or.group(5).upper(), int(melif_or.group(6))
+            already = cond_stack[-1][1]
+            outer_ok = all(frame[0] for frame in cond_stack[:-1])
+            cond1 = (_ctrl_val[var1] == val1) if op1 == "EQ" else (_ctrl_val[var1] != val1)
+            cond2 = (_ctrl_val[var2] == val2) if op2 == "EQ" else (_ctrl_val[var2] != val2)
+            branch_ok = outer_ok and (not already) and (cond1 or cond2)
             if branch_ok:
                 cond_stack[-1][1] = True
             cond_stack[-1][0] = branch_ok
