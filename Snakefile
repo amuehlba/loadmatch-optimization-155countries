@@ -274,8 +274,9 @@ rule run_lp:
     input:
         checked = "data/results_verification/{region}/.check_inputs_done",
     output:
-        factors  = "data/results_python/{region}/fortran_factors.dat",
-        summary  = "data/results_python/{region}/summary.dat",
+        factors   = "data/results_python/{region}/fortran_factors.dat",
+        summary   = "data/results_python/{region}/summary.dat",
+        lp_sol    = "data/results_python/{region}/lp_solution.json",
     log:
         "logs/run_lp_{region}.log",
     resources:

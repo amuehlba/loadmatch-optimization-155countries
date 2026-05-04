@@ -30,3 +30,5 @@ logs/*
 gurobi.log
 
 CLAUDE.md
+
+figures/

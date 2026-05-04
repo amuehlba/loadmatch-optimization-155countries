@@ -40,7 +40,7 @@ Fixed physical constants
   H2_EFF   = 0.60  round-trip H2 efficiency (electrolyser × fuel-cell)
 """
 
-from typing import Dict
+from typing import Dict, List, Tuple
 import numpy as np
 import pyomo.environ as pyo
 
@@ -594,3 +594,267 @@ def collect_results(model: pyo.ConcreteModel) -> Dict[str, float]:
         "FCCHARG":   v(model.h2_chg_mw) / 1e6,
         "HBTDISCH":  hbat_power / 1e6,
     }
+
+
+# ── Full LP solution extraction ──────────────────────────────────────────────
+
+# Non-leap-year cumulative hour boundaries for each month (Jan=0 … Dec=11)
+_MONTH_BOUNDS = [0, 744, 1416, 2160, 2880, 3624, 4344, 5088, 5832, 6552, 7296, 8016, 8760]
+_MONTH_NAMES  = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def collect_lp_solution(
+    model: pyo.ConcreteModel,
+    inputs: Dict,
+) -> Tuple[Dict, List[Dict]]:
+    """Extract the full LP solution for post-hoc analysis.
+
+    Returns
+    -------
+    solution : dict
+        JSON-serialisable summary: LP proxy cost (B$/yr, by component),
+        installed capacities (GW), storage energy (GWh), annual energy
+        totals (TWh/yr), load-shed per sector, and exemplary-month metadata.
+        NOTE: costs use proxy CAPEX coefficients designed for warm-starting
+        only — they are NOT comparable to Fortran c/kWh × TWh costs.
+    dispatch_rows : list[dict]
+        One dict per hour for the exemplary month, containing all dispatch
+        variables and loads in MW / MWh.  Convert to a DataFrame or CSV
+        in the caller.
+    """
+    v    = pyo.value
+    meta = model._lp_meta
+    n    = meta["n_hours"]
+    T    = range(n)
+
+    phs_power_mw   = meta["phs_power_mw"]
+    avg_heat_mw    = meta["avg_heat_mw"]
+    avg_cold_mw    = meta["avg_cold_mw"]
+    utes_power_mw  = meta["utes_power_mw"]
+    fixed_elec_mw  = meta["fixed_elec_mw"]
+    fixed_heat_mw  = meta["fixed_heat_mw"]
+
+    base   = inputs["base_capacities_mw"]
+    detail = inputs.get("base_capacities_detail", {})
+    res_base = detail.get("res_rooftop_pv", base["rooftop_pv"] * 0.6)
+    com_base = detail.get("com_rooftop_pv", base["rooftop_pv"] * 0.4)
+
+    elec_load = np.asarray(inputs["electric_load_mw"], dtype=float)
+    heat_load = np.asarray(inputs["heat_load_mw"],     dtype=float)
+    cold_load = np.asarray(inputs["cold_load_mw"],     dtype=float)
+
+    # ── Solved scalar values ─────────────────────────────────────────────────
+    faconwin  = v(model.faconwin)
+    facoffwin = v(model.facoffwin)
+    facutilpv = v(model.facutilpv)
+    facrespv  = v(model.facrespv)
+    faccompv  = v(model.faccompv)
+    csptf     = v(model.cspturbfac)
+    facsht    = v(model.facsht)
+    bat_pow   = v(model.bat_power_mw)
+    bat_nrg   = v(model.bat_energy_mwh)
+    h2_fc     = v(model.h2_fc_mw)
+    h2_chg    = v(model.h2_chg_mw)
+    h2_nrg    = v(model.h2_energy_mwh) + v(model.h2_seasonal_mwh)
+    hbat_pow  = v(model.hbat_power_mw)
+    hbat_nrg  = v(model.hbat_energy_mwh)
+
+    # ── Installed capacities (GW) ────────────────────────────────────────────
+    MW2GW  = 1e-3
+    MWH2GWH = 1e-3
+    MWH2TWH = 1e-6
+
+    capacities_gw = {
+        "onshore_wind":  round(faconwin  * base["onshore_wind"]  * MW2GW, 2),
+        "offshore_wind": round(facoffwin * base["offshore_wind"] * MW2GW, 2),
+        "res_pv":        round(facrespv  * res_base               * MW2GW, 2),
+        "com_pv":        round(faccompv  * com_base               * MW2GW, 2),
+        "utility_pv":    round(facutilpv * base["utility_pv"]    * MW2GW, 2),
+        "csp":           round(csptf     * base["csp"]            * MW2GW, 2),
+        "solar_thermal": round(facsht    * base["solar_thermal"]  * MW2GW, 2),
+        "battery_power": round(bat_pow   * MW2GW, 2),
+        "phs_power":     round(phs_power_mw * MW2GW, 2),
+        "h2_fc_power":   round(h2_fc     * MW2GW, 2),
+        "h2_chg_power":  round(h2_chg    * MW2GW, 2),
+        "hbat_power":    round(hbat_pow  * MW2GW, 2),
+    }
+
+    storage_gwh = {
+        "battery":   round(bat_nrg * MWH2GWH, 2),
+        "phs":       round(phs_power_mw * v(model.storhphs) * MWH2GWH, 2),
+        "h2":        round(h2_nrg * MWH2GWH, 2),
+        "hw_stes":   round(avg_heat_mw * v(model.storhhwat) * MWH2GWH, 2),
+        "cold_tes":  round(avg_cold_mw * v(model.storhcold) * MWH2GWH, 2),
+        "utes":      round(utes_power_mw * v(model.storugdys) * HRSPDAY * MWH2GWH, 2),
+        "heat_bat":  round(hbat_nrg * MWH2GWH, 2),
+    }
+
+    # ── LP proxy cost breakdown (B$/yr) ─────────────────────────────────────
+    # Recompute each component from solved values (proxy CAPEX only, not Fortran costs)
+    gen_capex_usd = (
+        GEN_COST["onshore_wind"]  * base["onshore_wind"]  * faconwin
+        + GEN_COST["offshore_wind"] * base["offshore_wind"] * facoffwin
+        + GEN_COST["res_pv"]        * res_base               * facrespv
+        + GEN_COST["com_pv"]        * com_base               * faccompv
+        + GEN_COST["utility_pv"]    * base["utility_pv"]    * facutilpv
+        + GEN_COST["csp"]           * base["csp"]            * csptf
+        + GEN_COST["solar_thermal"] * base["solar_thermal"]  * facsht
+    )
+    stor_capex_usd = (
+        STOR_COST_POWER["battery"]   * bat_pow
+        + STOR_COST_ENERGY["battery"]  * bat_nrg
+        + STOR_COST_ENERGY["phs"]      * phs_power_mw * v(model.storhphs)
+        + STOR_COST_POWER["h2_fc"]     * h2_fc
+        + STOR_COST_POWER["h2_chg"]    * h2_chg
+        + STOR_COST_ENERGY["h2"]       * h2_nrg
+        + STOR_COST_POWER["heat_bat"]  * hbat_pow
+        + STOR_COST_ENERGY["heat_bat"] * hbat_nrg
+        + STOR_COST_ENERGY["hw_stes"]  * avg_heat_mw * v(model.storhhwat)
+        + STOR_COST_ENERGY["cold_tes"] * avg_cold_mw * v(model.storhcold)
+        + STOR_COST_ENERGY["utes"]     * utes_power_mw * v(model.storugdys) * HRSPDAY
+    )
+    shed_elec_arr = np.array([v(model.shed_elec[t])    for t in T])
+    shed_heat_arr = np.array([v(model.shed_heat[t])    for t in T])
+    shed_cold_arr = np.array([v(model.shed_cold[t])    for t in T])
+    sur_elec_arr  = np.array([v(model.surplus_elec[t]) for t in T])
+    sur_heat_arr  = np.array([v(model.surplus_heat[t]) for t in T])
+    sur_cold_arr  = np.array([v(model.surplus_cold[t]) for t in T])
+
+    shed_penalty_usd  = LOAD_SHED_PENALTY * float(shed_elec_arr.sum() + shed_heat_arr.sum() + shed_cold_arr.sum())
+    curtail_usd       = CURTAIL_PENALTY   * float(sur_elec_arr.sum()  + sur_heat_arr.sum()  + sur_cold_arr.sum())
+    total_obj_usd     = v(model.obj)
+
+    USD2B = 1e-9
+    cost_proxy = {
+        "note":                  "LP proxy CAPEX — NOT comparable to Fortran c/kWh costs",
+        "total_B_usd_per_yr":    round(total_obj_usd    * USD2B, 4),
+        "gen_capex_B_usd_per_yr":  round(gen_capex_usd  * USD2B, 4),
+        "stor_capex_B_usd_per_yr": round(stor_capex_usd * USD2B, 4),
+        "load_shed_B_usd_per_yr":  round(shed_penalty_usd * USD2B, 4),
+        "curtailment_B_usd_per_yr":round(curtail_usd    * USD2B, 4),
+    }
+
+    # ── Annual energy totals (TWh/yr) ────────────────────────────────────────
+    def _sum_twh(arr_or_var) -> float:
+        if isinstance(arr_or_var, np.ndarray):
+            return round(float(arr_or_var.sum()) * MWH2TWH, 3)
+        return round(float(sum(v(arr_or_var[t]) for t in T)) * MWH2TWH, 3)
+
+    annual_twh = {
+        # Generation
+        "gen_wind_on":   _sum_twh(np.array([v(model.gen_wind_on[t])  for t in T])),
+        "gen_wind_off":  _sum_twh(np.array([v(model.gen_wind_off[t]) for t in T])),
+        "gen_pv_res":    _sum_twh(np.array([v(model.gen_pv_res[t])   for t in T])),
+        "gen_pv_com":    _sum_twh(np.array([v(model.gen_pv_com[t])   for t in T])),
+        "gen_pv_util":   _sum_twh(np.array([v(model.gen_pv_util[t])  for t in T])),
+        "gen_csp":       _sum_twh(np.array([v(model.gen_csp[t])      for t in T])),
+        "gen_solth":     _sum_twh(np.array([v(model.gen_solth[t])    for t in T])),
+        "fixed_elec":    round(fixed_elec_mw * n * MWH2TWH, 3),
+        "fixed_heat":    round(fixed_heat_mw * n * MWH2TWH, 3),
+        # Storage throughput (discharge only)
+        "dis_bat":       _sum_twh(np.array([v(model.dis_bat[t])      for t in T])),
+        "dis_phs":       _sum_twh(np.array([v(model.dis_phs[t])      for t in T])),
+        "fuelcell":      _sum_twh(np.array([v(model.fuelcell[t])     for t in T])),
+        "dis_hwstes":    _sum_twh(np.array([v(model.dis_hwstes[t])   for t in T])),
+        "dis_hbat":      _sum_twh(np.array([v(model.dis_hbat[t])     for t in T])),
+        "dis_utes":      _sum_twh(np.array([v(model.dis_utes[t])     for t in T])),
+        "dis_cold":      _sum_twh(np.array([v(model.dis_cold[t])     for t in T])),
+        # Demand
+        "elec_load":     round(float(elec_load[:n].sum()) * MWH2TWH, 3),
+        "heat_load":     round(float(heat_load[:n].sum()) * MWH2TWH, 3),
+        "cold_load":     round(float(cold_load[:n].sum()) * MWH2TWH, 3),
+        # Slack (load shedding = LP infeasibility proxy per sector)
+        "shed_elec":     _sum_twh(shed_elec_arr),
+        "shed_heat":     _sum_twh(shed_heat_arr),
+        "shed_cold":     _sum_twh(shed_cold_arr),
+        "surplus_elec":  _sum_twh(sur_elec_arr),
+        "surplus_heat":  _sum_twh(sur_heat_arr),
+        "surplus_cold":  _sum_twh(sur_cold_arr),
+    }
+
+    # ── Exemplary month (peak combined demand) ───────────────────────────────
+    total_load = elec_load[:n] + heat_load[:n] + cold_load[:n]
+    month_avgs = []
+    for mi in range(12):
+        s = min(_MONTH_BOUNDS[mi],     n)
+        e = min(_MONTH_BOUNDS[mi + 1], n)
+        month_avgs.append(float(total_load[s:e].mean()) if e > s else 0.0)
+    peak_mi  = int(np.argmax(month_avgs))
+    m_start  = min(_MONTH_BOUNDS[peak_mi],     n)
+    m_end    = min(_MONTH_BOUNDS[peak_mi + 1], n)
+
+    exemplary_month = {
+        "month_name":      _MONTH_NAMES[peak_mi],
+        "month_index":     peak_mi,
+        "start_hour":      m_start,
+        "end_hour":        m_end,
+        "n_hours":         m_end - m_start,
+        "selection_basis": "highest average combined (elec+heat+cold) demand",
+    }
+
+    # ── Dispatch rows for the exemplary month ────────────────────────────────
+    dispatch_rows: List[Dict] = []
+    for t in range(m_start, m_end):
+        dispatch_rows.append({
+            "hour":             t,
+            "elec_load_mw":     float(elec_load[t]),
+            "heat_load_mw":     float(heat_load[t]),
+            "cold_load_mw":     float(cold_load[t]),
+            "fixed_elec_mw":    fixed_elec_mw,
+            "fixed_heat_mw":    fixed_heat_mw,
+            # Generation
+            "gen_wind_on_mw":   v(model.gen_wind_on[t]),
+            "gen_wind_off_mw":  v(model.gen_wind_off[t]),
+            "gen_pv_res_mw":    v(model.gen_pv_res[t]),
+            "gen_pv_com_mw":    v(model.gen_pv_com[t]),
+            "gen_pv_util_mw":   v(model.gen_pv_util[t]),
+            "gen_csp_mw":       v(model.gen_csp[t]),
+            "gen_solth_mw":     v(model.gen_solth[t]),
+            # Electric storage
+            "chg_bat_mw":       v(model.chg_bat[t]),
+            "dis_bat_mw":       v(model.dis_bat[t]),
+            "soc_bat_mwh":      v(model.soc_bat[t]),
+            "chg_phs_mw":       v(model.chg_phs[t]),
+            "dis_phs_mw":       v(model.dis_phs[t]),
+            "soc_phs_mwh":      v(model.soc_phs[t]),
+            # H2
+            "electrolyser_mw":  v(model.electrolyser[t]),
+            "fuelcell_mw":      v(model.fuelcell[t]),
+            "soc_h2_mwh":       v(model.soc_h2[t]),
+            # Heat
+            "heat_pump_mw":     v(model.heat_pump[t]),
+            "chg_hwstes_mw":    v(model.chg_hwstes[t]),
+            "dis_hwstes_mw":    v(model.dis_hwstes[t]),
+            "soc_hwstes_mwh":   v(model.soc_hwstes[t]),
+            "chg_hbat_mw":      v(model.chg_hbat[t]),
+            "dis_hbat_mw":      v(model.dis_hbat[t]),
+            "soc_hbat_mwh":     v(model.soc_hbat[t]),
+            "chg_utes_mw":      v(model.chg_utes[t]),
+            "dis_utes_mw":      v(model.dis_utes[t]),
+            "soc_utes_mwh":     v(model.soc_utes[t]),
+            # Cold
+            "ac_mw":            v(model.ac[t]),
+            "chg_cold_mw":      v(model.chg_cold[t]),
+            "dis_cold_mw":      v(model.dis_cold[t]),
+            "soc_cold_mwh":     v(model.soc_cold[t]),
+            # Slack
+            "shed_elec_mw":     v(model.shed_elec[t]),
+            "surplus_elec_mw":  v(model.surplus_elec[t]),
+            "shed_heat_mw":     v(model.shed_heat[t]),
+            "surplus_heat_mw":  v(model.surplus_heat[t]),
+            "shed_cold_mw":     v(model.shed_cold[t]),
+            "surplus_cold_mw":  v(model.surplus_cold[t]),
+        })
+
+    solution = {
+        "region":           inputs["region"],
+        "n_hours_modelled": n,
+        "cost_proxy":       cost_proxy,
+        "capacities_gw":    capacities_gw,
+        "storage_gwh":      storage_gwh,
+        "annual_twh":       annual_twh,
+        "exemplary_month":  exemplary_month,
+    }
+
+    return solution, dispatch_rows
