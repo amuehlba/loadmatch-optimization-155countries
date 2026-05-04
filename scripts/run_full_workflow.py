@@ -1705,6 +1705,12 @@ def main():
             write_dat(fallback_factors, str(paths["factor_result"]))
             write_dat({"objective_cost": float("inf"), "lp_failed": 1},
                       str(paths["lp_summary"]))
+            # Write stub lp_solution.json so Snakemake's declared output is satisfied
+            import json as _json
+            lp_sol_path = paths["lp_summary"].parent / "lp_solution.json"
+            with open(lp_sol_path, "w") as _f:
+                _json.dump({"region": args.region, "lp_failed": True,
+                            "error": str(exc)}, _f, indent=2)
             print(f"  Fallback factor file written; downstream run_ga_from_lp will proceed.")
         return
 

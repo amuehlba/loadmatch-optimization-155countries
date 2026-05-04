@@ -22,17 +22,31 @@ SUPPLY_COLUMNS: Tuple[str, ...] = (
 # Single-country regions whose name in loadreg/countrystats differs from the
 # Snakemake region identifier.
 COUNTRY_ALIASES: Dict[str, str] = {
-    "UNITED-STATES": "UNITED-STATES-OF-AMERICA",
+    "UNITED-STATES":  "UNITED-STATES-OF-AMERICA",
+    "CENTRAL-AMERIC": "CENTRAL-AMERICA",   # workflow truncates to 14 chars
 }
 
 # Fortran writes scientific notation without 'E' for very small/large exponents,
 # e.g. "9.59388129-109" instead of "9.59388129E-109".
 _FORTRAN_FLOAT_RE = re.compile(r'(\d)([-+])(\d)')
+# Extracts leading IEEE float when two values are concatenated without whitespace.
+_FIRST_FLOAT_RE   = re.compile(r'^[+-]?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?')
 
 
 def _parse_float(s: str) -> float:
-    """Parse a float that may use Fortran scientific notation (missing E)."""
-    return float(_FORTRAN_FLOAT_RE.sub(r'\1E\2\3', s))
+    """Parse a float that may use Fortran scientific notation (missing E).
+
+    If two values are concatenated without whitespace (fixed-width overflow
+    in some Fortran supply files), only the first value is returned.
+    """
+    fixed = _FORTRAN_FLOAT_RE.sub(r'\1E\2\3', s)
+    try:
+        return float(fixed)
+    except ValueError:
+        m = _FIRST_FLOAT_RE.match(fixed)
+        if m:
+            return float(m.group())
+        raise
 
 
 def load_supply_profiles(region: str, filepath: Path) -> Dict[str, np.ndarray]:
@@ -256,9 +270,20 @@ def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, objec
 
     # ── Electric load ──────────────────────────────────────────────────────────
     load_file = data_dir / "loadreg.COUNTRY2030GW"
-    electric_load_gw = load_electric_load(
-        alias, load_file, country_names=country_names or None
-    )
+    try:
+        electric_load_gw = load_electric_load(
+            alias, load_file, country_names=country_names or None
+        )
+    except ValueError as _load_err:
+        # Region absent from loadreg (e.g. small island states).
+        # Fall back to a constant profile at TLOADTOT (GW) from countrystats.
+        tloadtot_gw = stats.get("TLOADTOT", 0.0)
+        if tloadtot_gw <= 0:
+            raise
+        n_supply = len(supply.get("hours", []))
+        print(f"  [WARN] {_load_err}. "
+              f"Using flat {tloadtot_gw:.3f} GW load from TLOADTOT as fallback.")
+        electric_load_gw = np.full(n_supply, tloadtot_gw)
 
     # ── Time alignment ─────────────────────────────────────────────────────────
     hours = supply.pop("hours")
