@@ -280,8 +280,8 @@ rule run_lp:
     log:
         "logs/run_lp_{region}.log",
     resources:
-        mem_mb  = 16000,
-        runtime = 120,
+        mem_mb  = 48000,
+        runtime = 180,
     threads: 1
     shell:
         """
