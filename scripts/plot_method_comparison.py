@@ -951,8 +951,28 @@ def plot_lp_comparison(
     ax_cost.set_ylim(-0.5, len(cases_present) - 0.5)
 
     # ── Panel B: LP vs GA(LP) capacity (GW) — grouped horizontal bars ─────────
-    lp_row = sub.loc["LP"]       if "LP"       in sub.index else None
-    ga_row = sub.loc["GA (LP)"]  if "GA (LP)"  in sub.index else None
+    ga_row = sub.loc["GA (LP)"] if "GA (LP)" in sub.index else None
+
+    # LP capacities: read directly from lp_solution.json (GW already computed)
+    # — more reliable than CSV factor columns which may be NaN
+    lp_sol = _load_lp_solution(lp_dir, region)
+    _lp_cap = lp_sol.get("capacities_gw", {}) if lp_sol else {}
+
+    # factor-key → lp_solution.json capacities_gw key
+    _GEN_LP_KEY = {
+        "FACONWIN":  "onshore_wind",
+        "FACOFFWIN": "offshore_wind",
+        "FACRESPV":  "res_pv",
+        "FACCOMPV":  "com_pv",
+        "FACUTILPV": "utility_pv",
+        "CSPTURBFAC":"csp",
+        "FACSHT":    "solar_thermal",
+    }
+    _PWR_LP_KEY = {
+        "BATDISCH": "battery_power",
+        "FCDISCH":  "h2_fc_power",
+        "FCCHARG":  "h2_chg_power",
+    }
 
     def _flt(row, key):
         """NaN-safe float extraction from a pandas Series row."""
@@ -970,13 +990,13 @@ def plot_lp_comparison(
     tech_labels, lp_vals, ga_vals = [], [], []
 
     for fkey, label in _CMP_GEN_KEYS:
-        lv = _flt(lp_row, fkey) * ref_gw.get(fkey, 0.0)
+        lv = float(_lp_cap.get(_GEN_LP_KEY.get(fkey, ""), 0.0) or 0.0)
         gv = _flt(ga_row, fkey) * ref_gw.get(fkey, 0.0)
         if lv > 0.5 or gv > 0.5:
             tech_labels.append(label); lp_vals.append(lv); ga_vals.append(gv)
 
     for fkey, label in _CMP_PWR_KEYS:
-        lv = _flt(lp_row, fkey) * 1000
+        lv = float(_lp_cap.get(_PWR_LP_KEY.get(fkey, ""), 0.0) or 0.0)
         gv = _flt(ga_row, fkey) * 1000
         if lv > 0.1 or gv > 0.1:
             tech_labels.append(label); lp_vals.append(lv); ga_vals.append(gv)
@@ -1315,7 +1335,7 @@ def plot_lp_feasibility_path(
         ax_fac.set_axisbelow(True)
         ax_fac.set_title("C)", loc="left", fontweight="bold")
 
-        n_inf = int(inf_mask.sum()) + int((~trial_f & ~inf_mask & bad_mask).sum())
+        n_inf  = int((~trial_f).sum())
         n_feas = int(trial_f.sum())
         lp_note = "LP feasible in LOADMATCH" if lp_feasible else "LP infeasible in LOADMATCH (30-s resolution gap)"
         fig.suptitle(
@@ -1516,6 +1536,12 @@ def plot_lp_effectiveness(df: pd.DataFrame, out: Path) -> None:
     ga_v   = galp_r.loc[common].values
     regs   = common.tolist()
 
+    print(f"  [fig10] feasible LP: {len(lp_r)}, feasible GA(LP): {len(galp_r)}, "
+          f"both: {len(common)}")
+    if len(galp_r) < len(lp_r):
+        missing = sorted(set(lp_r.index) - set(galp_r.index))
+        print(f"  [fig10] regions with LP but no GA(LP): {missing}")
+
     delta = ga_v - lp_v
     clrs  = ["#009E73" if d < -0.005 else "#E69F00" if d < 0.005 else "#CC6677"
              for d in delta]
@@ -1663,10 +1689,14 @@ def main() -> None:
 
     plot_overview(df, args.output)
     plot_pathway(df, args.output, highlight=hl)
-    plot_exemplar(df, args.exemplar, args.output, countrystats=args.countrystats)
+    # fig3 and fig5 for every lp_region (plus the exemplar if not already covered)
+    fig3_regions = list(dict.fromkeys([args.exemplar] + args.lp_regions))
+    for r in fig3_regions:
+        plot_exemplar(df, r, args.output, countrystats=args.countrystats)
     plot_energy_mix(df, args.output)
     wf_ylim = tuple(args.waterfall_ylim) if args.waterfall_ylim else None
-    plot_waterfall(df, args.exemplar, args.output, ylim=wf_ylim)
+    for r in fig3_regions:
+        plot_waterfall(df, r, args.output, ylim=wf_ylim)
     plot_lp_dispatch(args.lp_regions, args.lp_dir, args.output)
     plot_lp_capacity(args.lp_regions, args.lp_dir, args.output)
     for r in args.lp_regions:
