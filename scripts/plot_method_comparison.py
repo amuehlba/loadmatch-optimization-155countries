@@ -954,17 +954,30 @@ def plot_lp_comparison(
     lp_row = sub.loc["LP"]       if "LP"       in sub.index else None
     ga_row = sub.loc["GA (LP)"]  if "GA (LP)"  in sub.index else None
 
+    def _flt(row, key):
+        """NaN-safe float extraction from a pandas Series row."""
+        if row is None or key not in row:
+            return 0.0
+        v = row[key]
+        if v is None:
+            return 0.0
+        try:
+            f = float(v)
+            return 0.0 if (f != f) else f   # f != f is True only for NaN
+        except (ValueError, TypeError):
+            return 0.0
+
     tech_labels, lp_vals, ga_vals = [], [], []
 
     for fkey, label in _CMP_GEN_KEYS:
-        lv = (float(lp_row[fkey] or 0) * ref_gw[fkey]) if (lp_row is not None and fkey in lp_row and fkey in ref_gw) else 0.0
-        gv = (float(ga_row[fkey] or 0) * ref_gw[fkey]) if (ga_row is not None and fkey in ga_row and fkey in ref_gw) else 0.0
+        lv = _flt(lp_row, fkey) * ref_gw.get(fkey, 0.0)
+        gv = _flt(ga_row, fkey) * ref_gw.get(fkey, 0.0)
         if lv > 0.5 or gv > 0.5:
             tech_labels.append(label); lp_vals.append(lv); ga_vals.append(gv)
 
     for fkey, label in _CMP_PWR_KEYS:
-        lv = float(lp_row[fkey] or 0) * 1000 if (lp_row is not None and fkey in lp_row) else 0.0
-        gv = float(ga_row[fkey] or 0) * 1000 if (ga_row is not None and fkey in ga_row) else 0.0
+        lv = _flt(lp_row, fkey) * 1000
+        gv = _flt(ga_row, fkey) * 1000
         if lv > 0.1 or gv > 0.1:
             tech_labels.append(label); lp_vals.append(lv); ga_vals.append(gv)
 
@@ -1108,17 +1121,28 @@ def plot_lp_feasibility_path(
             if rec is None:
                 return 0.0
             v = rec.get(key, rec.get(key.upper(), 0.0))
-            return float(v) if v is not None else 0.0
+            if v is None:
+                return 0.0
+            try:
+                f = float(v)
+                return 0.0 if (f != f) else f   # NaN check
+            except (ValueError, TypeError):
+                return 0.0
 
         # Build display arrays
         param_labels = []
         lp_gw, ff_gw, best_gw = [], [], []
         unit_labels = []
         for fkey, lbl, unit, conv in DISP_PARAMS:
-            lv = conv(_fval(lp_rec, fkey))
-            fv = conv(_fval(first_feas_rec, fkey))
-            bv = conv(_fval(best_rec, fkey))
-            if max(lv, fv, bv) < 0.1:
+            raw_lp   = _fval(lp_rec, fkey)
+            raw_ff   = _fval(first_feas_rec, fkey)
+            raw_best = _fval(best_rec, fkey)
+            lv = conv(raw_lp)
+            fv = conv(raw_ff)
+            bv = conv(raw_best)
+            # Skip if all three are effectively zero in BOTH converted and raw space
+            # (raw check catches cases where ref_gw=0 but factor itself is non-zero)
+            if max(abs(lv), abs(fv), abs(bv)) < 0.1 and max(abs(raw_lp), abs(raw_ff), abs(raw_best)) < 0.01:
                 continue
             param_labels.append(f"{lbl}\n({unit})")
             lp_gw.append(lv); ff_gw.append(fv); best_gw.append(bv)
@@ -1194,31 +1218,24 @@ def plot_lp_feasibility_path(
         ax_cost.grid(axis="x", color="#EEEEEE", lw=0.4)
         ax_cost.set_axisbelow(True)
 
-        # ── Panel B: trial cost scatter ───────────────────────────────────────
+        # ── Panel B: trial cost scatter (feasible trials only) ───────────────
         n_trials = len(df_hist)
         trial_x  = df_hist["trial"].values
         trial_c  = df_hist["cost_mn_bil_per_year"].values
         trial_f  = df_hist["feasible"].values.astype(bool)
 
         inf_mask = np.isinf(trial_c) | (trial_c > 1e6)
-        fin_mask = ~inf_mask & trial_f
-        bad_mask = ~inf_mask & ~trial_f
+        fin_mask = ~inf_mask & trial_f      # feasible + finite cost
 
         y_top = float(trial_c[fin_mask].max()) * 1.08 if fin_mask.any() else None
 
+        # Show only LOADMATCH-feasible trials
         ax_trail.scatter(trial_x[fin_mask], trial_c[fin_mask],
                          color="#009E73", s=6, alpha=0.60, zorder=3,
-                         linewidths=0, label="Feasible")
-        ax_trail.scatter(trial_x[bad_mask], trial_c[bad_mask],
-                         color="#CC6677", s=6, alpha=0.45, zorder=2,
-                         linewidths=0, label="Infeasible (finite cost)")
-        if inf_mask.any() and y_top is not None:
-            ax_trail.scatter(trial_x[inf_mask],
-                             np.full(inf_mask.sum(), y_top),
-                             color="#CC6677", s=6, alpha=0.30, marker="v",
-                             zorder=2, linewidths=0, label="Infeasible (load shed)")
+                         linewidths=0,
+                         label=f"LOADMATCH-feasible trials ({fin_mask.sum()})")
 
-        def _mark_trial(label_str, cost_val, color, marker, ms, zord):
+        def _mark_trial(label_str, cost_val, color, marker, ms, zord, mk_label=None):
             y_val = y_top if (np.isinf(cost_val) and y_top is not None) else (
                 None if np.isinf(cost_val) else cost_val)
             if y_val is None:
@@ -1226,16 +1243,22 @@ def plot_lp_feasibility_path(
             match = df_hist[df_hist["label"] == label_str]
             tx = int(match.index[0]) if not match.empty else 0
             ax_trail.scatter(tx, y_val, color=color, s=ms, marker=marker,
-                             zorder=zord + 2, edgecolors="white", linewidths=0.8)
+                             zorder=zord + 2, edgecolors="white", linewidths=0.8,
+                             label=mk_label)
 
-        _mark_trial("LP-eval",  lp_cost,   _CLR_LP,   "s", 60, 6)
+        _mark_trial("LP-eval", lp_cost, _CLR_LP, "s", 60, 6,
+                    mk_label="LP (raw, hourly)")
         if first_feas_rec:
-            _mark_trial(ff_label, ff_cost,  _CLR_FF,   "*", 90, 7)
-        _mark_trial(best_label, best_cost,  _CLR_BEST, "o", 60, 6)
+            ff_mk_lbl = ("First feasible (= LP)"
+                         if ff_is_lp else "First LOADMATCH-feasible")
+            _mark_trial(ff_label, ff_cost, _CLR_FF, "*", 90, 7,
+                        mk_label=ff_mk_lbl)
+        _mark_trial(best_label, best_cost, _CLR_BEST, "o", 60, 6,
+                    mk_label="GA (LP) optimal")
 
         ax_trail.set_xlabel("GA trial index")
         ax_trail.set_ylabel("LOADMATCH cost ($B/yr)")
-        ax_trail.set_title("B)", loc="left", fontweight="bold")
+        ax_trail.set_title("B)  Feasible GA trials only", loc="left", fontweight="bold")
         ax_trail.legend(frameon=False, fontsize=5.5, loc="upper right",
                         markerscale=1.5)
         ax_trail.grid(color="#EEEEEE", lw=0.4)
@@ -1499,8 +1522,12 @@ def plot_lp_effectiveness(df: pd.DataFrame, out: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(5.5, 5.0))
 
-    lim_lo = max(0.70, min(lp_v.min(), ga_v.min()) - 0.03)
-    lim_hi = min(1.18, max(lp_v.max(), ga_v.max()) + 0.03)
+    # Determine axis range from actual data; clip extreme outliers with markers
+    _all_v = np.concatenate([lp_v, ga_v])
+    _clip_hi = np.percentile(_all_v[np.isfinite(_all_v)], 95) + 0.05
+    _clip_hi = max(_clip_hi, 1.15)          # always show at least up to 1.15
+    lim_lo   = max(0.70, _all_v[np.isfinite(_all_v)].min() - 0.03)
+    lim_hi   = _clip_hi
 
     ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi],
             color="#AAAAAA", lw=1.0, ls="--", zorder=1, label="LP = GA (LP)")
@@ -1511,12 +1538,26 @@ def plot_lp_effectiveness(df: pd.DataFrame, out: Path) -> None:
     ax.fill_between(xs, xs, lim_hi, color="#CC6677", alpha=0.04, zorder=0)
 
     LABEL_REGIONS = {"EUROPE", "UNITED-STATES", "CHINA", "INDIA", "JAPAN",
-                     "RUSSIA", "AUSTRALIA"}
+                     "RUSSIA", "AUSTRALIA", "ICELAND", "SOUTHAM-NW"}
     for x, y, c, r in zip(lp_v, ga_v, clrs, regs):
-        ax.scatter(x, y, color=c, s=32, zorder=4, linewidths=0, alpha=0.88)
+        # Clip to plot range and add overflow markers
+        x_plot = min(x, lim_hi)
+        y_plot = min(y, lim_hi)
+        x_clip = x > lim_hi
+        y_clip = y > lim_hi
+        ax.scatter(x_plot, y_plot, color=c, s=32, zorder=4, linewidths=0, alpha=0.88)
+        if x_clip:
+            ax.scatter(lim_hi, y_plot, marker=">", color=c, s=22, zorder=6,
+                       clip_on=False)
+        if y_clip:
+            ax.scatter(x_plot, lim_hi, marker="^", color=c, s=22, zorder=6,
+                       clip_on=False)
         if r in LABEL_REGIONS:
+            label_txt = r.replace("-", "‑")
+            if x_clip or y_clip:
+                label_txt += f" ({x:.2f}, {y:.2f})"
             ax.annotate(
-                r.replace("-", "‑"), (x, y), xytext=(4, 3),
+                label_txt, (x_plot, y_plot), xytext=(4, 3),
                 textcoords="offset points", fontsize=5.5, color="#333333", zorder=5,
             )
 
