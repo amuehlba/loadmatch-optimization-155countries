@@ -1517,108 +1517,125 @@ def plot_lp_storage(regions: list[str], lp_dir: Path, out: Path) -> None:
         _save(fig, out / f"fig9_lp_storage_{slug}")
 
 
-# ── Figure 10: LP warm-start effectiveness — cross-regional scatter ───────────
+# ── Figure 10: LP warm-start effectiveness — dumbbell dot plot ───────────────
 
 def plot_lp_effectiveness(df: pd.DataFrame, out: Path) -> None:
-    """Scatter of LP/BL vs GA(LP)/BL normalised cost across all 29 regions.
+    """Dumbbell dot plot: LP and GA(LP) normalised costs for all regions.
 
-    Points below the diagonal: GA further improved the LP starting point.
-    Points above: GA could not match the LP proxy cost (LP was infeasible for
-    LOADMATCH, so GA had to sacrifice cost to find a feasible 30-second solution).
+    Every region with GA(LP) data appears as a row.  Where LP data is also
+    available, a blue LP marker is added and a coloured connector shows whether
+    the GA improved (green) or worsened (red) on the LP starting point.
     """
     mn = _wide(df, "cost_mn")
     bl = mn["Baseline"]
 
-    lp_r   = (mn["LP"]      / bl).dropna()
-    galp_r = (mn["GA (LP)"] / bl).dropna()
-    common = lp_r.index.intersection(galp_r.index)
-    lp_v   = lp_r.loc[common].values
-    ga_v   = galp_r.loc[common].values
-    regs   = common.tolist()
+    lp_n   = (mn["LP"]      / bl) if "LP"      in mn.columns else pd.Series(dtype=float)
+    galp_n = (mn["GA (LP)"] / bl) if "GA (LP)" in mn.columns else pd.Series(dtype=float)
 
-    print(f"  [fig10] feasible LP: {len(lp_r)}, feasible GA(LP): {len(galp_r)}, "
-          f"both: {len(common)}")
-    if len(galp_r) < len(lp_r):
-        missing = sorted(set(lp_r.index) - set(galp_r.index))
-        print(f"  [fig10] regions with LP but no GA(LP): {missing}")
+    lp_avail   = lp_n.dropna()
+    galp_avail = galp_n.dropna()
+    both       = lp_avail.index.intersection(galp_avail.index)
 
-    delta = ga_v - lp_v
-    clrs  = ["#009E73" if d < -0.005 else "#E69F00" if d < 0.005 else "#CC6677"
-             for d in delta]
+    print(f"  [fig10] feasible LP: {len(lp_avail)}, feasible GA(LP): {len(galp_avail)}, "
+          f"both: {len(both)}")
+    if len(lp_avail) < len(galp_avail):
+        missing = sorted(set(galp_avail.index) - set(lp_avail.index))
+        print(f"  [fig10] GA(LP) regions without LP data: {missing}")
 
-    fig, ax = plt.subplots(figsize=(5.5, 5.0))
+    if galp_avail.empty:
+        print("  [skip fig10] No GA(LP) data available.")
+        return
 
-    # Determine axis range from actual data; clip extreme outliers with markers
-    _all_v = np.concatenate([lp_v, ga_v])
-    _clip_hi = np.percentile(_all_v[np.isfinite(_all_v)], 95) + 0.05
-    _clip_hi = max(_clip_hi, 1.15)          # always show at least up to 1.15
-    lim_lo   = max(0.70, _all_v[np.isfinite(_all_v)].min() - 0.03)
-    lim_hi   = _clip_hi
+    # Sort by GA(LP)/BL descending so lowest-cost regions are at the bottom
+    order = galp_avail.sort_values(ascending=False).index.tolist()
+    n = len(order)
+    y_pos = {r: i for i, r in enumerate(order)}
 
-    ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi],
-            color="#AAAAAA", lw=1.0, ls="--", zorder=1, label="LP = GA (LP)")
+    # Axis limits: cover all LP and GA(LP) values with a little padding
+    all_vals = list(galp_avail.values) + list(lp_avail.values)
+    all_finite = [v for v in all_vals if np.isfinite(v)]
+    xlim_right = min(max(all_finite) + 0.04, 1.40)
+    xlim_left  = max(min(all_finite) - 0.02, 0.70)
 
-    # Highlight region for GA(LP) < LP (below diagonal)
-    xs = np.linspace(lim_lo, lim_hi, 100)
-    ax.fill_between(xs, lim_lo, xs, color="#009E73", alpha=0.04, zorder=0)
-    ax.fill_between(xs, xs, lim_hi, color="#CC6677", alpha=0.04, zorder=0)
+    fig, ax = plt.subplots(figsize=(3.5, max(2.625, n * 0.27)))
 
-    LABEL_REGIONS = {"EUROPE", "UNITED-STATES", "CHINA", "INDIA", "JAPAN",
-                     "RUSSIA", "AUSTRALIA", "ICELAND", "SOUTHAM-NW"}
-    for x, y, c, r in zip(lp_v, ga_v, clrs, regs):
-        # Clip to plot range and add overflow markers
-        x_plot = min(x, lim_hi)
-        y_plot = min(y, lim_hi)
-        x_clip = x > lim_hi
-        y_clip = y > lim_hi
-        ax.scatter(x_plot, y_plot, color=c, s=32, zorder=4, linewidths=0, alpha=0.88)
-        if x_clip:
-            ax.scatter(lim_hi, y_plot, marker=">", color=c, s=22, zorder=6,
-                       clip_on=False)
-        if y_clip:
-            ax.scatter(x_plot, lim_hi, marker="^", color=c, s=22, zorder=6,
-                       clip_on=False)
-        if r in LABEL_REGIONS:
-            label_txt = r.replace("-", "‑")
-            if x_clip or y_clip:
-                label_txt += f" ({x:.2f}, {y:.2f})"
-            ax.annotate(
-                label_txt, (x_plot, y_plot), xytext=(4, 3),
-                textcoords="offset points", fontsize=5.5, color="#333333", zorder=5,
-            )
+    # ── Connecting lines (drawn first, behind dots) ───────────────────────────
+    for r in both:
+        lv = float(lp_avail[r])
+        gv = float(galp_avail[r])
+        yi = y_pos[r]
+        delta = gv - lv
+        line_clr = ("#009E73" if delta < -0.005
+                    else "#CC6677" if delta > 0.005
+                    else "#888888")
+        lv_plot = min(lv, xlim_right)
+        gv_plot = min(gv, xlim_right)
+        ax.plot([lv_plot, gv_plot], [yi, yi],
+                color=line_clr, lw=1.4, alpha=0.65, zorder=2)
 
-    ax.text(lim_lo + 0.005, lim_hi - 0.01,
-            "GA(LP) < LP\n(further improvement)", ha="left", va="top",
-            fontsize=6, color="#009E73", style="italic")
-    ax.text(lim_hi - 0.005, lim_lo + 0.01,
-            "GA(LP) > LP\n(30-s infeasibility cost)", ha="right", va="bottom",
-            fontsize=6, color="#CC6677", style="italic")
+    # ── GA(LP) dots — all regions ─────────────────────────────────────────────
+    for r in order:
+        gv = float(galp_avail[r])
+        yi = y_pos[r]
+        gv_plot = min(gv, xlim_right)
+        ax.scatter(gv_plot, yi, color=C["GA (LP)"], marker=MK["GA (LP)"],
+                   s=MKSZ["GA (LP)"], zorder=4, linewidths=0)
+        if gv > xlim_right:
+            ax.scatter(xlim_right, yi, marker=">", color=C["GA (LP)"],
+                       s=18, zorder=6, clip_on=False)
+            ax.text(xlim_right - 0.004, yi + 0.38,
+                    f"GA(LP): {gv:.2f}×", ha="right", va="bottom",
+                    fontsize=5.5, color=C["GA (LP)"])
 
-    ax.set_xlabel("LP warm-start cost  /  Baseline cost")
-    ax.set_ylabel("GA (LP warm-start) cost  /  Baseline cost")
-    ax.set_xlim(lim_lo, lim_hi)
-    ax.set_ylim(lim_lo, lim_hi)
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0%}"))
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0%}"))
-    ax.set_title("LP warm-start effectiveness — all 29 regions", loc="left", fontsize=8)
-    ax.grid(color="#EEEEEE", lw=0.4, zorder=0)
+    # ── LP dots — only regions with LP data ──────────────────────────────────
+    for r in lp_avail.index:
+        lv = float(lp_avail[r])
+        yi = y_pos[r]
+        lv_plot = min(lv, xlim_right)
+        ax.scatter(lv_plot, yi, color=C["LP"], marker=MK["LP"],
+                   s=MKSZ["LP"], zorder=5, linewidths=0)
+        if lv > xlim_right:
+            ax.scatter(xlim_right, yi, marker=">", color=C["LP"],
+                       s=18, zorder=6, clip_on=False)
+
+    # ── Baseline reference ────────────────────────────────────────────────────
+    ax.axvline(1.0, color="#AAAAAA", lw=0.8, ls="--")
+    ax.text(1.002, n - 0.5, "Baseline", ha="left", va="top",
+            fontsize=6.5, color="#888888")
+
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(
+        [r.replace("-", "‑") for r in order], fontsize=6.5
+    )
+    ax.set_xlabel("Annual system cost  (relative to baseline)")
+    ax.set_xlim(xlim_left, xlim_right)
     ax.set_axisbelow(True)
-    ax.set_aspect("equal")
+    ax.grid(which="major", axis="x", color="#DDDDDD", lw=0.4, zorder=0)
+    ax.xaxis.set_minor_locator(mticker.AutoMinorLocator(2))
+    ax.grid(which="minor", axis="x", color="#EEEEEE", lw=0.25, zorder=0)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0%}"))
 
-    n_below = int((delta < -0.005).sum())
-    n_equal = int((np.abs(delta) <= 0.005).sum())
-    n_above = int((delta >  0.005).sum())
+    # Count GA(LP) vs LP comparison (for regions where both exist)
+    deltas = [float(galp_avail[r]) - float(lp_avail[r]) for r in both]
+    n_below = sum(1 for d in deltas if d < -0.005)
+    n_equal = sum(1 for d in deltas if abs(d) <= 0.005)
+    n_above = sum(1 for d in deltas if d >  0.005)
+
     legend_handles = [
-        mpl.patches.Patch(color="#009E73", alpha=0.88,
-                          label=f"GA(LP) < LP  ({n_below} regions)"),
-        mpl.patches.Patch(color="#E69F00", alpha=0.88,
-                          label=f"GA(LP) ≈ LP  ({n_equal} regions)"),
-        mpl.patches.Patch(color="#CC6677", alpha=0.88,
-                          label=f"GA(LP) > LP  ({n_above} regions)"),
-        mpl.lines.Line2D([], [], color="#AAAAAA", ls="--", lw=1.0,
-                         label="LP = GA (LP)"),
+        mpl.lines.Line2D([], [], color=C["LP"], marker=MK["LP"], linestyle="",
+                         markersize=5, label=f"LP warm-start ({len(lp_avail)} regions)"),
+        mpl.lines.Line2D([], [], color=C["GA (LP)"], marker=MK["GA (LP)"],
+                         linestyle="", markersize=5,
+                         label=f"GA (LP warm-start) ({len(galp_avail)} regions)"),
+        mpl.lines.Line2D([], [], color="#009E73", lw=1.4,
+                         label=f"GA(LP) < LP  ({n_below})"),
+        mpl.lines.Line2D([], [], color="#CC6677", lw=1.4,
+                         label=f"GA(LP) > LP  ({n_above})"),
+        mpl.lines.Line2D([], [], color="#888888", lw=1.4,
+                         label=f"GA(LP) ≈ LP  ({n_equal})"),
     ]
-    ax.legend(handles=legend_handles, frameon=False, fontsize=6, loc="lower right")
+    ax.legend(handles=legend_handles, loc="lower right",
+              frameon=False, ncol=1, fontsize=6)
 
     fig.tight_layout()
     _save(fig, out / "fig10_lp_effectiveness")
