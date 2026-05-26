@@ -230,14 +230,53 @@ def _first_feasible_from_log(rdir: Path) -> Optional[dict]:
     }
 
 
+def _lp_eval_cost_from_log(rdir: Path) -> Optional[float]:
+    """Read the LP-eval cost from lp_ga_factor_history.log.
+
+    The lp_summary.json produced by older workflow runs may have
+    annual_cost_mn_bil_per_yr=null even though the value was logged correctly.
+    This fallback reads the cost directly from the log.
+
+    Searches for a record with label "LP-eval" (the exact label written by
+    run_ga_from_lp) so it works correctly even if the log was appended to
+    across multiple manual runs.
+    """
+    log_path = rdir / "lp_ga_factor_history.log"
+    if not log_path.exists():
+        return None
+    try:
+        from scripts.factor_history_tools import parse_factor_history
+    except ModuleNotFoundError:
+        from factor_history_tools import parse_factor_history
+    for rec in parse_factor_history(log_path):
+        label = str(rec.get("label", "")).strip()
+        # "LP-eval" is the canonical label; "LP" catches older log formats
+        if label == "LP-eval" or label == "LP":
+            cost = rec.get("cost_mn_bil_per_year")
+            if cost is not None and not (isinstance(cost, float) and cost != cost):
+                c = float(cost)
+                if not (c == float("inf") or c == float("-inf")):
+                    return c
+    return None
+
+
 def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
     """Return list of (case_label, data_dict_or_None) for all five cases."""
     rdir = RESULTS_DIR / region
     ff_data = (_load_json(rdir / "first_feasible_summary.json")
                or _first_feasible_from_log(rdir))
+
+    lp_data = _load_json(rdir / "lp_summary.json")
+    if lp_data is not None and not lp_data.get("annual_cost_mn_bil_per_yr"):
+        # Older runs wrote a different key or left cost null — patch from log
+        log_cost = _lp_eval_cost_from_log(rdir)
+        if log_cost is not None:
+            lp_data = dict(lp_data)   # don't mutate cached dict
+            lp_data["annual_cost_mn_bil_per_yr"] = log_cost
+
     return [
         ("Baseline",       _load_json(rdir / "baseline_summary.json")),
-        ("LP",             _load_json(rdir / "lp_summary.json")),
+        ("LP",             lp_data),
         ("First feasible", ff_data),
         ("GA (bl)",        _load_json(rdir / "optimal_summary.json")),
         ("GA (LP)",        _load_json(rdir / "lp_ga_summary.json")),

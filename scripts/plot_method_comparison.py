@@ -208,7 +208,8 @@ def _legend_handles(cases=None) -> list:
 
 
 # ── Figure 1: Cleveland dot plot — all regions ────────────────────────────────
-def plot_overview(df: pd.DataFrame, out: Path) -> None:
+def plot_overview(df: pd.DataFrame, df_all: pd.DataFrame, out: Path) -> None:
+    # Pivot feasible-only for non-LP cases + error bars (clean data)
     mn = _wide(df, "cost_mn", cases=OVERVIEW_CASES)
     lo = _wide(df, "cost_lo", cases=OVERVIEW_CASES)
     hi = _wide(df, "cost_hi", cases=OVERVIEW_CASES)
@@ -218,25 +219,54 @@ def plot_overview(df: pd.DataFrame, out: Path) -> None:
     lo_n = lo.div(bl, axis=0)
     hi_n = hi.div(bl, axis=0)
 
+    # LP costs read directly from df_all — captures infeasible rows the pivot skips
+    bl_cost_sr = df_all[df_all["case"] == "Baseline"].set_index("region")["cost_mn"]
+    lp_cost_sr = df_all[df_all["case"] == "LP"].set_index("region")["cost_mn"]
+    lp_infeas  = set(
+        df_all.loc[(df_all["case"] == "LP") & (~df_all["feasible"]), "region"]
+    )
+
     order = sorted(bl.index.tolist(), reverse=True)
     mn_n, lo_n, hi_n = mn_n.loc[order], lo_n.loc[order], hi_n.loc[order]
     n = len(order)
     y = np.arange(n)
 
+    # Normalised LP cost per region (direct lookup, not via pivot)
+    lp_norm = np.array([
+        lp_cost_sr.get(r, np.nan) / bl_cost_sr.get(r, np.nan) for r in order
+    ])
+    n_valid = int(np.isfinite([lp_norm[i] for i, r in enumerate(order)
+                                if r in lp_infeas]).sum()) if lp_infeas else 0
+    print(f"  [fig1] infeasible LP: {len(lp_infeas)} regions, "
+          f"{n_valid} with valid cost_mn")
+
     fig, ax = plt.subplots(figsize=(3.5, max(2.625, n * 0.27)))
 
     for case in OVERVIEW_CASES:
-        if case not in mn_n.columns:
+        if case not in mn_n.columns and case != "LP":
             continue
-        mn_v = mn_n[case].values
-        lo_v = lo_n[case].values
-        hi_v = hi_n[case].values
+
+        # Choose cost values: direct lookup for LP, pivot for everything else
+        mn_v = lp_norm if case == "LP" else mn_n[case].values
+
+        lo_v = lo_n[case].values if case in lo_n.columns else np.full(n, np.nan)
+        hi_v = hi_n[case].values if case in hi_n.columns else np.full(n, np.nan)
         for i, (lv, hv) in enumerate(zip(lo_v, hi_v)):
             if np.isfinite(lv) and np.isfinite(hv):
                 ax.plot([lv, hv], [y[i], y[i]],
                         color=C[case], lw=0.7, alpha=0.35, zorder=2)
-        ax.scatter(mn_v, y, color=C[case], marker=MK[case],
-                   s=MKSZ[case], zorder=4, linewidths=0)
+
+        if case == "LP":
+            feas_mask   = np.array([r not in lp_infeas for r in order])
+            ax.scatter(np.where( feas_mask, mn_v, np.nan), y,
+                       color=C[case], marker=MK[case], s=MKSZ[case],
+                       zorder=4, linewidths=0)
+            ax.scatter(np.where(~feas_mask, mn_v, np.nan), y,
+                       facecolors="none", edgecolors=C[case],
+                       marker=MK[case], s=MKSZ[case], zorder=4, linewidths=0.9)
+        else:
+            ax.scatter(mn_v, y, color=C[case], marker=MK[case],
+                       s=MKSZ[case], zorder=4, linewidths=0)
 
     ax.axvline(1.0, color="#AAAAAA", lw=0.8, ls="--")
     ax.text(1.002, n - 0.5, "Baseline", ha="left", va="top",
@@ -251,26 +281,35 @@ def plot_overview(df: pd.DataFrame, out: Path) -> None:
     ax.grid(which="major", axis="x", color="#DDDDDD", lw=0.4, zorder=0)
     ax.xaxis.set_minor_locator(mticker.AutoMinorLocator(2))
     ax.grid(which="minor", axis="x", color="#EEEEEE", lw=0.25, zorder=0)
-    xmin  = max(0.0, float(np.nanmin(lo_n.values)) - 0.02)
+    all_vals = np.concatenate([lo_n.values.ravel(), lp_norm])
+    xmin = max(0.0, float(np.nanmin(all_vals)) - 0.02)
     xlim_right = 1.5
     ax.set_xlim(left=xmin, right=xlim_right)
 
     # Annotate points clipped by the x-axis limit
     for case in OVERVIEW_CASES:
-        if case not in mn_n.columns:
-            continue
-        for region, v in zip(order, mn_n[case].values):
+        case_vals = lp_norm if case == "LP" else (
+            mn_n[case].values if case in mn_n.columns else np.full(n, np.nan)
+        )
+        for i, (region, v) in enumerate(zip(order, case_vals)):
             if np.isfinite(v) and v > xlim_right:
-                yi = order.index(region)
-                ax.scatter(xlim_right, yi, marker=">", color=C[case],
+                ax.scatter(xlim_right, i, marker=">", color=C[case],
                            s=22, zorder=6, clip_on=False)
-                ax.text(xlim_right - 0.01, yi + 0.42,
-                        f"{LBL[case]}: {v:.2f}×",
-                        ha="right", va="bottom", fontsize=6.0,
-                        color=C[case])
+                tag = " (inf.)" if (case == "LP" and region in lp_infeas) else ""
+                ax.text(xlim_right - 0.01, i + 0.42,
+                        f"{LBL[case]}{tag}: {v:.2f}×",
+                        ha="right", va="bottom", fontsize=6.0, color=C[case])
 
-    ax.legend(handles=_legend_handles(cases=OVERVIEW_CASES), loc="lower right",
-              frameon=False, ncol=1)
+    legend_handles = _legend_handles(cases=OVERVIEW_CASES) + [
+        mpl.lines.Line2D([], [], color=C["LP"], marker=MK["LP"], linestyle="",
+                         markersize=5, markerfacecolor="none",
+                         markeredgecolor=C["LP"], markeredgewidth=0.9,
+                         label="LP (infeasible)"),
+    ]
+    ax.legend(handles=legend_handles,
+              loc="upper center", bbox_to_anchor=(0.5, -0.06),
+              frameon=False, ncol=2, fontsize=7,
+              handlelength=1.0, handletextpad=0.4, columnspacing=1.2)
 
     fig.tight_layout()
     _save(fig, out / "fig1_overview")
@@ -1541,8 +1580,8 @@ def plot_capacity_boxplots(
 
     bl_df = dfw[dfw["case"] == "Baseline"].set_index("region")
 
-    # CSV-sourced cases: ci=0 GA(bl), ci=1 LP, ci=3 GA(LP)
-    for ci, csv_case in [(0, "GA (bl)"), (1, "LP"), (3, "GA (LP)")]:
+    # All four cases sourced from CSV
+    for ci, csv_case in [(0, "GA (bl)"), (1, "LP"), (2, "First feasible"), (3, "GA (LP)")]:
         case_df = dfw[dfw["case"] == csv_case].set_index("region")
         for region in case_df.index:
             if region not in bl_df.index:
@@ -1555,50 +1594,6 @@ def plot_capacity_boxplots(
                     continue
                 if bl_val > 0 and case_val > 0 and not np.isnan(bl_val) and not np.isnan(case_val):
                     ratios[pi][ci].append(case_val / bl_val)
-
-    # Log-file-sourced first-feasible (ci=2) — only regions that have the log
-    def _rv(rec, key):
-        if rec is None:
-            return 0.0
-        v = rec.get(key, rec.get(key.upper(), 0.0))
-        if v is None:
-            return 0.0
-        try:
-            f = float(v)
-            return 0.0 if (f != f) else f
-        except (ValueError, TypeError):
-            return 0.0
-
-    # factor-key mapping for log records (lowercase keys in log files)
-    FF_KEYS = {
-        "FACONWIN":  lambda r: _rv(r, "faconwin"),
-        "FACOFFWIN": lambda r: _rv(r, "facoffwin"),
-        "FACUTILPV": lambda r: _rv(r, "facutilpv"),
-        "FACRESPV":  lambda r: _rv(r, "facrespv"),
-        "CSPTURBFAC":lambda r: _rv(r, "cspturbfac"),
-        "BATDISCH":  lambda r: _rv(r, "batdisch"),
-        "FCDISCH":   lambda r: _rv(r, "fcdisch"),
-        "FCCHARG":   lambda r: _rv(r, "fccharg"),
-        "BAT_TWH":   lambda r: _rv(r, "batdisch") * _rv(r, "storhbat"),
-        "H2_TWH":    lambda r: _rv(r, "fcdisch")  * _rv(r, "dayh2stor"),
-    }
-
-    for region in dfw["region"].unique():
-        if region not in bl_df.index:
-            continue
-        _, _, ff_rec, _ = _load_lp_history(results_dir, region)
-        if ff_rec is None:
-            continue
-        for pi, (col, _) in enumerate(ALL_SPECS):
-            try:
-                bl_val = float(bl_df.loc[region, col])
-            except (KeyError, ValueError, TypeError):
-                continue
-            if bl_val <= 0 or np.isnan(bl_val):
-                continue
-            ff_val = FF_KEYS[col](ff_rec)
-            if ff_val > 0:
-                ratios[pi][2].append(ff_val / bl_val)
 
     # ── Shared box geometry ────────────────────────────────────────────────────
     BOX_W   = 0.60
@@ -2034,7 +2029,7 @@ def main() -> None:
         f"{df['case'].nunique()} cases"
     )
 
-    plot_overview(df, args.output)
+    plot_overview(df, df_all, args.output)
     plot_pathway(df, args.output, highlight=hl)
     # fig3 and fig5 for every lp_region (plus the exemplar if not already covered)
     fig3_regions = list(dict.fromkeys([args.exemplar] + args.lp_regions))
