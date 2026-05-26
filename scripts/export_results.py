@@ -10,8 +10,8 @@ Layout
 • Two frozen header rows
     Row 1 – colour-coded group label (merged across the group's columns)
     Row 2 – individual column names
-• Data rows: four consecutive rows per region
-    (Baseline | LP | GA (bl) | GA (LP))
+• Data rows: five consecutive rows per region
+    (Baseline | LP | First feasible | GA (bl) | GA (LP))
   with alternating light-gray / white row-band shading so each region block
   is visually distinct.  The "region" column is always filled → fully
   machine-readable (no merged cells, no empty key columns).
@@ -24,7 +24,8 @@ Column groups
   End use & load  |  Losses       |  Storage net flow   |
   Optimised factors  |  Fixed factors
 
-Missing cases (LP / GA-LP not run for a region) produce blank data rows.
+Missing cases (LP / First feasible / GA-LP not run for a region) produce blank data rows.
+  First feasible falls back to parsing lp_ga_factor_history.log if the JSON is absent.
 
 Usage
 -----
@@ -196,14 +197,50 @@ def _load_json(path: Path) -> Optional[dict]:
         return None
 
 
+def _first_feasible_from_log(rdir: Path) -> Optional[dict]:
+    """Build a minimal summary dict from lp_ga_factor_history.log.
+
+    Used as a fallback when first_feasible_summary.json hasn't been written yet
+    (i.e. the workflow ran before this feature was added).  Only factors and
+    cost are populated; all other fields are absent (export shows blanks).
+    """
+    log_path = rdir / "lp_ga_factor_history.log"
+    if not log_path.exists():
+        return None
+    try:
+        from scripts.factor_history_tools import parse_factor_history
+    except ModuleNotFoundError:
+        from factor_history_tools import parse_factor_history
+    recs = parse_factor_history(log_path)
+    ff_rec = next((r for r in recs if r.get("feasible")), None)
+    if ff_rec is None:
+        return None
+    factors = {
+        k.upper(): float(v)
+        for k, v in ff_rec.items()
+        if k not in ("label", "feasible", "cost_mn_bil_per_year")
+        and isinstance(v, (int, float))
+    }
+    cost = ff_rec.get("cost_mn_bil_per_year")
+    return {
+        "feasible": True,
+        "annual_cost_mn_bil_per_yr": float(cost) if cost is not None else None,
+        "factors": factors,
+        "run_type": "first_feasible_from_log",
+    }
+
+
 def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
-    """Return list of (case_label, data_dict_or_None) for all four cases."""
+    """Return list of (case_label, data_dict_or_None) for all five cases."""
     rdir = RESULTS_DIR / region
+    ff_data = (_load_json(rdir / "first_feasible_summary.json")
+               or _first_feasible_from_log(rdir))
     return [
-        ("Baseline", _load_json(rdir / "baseline_summary.json")),
-        ("LP",       _load_json(rdir / "lp_summary.json")),
-        ("GA (bl)",  _load_json(rdir / "optimal_summary.json")),
-        ("GA (LP)",  _load_json(rdir / "lp_ga_summary.json")),
+        ("Baseline",       _load_json(rdir / "baseline_summary.json")),
+        ("LP",             _load_json(rdir / "lp_summary.json")),
+        ("First feasible", ff_data),
+        ("GA (bl)",        _load_json(rdir / "optimal_summary.json")),
+        ("GA (LP)",        _load_json(rdir / "lp_ga_summary.json")),
     ]
 
 
@@ -451,7 +488,7 @@ def _write_csv(regions: List[str], out_path: Path) -> None:
                         row.append("" if val is None else val)
                 writer.writerow(row)
 
-    n_rows = len(regions) * 4
+    n_rows = len(regions) * 5
     print(f"Saved {out_path}  ({n_rows} data rows, {len(col_spec)} columns)")
 
 

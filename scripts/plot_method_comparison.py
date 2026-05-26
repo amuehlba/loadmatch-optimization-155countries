@@ -53,19 +53,22 @@ mpl.rcParams.update({
 
 # Okabe-Ito CVD-safe palette
 C = {
-    "Baseline": "#888888",
-    "LP":       "#0072B2",
-    "GA (bl)":  "#E69F00",
-    "GA (LP)":  "#009E73",
+    "Baseline":      "#888888",
+    "LP":            "#0072B2",
+    "First feasible":"#D55E00",
+    "GA (bl)":       "#E69F00",
+    "GA (LP)":       "#009E73",
 }
-MK   = {"Baseline": "D", "LP": "s", "GA (bl)": "^", "GA (LP)": "o"}
-MKSZ = {"Baseline": 18,  "LP": 18,  "GA (bl)": 20,  "GA (LP)": 18}
+MK   = {"Baseline": "D", "LP": "s", "First feasible": "*", "GA (bl)": "^", "GA (LP)": "o"}
+MKSZ = {"Baseline": 18,  "LP": 18,  "First feasible": 22,  "GA (bl)": 20,  "GA (LP)": 18}
 CASES = ["Baseline", "LP", "GA (bl)", "GA (LP)"]
+OVERVIEW_CASES = ["Baseline", "LP", "First feasible", "GA (bl)", "GA (LP)"]
 LBL   = {
-    "Baseline": "Baseline",
-    "LP":       "LP warm-start",
-    "GA (bl)":  "GA (baseline start)",
-    "GA (LP)":  "GA (LP warm-start)",
+    "Baseline":      "Baseline",
+    "LP":            "LP warm-start",
+    "First feasible":"First LOADMATCH-feasible",
+    "GA (bl)":       "GA (baseline start)",
+    "GA (LP)":       "GA (LP warm-start)",
 }
 
 FACTOR_KEYS = [
@@ -158,7 +161,7 @@ _CLR_UP   = "#CC6677"   # muted red   → cost increase
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
-def load(path: Path) -> pd.DataFrame:
+def load(path: Path, feasible_only: bool = True) -> pd.DataFrame:
     df = pd.read_csv(path).rename(columns={
         "Identification/Region":               "region",
         "Identification/Case":                 "case",
@@ -171,14 +174,18 @@ def load(path: Path) -> pd.DataFrame:
         c: c.replace("Optimised factors/", "") for c in df.columns
     })
     df["feasible"] = df["feasible"].astype(str).str.strip().str.lower() == "true"
-    return df[df["feasible"]].copy()
+    if feasible_only:
+        return df[df["feasible"]].copy()
+    return df.copy()
 
 
-def _wide(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+def _wide(df: pd.DataFrame, metric: str, cases=None) -> pd.DataFrame:
     """Pivot to region × case table for a single metric."""
+    if cases is None:
+        cases = CASES
     return df.pivot_table(
         index="region", columns="case", values=metric, aggfunc="first"
-    ).reindex(columns=CASES)
+    ).reindex(columns=cases)
 
 
 def _save(fig: plt.Figure, stem: Path, dpi: int = 300) -> None:
@@ -190,19 +197,21 @@ def _save(fig: plt.Figure, stem: Path, dpi: int = 300) -> None:
     plt.close(fig)
 
 
-def _legend_handles() -> list:
+def _legend_handles(cases=None) -> list:
+    if cases is None:
+        cases = CASES
     return [
         mpl.lines.Line2D([], [], color=C[c], marker=MK[c], linestyle="",
                          markersize=5, label=LBL[c])
-        for c in CASES
+        for c in cases
     ]
 
 
 # ── Figure 1: Cleveland dot plot — all regions ────────────────────────────────
 def plot_overview(df: pd.DataFrame, out: Path) -> None:
-    mn = _wide(df, "cost_mn")
-    lo = _wide(df, "cost_lo")
-    hi = _wide(df, "cost_hi")
+    mn = _wide(df, "cost_mn", cases=OVERVIEW_CASES)
+    lo = _wide(df, "cost_lo", cases=OVERVIEW_CASES)
+    hi = _wide(df, "cost_hi", cases=OVERVIEW_CASES)
 
     bl = mn["Baseline"]
     mn_n = mn.div(bl, axis=0)
@@ -216,7 +225,7 @@ def plot_overview(df: pd.DataFrame, out: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(3.5, max(2.625, n * 0.27)))
 
-    for case in CASES:
+    for case in OVERVIEW_CASES:
         if case not in mn_n.columns:
             continue
         mn_v = mn_n[case].values
@@ -247,7 +256,7 @@ def plot_overview(df: pd.DataFrame, out: Path) -> None:
     ax.set_xlim(left=xmin, right=xlim_right)
 
     # Annotate points clipped by the x-axis limit
-    for case in CASES:
+    for case in OVERVIEW_CASES:
         if case not in mn_n.columns:
             continue
         for region, v in zip(order, mn_n[case].values):
@@ -260,7 +269,7 @@ def plot_overview(df: pd.DataFrame, out: Path) -> None:
                         ha="right", va="bottom", fontsize=6.0,
                         color=C[case])
 
-    ax.legend(handles=_legend_handles(), loc="lower right",
+    ax.legend(handles=_legend_handles(cases=OVERVIEW_CASES), loc="lower right",
               frameon=False, ncol=1)
 
     fig.tight_layout()
@@ -1037,7 +1046,8 @@ def plot_lp_comparison(
 
 # ── Figure 11: LP feasibility path — LP → first feasible → GA(LP) optimal ────
 
-def _load_lp_history(results_dir: Path, region: str):
+def _load_lp_history(results_dir: Path, region: str,
+                     filename: str = "lp_ga_factor_history.log"):
     """Parse lp_ga_factor_history.log.
 
     Returns (df, lp_rec, first_feas_rec, best_rec) where each *_rec is a plain
@@ -1049,8 +1059,11 @@ def _load_lp_history(results_dir: Path, region: str):
       2. First inflate-subunity*/inflate-step* record that is feasible.
       3. First GA-gen*-ind* record that is feasible.
     """
-    from scripts.factor_history_tools import parse_factor_history, records_to_dataframe
-    log_path = results_dir / region / "lp_ga_factor_history.log"
+    try:
+        from scripts.factor_history_tools import parse_factor_history, records_to_dataframe
+    except ModuleNotFoundError:
+        from factor_history_tools import parse_factor_history, records_to_dataframe
+    log_path = results_dir / region / filename
     if not log_path.exists():
         return None, None, None, None
 
@@ -1081,6 +1094,7 @@ def plot_lp_feasibility_path(
     lp_dir: Path,
     results_dir: Path,
     out: Path,
+    df: pd.DataFrame | None = None,
     countrystats: Path | None = None,
 ) -> None:
     """Per-region figure: LP (hourly) → first LOADMATCH-feasible → GA(LP) optimal.
@@ -1101,6 +1115,37 @@ def plot_lp_feasibility_path(
             continue
 
         ref_gw = _load_ref_gw(region, countrystats) if countrystats and countrystats.exists() else {}
+
+        # ── GA(bl) history ────────────────────────────────────────────────────
+        _CLR_GABL = C["GA (bl)"]
+        df_hist_bl, _, _, best_rec_gabl = _load_lp_history(
+            results_dir, region, filename="factor_history.log")
+
+        gabl_cost = None
+        if best_rec_gabl is not None:
+            gabl_cost = float(best_rec_gabl.get("cost_mn_bil_per_year", float("inf")))
+            if np.isinf(gabl_cost):
+                gabl_cost = None
+
+        # ── Baseline from CSV ─────────────────────────────────────────────────
+        _CLR_BL = C["Baseline"]
+        bl_sub  = (df[(df["region"] == region) & (df["case"] == "Baseline")]
+                   if df is not None else pd.DataFrame())
+
+        def _bl_fval(key):
+            if bl_sub.empty:
+                return 0.0
+            cols = [c for c in bl_sub.columns if c.split("/")[0].upper() == key.upper()]
+            if not cols:
+                return 0.0
+            v = bl_sub[cols[0]].iloc[0]
+            try:
+                f = float(v)
+                return 0.0 if (f != f) else f
+            except (TypeError, ValueError):
+                return 0.0
+
+        bl_cost = float(bl_sub["cost_mn"].iloc[0]) if not bl_sub.empty else None
 
         # ── Classify the three comparison points ─────────────────────────────
         lp_feasible    = bool(lp_rec.get("feasible", False)) if lp_rec else False
@@ -1131,10 +1176,8 @@ def plot_lp_feasibility_path(
             ("facrespv",   "Res. PV",        "GW", lambda v: v * ref_gw.get("FACRESPV",  0)),
             ("cspturbfac", "CSP",            "GW", lambda v: v * ref_gw.get("CSPTURBFAC",0)),
             ("batdisch",   "Battery (pow.)", "GW", lambda v: v * 1000),
-            ("fcdisch",    "H₂ FC",     "GW", lambda v: v * 1000),
+            ("fcdisch",    "Fuel Cell",       "GW", lambda v: v * 1000),
             ("fccharg",    "Electrolyser",   "GW", lambda v: v * 1000),
-            ("storhbat",   "Battery dur.",   "h",  lambda v: v),
-            ("dayh2stor",  "H₂ stor.",  "d",  lambda v: v),
         ]
 
         def _fval(rec, key):
@@ -1151,23 +1194,30 @@ def plot_lp_feasibility_path(
 
         # Build display arrays
         param_labels = []
-        lp_gw, ff_gw, best_gw = [], [], []
+        bl_gw, gabl_gw, lp_gw, ff_gw, best_gw = [], [], [], [], []
         unit_labels = []
         for fkey, lbl, unit, conv in DISP_PARAMS:
+            raw_bl   = _bl_fval(fkey)
+            raw_gabl = _fval(best_rec_gabl, fkey) if best_rec_gabl else 0.0
             raw_lp   = _fval(lp_rec, fkey)
             raw_ff   = _fval(first_feas_rec, fkey)
             raw_best = _fval(best_rec, fkey)
-            lv = conv(raw_lp)
-            fv = conv(raw_ff)
-            bv = conv(raw_best)
-            # Skip if all three are effectively zero in BOTH converted and raw space
-            # (raw check catches cases where ref_gw=0 but factor itself is non-zero)
-            if max(abs(lv), abs(fv), abs(bv)) < 0.1 and max(abs(raw_lp), abs(raw_ff), abs(raw_best)) < 0.01:
+            blv  = conv(raw_bl)
+            gblv = conv(raw_gabl)
+            lv   = conv(raw_lp)
+            fv   = conv(raw_ff)
+            bv   = conv(raw_best)
+            if (max(abs(blv), abs(gblv), abs(lv), abs(fv), abs(bv)) < 0.1
+                    and max(abs(raw_bl), abs(raw_gabl), abs(raw_lp),
+                            abs(raw_ff), abs(raw_best)) < 0.01):
                 continue
-            param_labels.append(f"{lbl}\n({unit})")
-            lp_gw.append(lv); ff_gw.append(fv); best_gw.append(bv)
+            param_labels.append(lbl)
+            bl_gw.append(blv);  gabl_gw.append(gblv)
+            lp_gw.append(lv);   ff_gw.append(fv); best_gw.append(bv)
             unit_labels.append(unit)
 
+        bl_arr   = np.array(bl_gw)
+        gabl_arr = np.array(gabl_gw)
         lp_arr   = np.array(lp_gw)
         ff_arr   = np.array(ff_gw)
         best_arr = np.array(best_gw)
@@ -1180,61 +1230,65 @@ def plot_lp_feasibility_path(
         _CLR_BEST = C["GA (LP)"]   # green:     GA(LP) optimal
 
         # ── Figure layout ─────────────────────────────────────────────────────
-        fig = plt.figure(figsize=(7.0, max(4.8, 1.0 + n_params * 0.42)),
+        fig = plt.figure(figsize=(8.5, max(5.5, 1.5 + n_params * 0.42)),
                          layout="constrained")
-        gs  = fig.add_gridspec(1, 3, width_ratios=[0.9, 1.5, 2.2])
+        gs      = fig.add_gridspec(1, 3, width_ratios=[0.9, 1.5, 2.2])
         ax_cost  = fig.add_subplot(gs[0])
         ax_trail = fig.add_subplot(gs[1])
-        ax_fac   = fig.add_subplot(gs[2])
+        # Split column C: upper = storage TWh, lower = generation/power capacities
+        gs_c    = gs[2].subgridspec(2, 1, height_ratios=[1, 2.5])
+        ax_twh  = fig.add_subplot(gs_c[0])
+        ax_fac  = fig.add_subplot(gs_c[1])
 
-        # ── Panel A: cost bars — always 3 rows ───────────────────────────────
-        STEP_LABELS = ["LP (raw)\n(hourly opt.)",
-                       "First LOADMATCH-\nfeasible (30-s)",
-                       "GA (LP)\noptimal"]
-        STEP_COLORS = [_CLR_LP, _CLR_FF, _CLR_BEST]
-        STEP_COSTS  = [lp_cost, ff_cost, best_cost]
+        # ── Panel A: cost milestones — LP → first-feasible → GA(LP) optimal ──
+        # LP row uses the LP solver's own objective (proxy CAPEX, B$/yr) from
+        # lp_solution.json.  First-feasible and GA(LP) use LOADMATCH cost.
+        # Both metrics are in B$/yr but are not directly comparable — the LP
+        # proxy covers annualised CAPEX only; LOADMATCH covers full system cost.
+        lp_sol_data   = _load_lp_solution(lp_dir, region)
+        lp_proxy_cost = (lp_sol_data.get("cost_proxy", {}).get("total_B_usd_per_yr")
+                         if lp_sol_data else None)
+        lp_bar_cost   = float(lp_proxy_cost) if lp_proxy_cost is not None else None
 
-        plotted = []
+        # Order bottom→top: GA(LP) y=0, first feasible y=1, LP y=2, GA(bl) y=3, Baseline y=4
+        STEP_LABELS = ["GA (LP)\noptimal",
+                       "First LOADMATCH-\nfeasible",
+                       "LP (raw)\n(hourly opt.)",
+                       "GA (bl)\noptimal",
+                       "Baseline"]
+        STEP_COLORS = [_CLR_BEST, _CLR_FF, _CLR_LP, _CLR_GABL, _CLR_BL]
+        STEP_COSTS  = [best_cost, ff_cost, lp_bar_cost, gabl_cost, bl_cost]
+
+        all_finite = [c for c in STEP_COSTS if c is not None and not np.isinf(c)]
+        xmax = max(all_finite) * 1.30 if all_finite else 1.0
+
         for i, (lbl, clr, cost) in enumerate(
                 zip(STEP_LABELS, STEP_COLORS, STEP_COSTS)):
-            hatch = "//" if (ff_is_lp and i == 1) else None
-            if np.isinf(cost):
-                ax_cost.barh(i, 0.0, color=clr, alpha=0.30, height=0.55,
-                             edgecolor=clr, linewidth=1.2, linestyle="--",
-                             hatch=hatch)
-                ax_cost.text(0.04, i, "Infeasible\n(load shed)", va="center",
-                             fontsize=6, color=clr, style="italic")
+            if cost is None or np.isinf(cost):
+                ax_cost.barh(i, xmax, color=clr, alpha=0.07, height=0.55,
+                             edgecolor=clr, linewidth=0.8, linestyle="--",
+                             hatch="///", zorder=1)
+                ax_cost.text(xmax * 0.50, i, "cost unavailable",
+                             ha="center", va="center", fontsize=6,
+                             color=clr, style="italic")
             else:
                 ax_cost.barh(i, cost, color=clr, alpha=0.82, height=0.55,
-                             zorder=3, hatch=hatch,
-                             edgecolor="#333" if hatch else clr, lw=0.6)
+                             zorder=3, edgecolor=clr, lw=0.6)
                 ax_cost.text(cost * 0.50, i, f"${cost:.1f}B",
                              ha="center", va="center", fontsize=6.5,
                              color="white", fontweight="bold")
-            plotted.append(cost if not np.isinf(cost) else None)
 
-        # Annotate when LP was already feasible (rows 0 and 1 are the same)
-        if ff_is_lp:
-            ax_cost.annotate(
-                "LP already\nfeasible",
-                xy=(0.0, 1), xytext=(0.0, 0),
-                xycoords=("data", "data"),
-                textcoords=("data", "data"),
-                arrowprops=dict(arrowstyle="-", color="#888888", lw=0.8,
-                                connectionstyle="arc3,rad=0"),
-                ha="left", va="center", fontsize=5.5, color="#888888",
-                style="italic",
-            )
-
-        finite_costs = [c for c in plotted if c is not None]
-        if finite_costs:
-            xmax = max(finite_costs)
-            ax_cost.set_xlim(0, xmax * 1.30)
-        ax_cost.set_yticks(range(3))
+        if not lp_feasible and lp_bar_cost is not None:
+            ax_cost.text(xmax * 0.02, 2.28,
+                         "LP proxy cost (CAPEX only);\nLOADMATCH-infeasible",
+                         va="bottom", fontsize=5.0, color=_CLR_LP,
+                         style="italic")
+        ax_cost.set_xlim(0, xmax)
+        ax_cost.set_yticks(range(5))
         ax_cost.set_yticklabels(STEP_LABELS, fontsize=6.5)
-        ax_cost.set_xlabel("LOADMATCH cost\n($B/yr)")
+        ax_cost.set_xlabel("Cost ($B/yr)")
         ax_cost.set_title("A)", loc="left", fontweight="bold")
-        ax_cost.set_ylim(-0.6, 2.6)
+        ax_cost.set_ylim(-0.6, 4.6)
         ax_cost.grid(axis="x", color="#EEEEEE", lw=0.4)
         ax_cost.set_axisbelow(True)
 
@@ -1247,40 +1301,69 @@ def plot_lp_feasibility_path(
         inf_mask = np.isinf(trial_c) | (trial_c > 1e6)
         fin_mask = ~inf_mask & trial_f      # feasible + finite cost
 
-        y_top = float(trial_c[fin_mask].max()) * 1.08 if fin_mask.any() else None
+        # GA(bl) feasible trials
+        bl_fin_mask = None
+        if df_hist_bl is not None and not df_hist_bl.empty:
+            bl_trial_x = df_hist_bl["trial"].values
+            bl_trial_c = df_hist_bl["cost_mn_bil_per_year"].values
+            bl_trial_f = df_hist_bl["feasible"].values.astype(bool)
+            bl_inf     = np.isinf(bl_trial_c) | (bl_trial_c > 1e6)
+            bl_fin_mask = ~bl_inf & bl_trial_f
 
-        # Show only LOADMATCH-feasible trials
+        all_feas_costs = list(trial_c[fin_mask]) + (
+            list(bl_trial_c[bl_fin_mask]) if bl_fin_mask is not None and bl_fin_mask.any() else [])
+        y_top = float(max(all_feas_costs)) * 1.08 if all_feas_costs else None
+
+        # GA(LP) feasible scatter
         ax_trail.scatter(trial_x[fin_mask], trial_c[fin_mask],
-                         color="#009E73", s=6, alpha=0.60, zorder=3,
+                         color=_CLR_BEST, s=6, alpha=0.60, zorder=3,
                          linewidths=0,
-                         label=f"LOADMATCH-feasible trials ({fin_mask.sum()})")
+                         label=f"GA(LP) feasible ({fin_mask.sum()})")
 
-        def _mark_trial(label_str, cost_val, color, marker, ms, zord, mk_label=None):
+        # GA(bl) feasible scatter
+        if bl_fin_mask is not None and bl_fin_mask.any():
+            ax_trail.scatter(bl_trial_x[bl_fin_mask], bl_trial_c[bl_fin_mask],
+                             color=_CLR_GABL, s=6, alpha=0.60, zorder=3,
+                             linewidths=0,
+                             label=f"GA(bl) feasible ({bl_fin_mask.sum()})")
+
+        def _mark_trial(label_str, cost_val, color, marker, ms, zord, mk_label=None,
+                        src_df=None):
+            df_src = src_df if src_df is not None else df_hist
             y_val = y_top if (np.isinf(cost_val) and y_top is not None) else (
                 None if np.isinf(cost_val) else cost_val)
             if y_val is None:
                 return
-            match = df_hist[df_hist["label"] == label_str]
+            match = df_src[df_src["label"] == label_str]
             tx = int(match.index[0]) if not match.empty else 0
             ax_trail.scatter(tx, y_val, color=color, s=ms, marker=marker,
                              zorder=zord + 2, edgecolors="white", linewidths=0.8,
                              label=mk_label)
 
-        _mark_trial("LP-eval", lp_cost, _CLR_LP, "s", 60, 6,
-                    mk_label="LP (raw, hourly)")
         if first_feas_rec:
             ff_mk_lbl = ("First feasible (= LP)"
                          if ff_is_lp else "First LOADMATCH-feasible")
             _mark_trial(ff_label, ff_cost, _CLR_FF, "*", 90, 7,
                         mk_label=ff_mk_lbl)
         _mark_trial(best_label, best_cost, _CLR_BEST, "o", 60, 6,
-                    mk_label="GA (LP) optimal")
+                    mk_label="GA(LP) optimal")
 
+        # GA(bl) best marker
+        if best_rec_gabl is not None and gabl_cost is not None:
+            gabl_best_label = best_rec_gabl.get("label", "?")
+            _mark_trial(gabl_best_label, gabl_cost, _CLR_GABL, "D", 55, 6,
+                        mk_label="GA(bl) optimal", src_df=df_hist_bl)
+
+        if bl_cost is not None:
+            ax_trail.axhline(bl_cost, color=_CLR_BL, lw=1.0, ls="--",
+                             alpha=0.8, label=f"Baseline (${bl_cost:.0f}B)",
+                             zorder=2)
         ax_trail.set_xlabel("GA trial index")
         ax_trail.set_ylabel("LOADMATCH cost ($B/yr)")
-        ax_trail.set_title("B)  Feasible GA trials only", loc="left", fontweight="bold")
+        ax_trail.set_title("B)", loc="left", fontweight="bold")
         ax_trail.legend(frameon=False, fontsize=5.5, loc="upper right",
-                        markerscale=1.5)
+                        markerscale=0.8, handlelength=1.0,
+                        borderpad=0.6, labelspacing=0.7)
         ax_trail.grid(color="#EEEEEE", lw=0.4)
         ax_trail.set_axisbelow(True)
 
@@ -1292,63 +1375,309 @@ def plot_lp_feasibility_path(
                           f"trial {first_feas_trial}", fontsize=6, color=_CLR_FF,
                           va="top")
 
-        # ── Panel C: factor comparison — always 3 bars per technology ─────────
-        y   = np.arange(n_params)
-        h   = 0.21
-        off = h + 0.03
+        # ── Panel C: storage energy (TWh) ────────────────────────────────────
+        stor_bl   = np.array([
+            _bl_fval("batdisch") * _bl_fval("storhbat"),
+            _bl_fval("fcdisch")  * _bl_fval("dayh2stor") * 24,
+        ])
+        stor_gabl = np.array([
+            _fval(best_rec_gabl,  "batdisch") * _fval(best_rec_gabl,  "storhbat"),
+            _fval(best_rec_gabl,  "fcdisch")  * _fval(best_rec_gabl,  "dayh2stor") * 24,
+        ])
+        stor_lp   = np.array([
+            _fval(lp_rec,         "batdisch") * _fval(lp_rec,         "storhbat"),
+            _fval(lp_rec,         "fcdisch")  * _fval(lp_rec,         "dayh2stor") * 24,
+        ])
+        stor_ff   = np.array([
+            _fval(first_feas_rec, "batdisch") * _fval(first_feas_rec, "storhbat"),
+            _fval(first_feas_rec, "fcdisch")  * _fval(first_feas_rec, "dayh2stor") * 24,
+        ])
+        stor_best = np.array([
+            _fval(best_rec, "batdisch") * _fval(best_rec, "storhbat"),
+            _fval(best_rec, "fcdisch")  * _fval(best_rec, "dayh2stor") * 24,
+        ])
+        stor_labels = ["Battery", "Hydrogen"]
 
-        # LP (raw) — always shown, no hatch
-        ax_fac.barh(y + off, lp_arr, h, color=_CLR_LP, alpha=0.85,
-                    label="LP (raw, hourly)", edgecolor="#444", lw=0.3)
-
-        # First feasible — always shown; hatch when identical to LP
-        ff_hatch = "//" if ff_is_lp else None
-        ff_alpha = 0.50 if ff_is_lp else 0.82
-        ff_lbl   = "First feasible (= LP)" if ff_is_lp else "First LOADMATCH-feasible"
-        ax_fac.barh(y, ff_arr, h, color=_CLR_FF, alpha=ff_alpha,
-                    label=ff_lbl, edgecolor="#444", lw=0.3,
-                    hatch=ff_hatch)
-
-        # GA (LP) optimal — always shown
-        ax_fac.barh(y - off, best_arr, h, color=_CLR_BEST, alpha=0.85,
+        y_s   = np.arange(2)
+        h_s   = 0.14
+        off_s = h_s + 0.02
+        ax_twh.barh(y_s + 2*off_s, stor_bl,   h_s, color=_CLR_BL,   alpha=0.85,
+                    label="Baseline",        edgecolor="#444", lw=0.3)
+        ax_twh.barh(y_s + 1*off_s, stor_gabl, h_s, color=_CLR_GABL, alpha=0.85,
+                    label="GA (bl) optimal", edgecolor="#444", lw=0.3)
+        ax_twh.barh(y_s,           stor_lp,   h_s, color=_CLR_LP,   alpha=0.85,
+                    label="LP (raw)",        edgecolor="#444", lw=0.3)
+        ax_twh.barh(y_s - 1*off_s, stor_ff,   h_s, color=_CLR_FF,   alpha=0.82,
+                    label="First feasible",  edgecolor="#444", lw=0.3)
+        ax_twh.barh(y_s - 2*off_s, stor_best, h_s, color=_CLR_BEST, alpha=0.85,
                     label="GA (LP) optimal", edgecolor="#444", lw=0.3)
 
-        xmax_fac = max(np.concatenate([lp_arr, ff_arr, best_arr]).max(), 1.0)
-        for i, (lv, fv, bv) in enumerate(zip(lp_arr, ff_arr, best_arr)):
+        xmax_twh = max(stor_bl.max(), stor_gabl.max(), stor_lp.max(),
+                       stor_ff.max(), stor_best.max(), 1.0)
+        pad_twh  = xmax_twh * 0.012
+        for i, (blv, gblv, lv, fv, bv) in enumerate(
+                zip(stor_bl, stor_gabl, stor_lp, stor_ff, stor_best)):
+            for val, yi, clr in [
+                    (blv,  i+2*off_s, _CLR_BL),
+                    (gblv, i+1*off_s, _CLR_GABL),
+                    (lv,   i,         None),
+                    (fv,   i-1*off_s, _CLR_FF),
+                    (bv,   i-2*off_s, None)]:
+                if val > xmax_twh * 0.01:
+                    kw = dict(color=clr) if clr else {}
+                    ax_twh.text(val + pad_twh, yi, f"{val:.0f}",
+                                va="center", fontsize=5.0, **kw)
+
+        ax_twh.set_xlim(0, xmax_twh * 1.22)
+        ax_twh.set_yticks(y_s)
+        ax_twh.set_yticklabels(stor_labels, fontsize=6.5)
+        ax_twh.set_xlabel("Storage energy (TWh)")
+        ax_twh.legend(frameon=False, fontsize=6, loc="lower right")
+        ax_twh.grid(axis="x", color="#EEEEEE", lw=0.4)
+        ax_twh.set_axisbelow(True)
+        ax_twh.set_title("C)", loc="left", fontweight="bold")
+
+        # ── Panel D: generation & power capacities ────────────────────────────
+        y   = np.arange(n_params)
+        h   = 0.14
+        off = h + 0.02
+
+        ax_fac.barh(y + 2*off, bl_arr,   h, color=_CLR_BL,   alpha=0.85,
+                    label="Baseline",        edgecolor="#444", lw=0.3)
+        ax_fac.barh(y + 1*off, gabl_arr, h, color=_CLR_GABL, alpha=0.85,
+                    label="GA (bl) optimal", edgecolor="#444", lw=0.3)
+        ax_fac.barh(y,         lp_arr,   h, color=_CLR_LP,   alpha=0.85,
+                    label="LP (raw)",        edgecolor="#444", lw=0.3)
+        ax_fac.barh(y - 1*off, ff_arr,   h, color=_CLR_FF,   alpha=0.82,
+                    label="First feasible",  edgecolor="#444", lw=0.3)
+        ax_fac.barh(y - 2*off, best_arr, h, color=_CLR_BEST, alpha=0.85,
+                    label="GA (LP) optimal", edgecolor="#444", lw=0.3)
+
+        xmax_fac = max(np.concatenate([bl_arr, gabl_arr, lp_arr, ff_arr, best_arr]).max(), 1.0)
+        for i, (blv, gblv, lv, fv, bv) in enumerate(
+                zip(bl_arr, gabl_arr, lp_arr, ff_arr, best_arr)):
             pad = xmax_fac * 0.012
-            if lv > xmax_fac * 0.01:
-                ax_fac.text(lv + pad, i + off, f"{lv:.0f}",
-                            va="center", fontsize=5.0)
-            if fv > xmax_fac * 0.01:
-                ax_fac.text(fv + pad, i, f"{fv:.0f}",
-                            va="center", fontsize=5.0, color=_CLR_FF)
-            if bv > xmax_fac * 0.01:
-                ax_fac.text(bv + pad, i - off, f"{bv:.0f}",
-                            va="center", fontsize=5.0)
+            for val, yi, clr in [
+                    (blv,  i+2*off, _CLR_BL),
+                    (gblv, i+1*off, _CLR_GABL),
+                    (lv,   i,       None),
+                    (fv,   i-1*off, _CLR_FF),
+                    (bv,   i-2*off, None)]:
+                if val > xmax_fac * 0.01:
+                    kw = dict(color=clr) if clr else {}
+                    ax_fac.text(val + pad, yi, f"{val:.0f}",
+                                va="center", fontsize=5.0, **kw)
 
         ax_fac.set_xlim(0, xmax_fac * 1.22)
         ax_fac.set_yticks(y)
         ax_fac.set_yticklabels(param_labels, fontsize=6.5)
-        ax_fac.set_xlabel("Capacity / duration (GW or h or d)")
-        ax_fac.legend(frameon=False, fontsize=6, loc="lower right")
+        ax_fac.set_xlabel("Capacity (GW)")
         ax_fac.grid(axis="x", color="#EEEEEE", lw=0.4)
         ax_fac.set_axisbelow(True)
-        ax_fac.set_title("C)", loc="left", fontweight="bold")
+        ax_fac.set_title("D)", loc="left", fontweight="bold")
 
-        n_inf  = int((~trial_f).sum())
-        n_feas = int(trial_f.sum())
-        lp_note = "LP feasible in LOADMATCH" if lp_feasible else "LP infeasible in LOADMATCH (30-s resolution gap)"
-        fig.suptitle(
-            f"{region}  —  LP / first LOADMATCH-feasible / GA(LP) optimal\n"
-            f"{lp_note}  |  {n_feas} of {n_trials} GA trials feasible",
-            fontsize=8.5, fontweight="bold", x=0.02, ha="left",
-        )
         slug = region.lower().replace("-", "_")
         _save(fig, out / f"fig11_lp_feasibility_path_{slug}")
 
 
 def feas_empty(df):
     return df[df["feasible"] == True].empty
+
+
+# ── Figure 12: Capacity boxplots — all regions, normalised to baseline ────────
+
+def plot_capacity_boxplots(
+    lp_dir: Path,
+    results_dir: Path,
+    out: Path,
+    df: pd.DataFrame | None = None,
+) -> None:
+    """Grouped boxplots of capacity values relative to each region's baseline.
+
+    One group per capacity parameter; within each group: LP (raw), First
+    LOADMATCH-feasible, GA(bl) optimal, GA(LP) optimal.  Each boxplot shows
+    the spread across all available regions.
+    Saved as fig12_capacity_boxplots.pdf/png.
+    """
+    if df is None:
+        print("  [skip fig12] No results CSV loaded.")
+        return
+
+    _CLR_FF = "#D55E00"   # vermillion — first LOADMATCH-feasible
+
+    # 4 cases left → right: GA(bl), LP (raw), First feasible, GA(LP)
+    # GA(bl) / LP / GA(LP) come from the CSV (all 29 regions).
+    # First-feasible comes from lp_ga_factor_history.log (regions with log only).
+    CASE_LABELS = ["GA (bl)\noptimal", "LP\n(raw)", "First\nfeasible", "GA (LP)\noptimal"]
+    CASE_COLORS = [C["GA (bl)"], C["LP"], _CLR_FF, C["GA (LP)"]]
+    N_CASES = len(CASE_LABELS)
+
+    # Compute derived TWh columns (product of two factor cols) for every row.
+    dfw = df.copy()
+    dfw["BAT_TWH"] = dfw["BATDISCH"] * dfw["STORHBAT"]
+    dfw["H2_TWH"]  = dfw["FCDISCH"]  * dfw["DAYH2STOR"]
+
+    # Parameter specs: (csv_col, x_label)
+    GEN_SPECS  = [
+        ("FACONWIN",  "Onshore\nwind"),
+        ("FACOFFWIN", "Offshore\nwind"),
+        ("FACUTILPV", "Utility\nPV"),
+        ("FACRESPV",  "Res. PV"),
+        ("CSPTURBFAC","CSP"),
+    ]
+    STOR_SPECS = [
+        ("BATDISCH",  "Battery\npower"),
+        ("FCDISCH",   "Fuel Cell"),
+        ("FCCHARG",   "Electrolyser"),
+        ("BAT_TWH",   "Battery\n(TWh)"),
+        ("H2_TWH",    "Hydrogen\n(TWh)"),
+    ]
+    ALL_SPECS = GEN_SPECS + STOR_SPECS
+    N_GEN  = len(GEN_SPECS)
+
+    # ── Collect ratios ─────────────────────────────────────────────────────────
+    # ratios[param_idx][case_idx] = list of per-region ratio values
+    ratios = [[[] for _ in range(N_CASES)] for _ in range(len(ALL_SPECS))]
+
+    bl_df = dfw[dfw["case"] == "Baseline"].set_index("region")
+
+    # CSV-sourced cases: ci=0 GA(bl), ci=1 LP, ci=3 GA(LP)
+    for ci, csv_case in [(0, "GA (bl)"), (1, "LP"), (3, "GA (LP)")]:
+        case_df = dfw[dfw["case"] == csv_case].set_index("region")
+        for region in case_df.index:
+            if region not in bl_df.index:
+                continue
+            for pi, (col, _) in enumerate(ALL_SPECS):
+                try:
+                    bl_val   = float(bl_df.loc[region, col])
+                    case_val = float(case_df.loc[region, col])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if bl_val > 0 and case_val > 0 and not np.isnan(bl_val) and not np.isnan(case_val):
+                    ratios[pi][ci].append(case_val / bl_val)
+
+    # Log-file-sourced first-feasible (ci=2) — only regions that have the log
+    def _rv(rec, key):
+        if rec is None:
+            return 0.0
+        v = rec.get(key, rec.get(key.upper(), 0.0))
+        if v is None:
+            return 0.0
+        try:
+            f = float(v)
+            return 0.0 if (f != f) else f
+        except (ValueError, TypeError):
+            return 0.0
+
+    # factor-key mapping for log records (lowercase keys in log files)
+    FF_KEYS = {
+        "FACONWIN":  lambda r: _rv(r, "faconwin"),
+        "FACOFFWIN": lambda r: _rv(r, "facoffwin"),
+        "FACUTILPV": lambda r: _rv(r, "facutilpv"),
+        "FACRESPV":  lambda r: _rv(r, "facrespv"),
+        "CSPTURBFAC":lambda r: _rv(r, "cspturbfac"),
+        "BATDISCH":  lambda r: _rv(r, "batdisch"),
+        "FCDISCH":   lambda r: _rv(r, "fcdisch"),
+        "FCCHARG":   lambda r: _rv(r, "fccharg"),
+        "BAT_TWH":   lambda r: _rv(r, "batdisch") * _rv(r, "storhbat"),
+        "H2_TWH":    lambda r: _rv(r, "fcdisch")  * _rv(r, "dayh2stor"),
+    }
+
+    for region in dfw["region"].unique():
+        if region not in bl_df.index:
+            continue
+        _, _, ff_rec, _ = _load_lp_history(results_dir, region)
+        if ff_rec is None:
+            continue
+        for pi, (col, _) in enumerate(ALL_SPECS):
+            try:
+                bl_val = float(bl_df.loc[region, col])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if bl_val <= 0 or np.isnan(bl_val):
+                continue
+            ff_val = FF_KEYS[col](ff_rec)
+            if ff_val > 0:
+                ratios[pi][2].append(ff_val / bl_val)
+
+    # ── Shared box geometry ────────────────────────────────────────────────────
+    BOX_W   = 0.60
+    PITCH   = BOX_W + 0.25   # centre-to-centre within a group
+    GROUP_W = N_CASES * PITCH + 1.20   # group span incl. gutter
+
+    def _draw_panel(ax, specs, ratio_offset, yscale="linear"):
+        """Draw one row of grouped boxplots onto ax."""
+        rng = np.random.RandomState(42)
+        n   = len(specs)
+        for pi in range(n):
+            x_group = pi * GROUP_W
+            for ci in range(N_CASES):
+                x_pos = x_group + ci * PITCH
+                data  = ratios[ratio_offset + pi][ci]
+                if not data:
+                    continue
+                ax.boxplot(
+                    data, positions=[x_pos], widths=BOX_W,
+                    patch_artist=True,
+                    medianprops=dict(color="white", lw=1.8, solid_capstyle="round"),
+                    boxprops=dict(facecolor=CASE_COLORS[ci], alpha=0.72,
+                                  edgecolor=CASE_COLORS[ci]),
+                    whiskerprops=dict(color=CASE_COLORS[ci], lw=0.9),
+                    capprops=dict(color=CASE_COLORS[ci], lw=0.9),
+                    flierprops=dict(marker="o", markersize=3.5,
+                                    markerfacecolor=CASE_COLORS[ci],
+                                    markeredgewidth=0, alpha=0.55),
+                    showfliers=True,
+                )
+                jitter = rng.uniform(-0.14, 0.14, len(data))
+                ax.scatter(np.array([x_pos] * len(data)) + jitter, data,
+                           color=CASE_COLORS[ci], s=14, alpha=0.70,
+                           zorder=5, linewidths=0)
+
+        centres = [pi * GROUP_W + (N_CASES - 1) * PITCH / 2 for pi in range(n)]
+        ax.set_xticks(centres)
+        ax.set_xticklabels([s[1] for s in specs], fontsize=7)
+        ax.set_xlim(-0.7, (n - 1) * GROUP_W + (N_CASES - 1) * PITCH + 0.7)
+        ax.axhline(1.0, color="#888888", lw=0.9, ls="--", zorder=1)
+        ax.set_ylabel("Ratio to baseline")
+        ax.grid(axis="y", color="#EEEEEE", lw=0.4, zorder=0)
+        ax.set_axisbelow(True)
+
+    # ── Figure: two rows — double-column journal size ─────────────────────────
+    fig, (ax_gen, ax_stor) = plt.subplots(
+        2, 1, figsize=(7.0, 5.25), layout="constrained"
+    )
+
+    _draw_panel(ax_gen,  GEN_SPECS,  ratio_offset=0,     yscale="log")
+    _draw_panel(ax_stor, STOR_SPECS, ratio_offset=N_GEN, yscale="log")
+
+    for ax, panel_letter, subtitle, ylo in [
+        (ax_gen,  "A", "Generation capacities",       0.05),
+        (ax_stor, "B", "Storage & power capacities",  0.1),
+    ]:
+        ax.set_yscale("log")
+        ax.set_ylim(bottom=ylo)
+        ax.yaxis.set_major_locator(mticker.LogLocator(base=10, numticks=8))
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(
+            lambda v, _: (f"{v:.0f}" if v >= 1 else f"{v:.1f}") if v > 0 else ""
+        ))
+        ax.yaxis.set_minor_locator(
+            mticker.LogLocator(base=10, subs=np.arange(2, 10), numticks=50))
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+        ax.set_title(f"{panel_letter})  {subtitle}", loc="left", fontweight="bold")
+
+    legend_handles = [
+        mpl.patches.Patch(facecolor=CASE_COLORS[ci], alpha=0.72,
+                          edgecolor=CASE_COLORS[ci], label=CASE_LABELS[ci])
+        for ci in range(N_CASES)
+    ] + [mpl.lines.Line2D([0], [0], color="#888888", lw=1.0, ls="--",
+                           label="Baseline")]
+    ax_gen.legend(handles=legend_handles, frameon=False, fontsize=7,
+                  ncol=N_CASES + 1, loc="upper left",
+                  handlelength=1.2, handletextpad=0.4, columnspacing=1.0,
+                  bbox_to_anchor=(0.0, 1.0))
+
+    _save(fig, out / "fig12_capacity_boxplots")
 
 
 # ── Figure 9: LP storage deep-dive — December storage state ──────────────────
@@ -1696,7 +2025,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args   = parse_args()
-    df     = load(args.input)
+    df     = load(args.input)                          # feasible-only (all existing figures)
+    df_all = load(args.input, feasible_only=False)     # all rows incl. LP-infeasible (fig12)
     hl     = args.highlight if args.highlight is not None else [args.exemplar]
 
     print(
@@ -1724,8 +2054,11 @@ def main() -> None:
     for r in args.lp_regions:
         plot_lp_feasibility_path(
             [r], args.lp_dir, args.results_dir, args.output,
-            countrystats=args.countrystats,
+            df=df, countrystats=args.countrystats,
         )
+    plot_capacity_boxplots(
+        args.lp_dir, args.results_dir, args.output, df=df_all,
+    )
     print("Done.")
 
 

@@ -5,15 +5,14 @@ developed by the Jacobson Lab at Stanford University.  The workflow optimises
 the ~30 tunable parameters of the LoadMatch Fortran model using a **Genetic
 Algorithm (GA)**, searching for the lowest-cost 100% clean-energy system layout
 for any of the supported world regions.  Results are compared against the
-published Jacobson-group baseline and visualised as a full set of
-publication-quality figures.
+Jacobson-group baseline and summarised in a set of figures.
 
 ---
 
 ## What this repository does
 
-1. **Parses the canonical Jacobson-group baseline** (`xxEGS.<REGION>`) and
-   stores a structured JSON summary of every energy metric.
+1. **Parses the Jacobson-group baseline** (`xxEGS.<REGION>`) and stores a
+   structured JSON summary of every energy metric.
 
 2. **Extracts region-specific Fortran defaults** directly from `powerworld.f`
    (branch-aware: respects the hardcoded `IMERGH2` and `IFEGS` control
@@ -62,7 +61,7 @@ loadmatch-python/
 │   ├── run_full_workflow.py           # GA + Fortran driver (--no-plots / --preprocess-only / --run-lp-only)
 │   ├── check_inputs.py                # Validate required data files (called by Snakemake)
 │   ├── parse_fortran_output.py        # Parse Fortran stdout → structured JSON
-│   ├── plot_results.py                # All publication figures (--all-regions flag)
+│   ├── plot_results.py                # All figures (--all-regions flag)
 │   ├── run_python_model.py            # Standalone Pyomo LP (optional)
 │   ├── export_fortran_factors.py      # Convert LP results → fortran_factors.dat
 │   ├── factor_history_tools.py        # Parse/plot optimisation history
@@ -79,7 +78,7 @@ loadmatch-python/
 │   │   ├── heatcooldd.dat
 │   │   ├── heatfrac.dat
 │   │   ├── wwssupworld.<REGION>       # Hourly supply profiles (~470 MB each)
-│   │   └── xxEGS.<REGION>            # Jacobson-group canonical baseline output
+│   │   └── xxEGS.<REGION>            # Jacobson-group Fortran output used as baseline reference
 │   ├── results_python/<REGION>/       # LP outputs (optional)
 │   ├── results_verification/<REGION>/ # Fortran logs, factor history, summaries
 │   └── results_verification/          # Cross-region overview figures (figA1–A3)
@@ -131,7 +130,7 @@ to be the repository root when invoked.
 | `heatcooldd.dat` | Heating/cooling degree days |
 | `heatfrac.dat` | Monthly heat/cold fractions |
 | `wwssupworld.<REGION>` | Hourly wind/solar supply profiles per region (~470 MB each) |
-| `xxEGS.<REGION>` | Jacobson-group published Fortran output (canonical baseline) |
+| `xxEGS.<REGION>` | Jacobson-group Fortran output used as baseline reference |
 
 > **Supply file preprocessing:** The first time a region is run, Fortran
 > auto-generates `wwsmonthly.<REGION>` from `wwssupworld.<REGION>` (IFREWRITE=3).
@@ -308,11 +307,11 @@ python -m scripts.run_full_workflow \
 5. Runs the GA for the specified number of generations, evaluating `--parallel-evals`
    candidates simultaneously using `ProcessPoolExecutor`
 6. Re-runs Fortran with the best-found factors → `fortran_optimal_run.out` + `optimal_summary.json`
-7. Generates all publication figures and saves them to `data/results_verification/<REGION>/`
+7. Generates figures and saves them to `data/results_verification/<REGION>/`
 8. Generates cross-region overview figures in `data/results_verification/`
    (including any other regions that have already completed)
 
-### Recommended settings for Sherlock (24 CPUs)
+### Settings for Sherlock (24 CPUs)
 
 ```bash
 python -m scripts.run_full_workflow \
@@ -334,7 +333,7 @@ All results land in `data/results_verification/<REGION>/`:
 
 | File | Contents |
 |------|----------|
-| `canonical_baseline_summary.json` | Parsed Jacobson-group baseline (~50 metrics) |
+| `baseline_reference_summary.json` | Parsed Jacobson-group baseline (~50 metrics) |
 | `baseline_summary.json` | Fortran run with region default factors |
 | `optimal_summary.json` | Fortran run with GA-optimal factors |
 | `genetic_factors.dat` | Best-found factor values (KEY = VALUE format) |
@@ -342,7 +341,7 @@ All results land in `data/results_verification/<REGION>/`:
 | `fortran_baseline_run.out` | Full Fortran stdout for the baseline run |
 | `fortran_optimal_run.out` | Full Fortran stdout for the optimal run |
 | `fortran_stdout.log`, `fortran_stderr.log` | Latest Fortran console output |
-| `fig*.pdf` / `fig*.png` | Publication figures |
+| `fig*.pdf` / `fig*.png` | Figures |
 
 Cross-region overview figures are saved to `data/results_verification/`:
 
@@ -485,8 +484,8 @@ Chosen for geographic diversity and resource contrast:
 | 2 | `EUROPE` | Policy-critical; high offshore wind |
 | 3 | `CHINA` | Largest emitter; rapid buildout |
 | 4 | `INDIA` | Fast-growing demand; high solar |
-| 5 | `JAPAN` | Island; resource-constrained |
-| 6 | `AUSTRALIA` | World-leading solar/wind resource |
+| 5 | `JAPAN` | Island; limited domestic resource base |
+| 6 | `AUSTRALIA` | High solar and wind resource |
 | 7 | `AFRICA-EAST` | Geothermal-rich; developing |
 | 8 | `SOUTHEAST-ASIA` | Tropical; biomass + solar |
 | 9 | `RUSSIA` | Cold climate; fossil-heavy baseline |
@@ -592,7 +591,7 @@ Each region requires `data/raw/wwssupworld.<REGION>` and optionally
 
 ## Figures generated
 
-All figures are saved as both `.pdf` and `.png` using SKILL.md publication defaults
+All figures are saved as both `.pdf` and `.png`
 (8 pt Helvetica/Arial, Okabe-Ito CVD-safe palette, no top/right spines, 300 dpi).
 
 Per-region figures (fig1–fig15) are generated by the `plot_region` and

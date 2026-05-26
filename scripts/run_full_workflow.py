@@ -67,6 +67,7 @@ def _region_paths(region: str):
         fortran_lp_out=results_dir / "fortran_lp_run.out",
         fortran_lp_ga_out=results_dir / "fortran_lp_ga_run.out",
         lp_ga_history_file=results_dir / "lp_ga_factor_history.log",
+        first_feasible_summary=results_dir / "first_feasible_summary.json",
     )
 
 
@@ -776,9 +777,9 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     for attempt in range(1, max_attempts + 1):
         candidate, changed = raise_subunity_factors(candidate, step)
         label = "inflate-subunity{}".format(attempt)
-        feasible, cost, _ = evaluate_factors(candidate, label=label, region=region, paths=paths)
+        feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
-            return candidate, cost
+            return candidate, cost, stdout
         if not changed:
             break
 
@@ -788,9 +789,9 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     for attempt in range(1, max_attempts + 1):
         candidate = inflate_factors(candidate, step)
         label = "inflate-step{}".format(attempt)
-        feasible, cost, _ = evaluate_factors(candidate, label=label, region=region, paths=paths)
+        feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
-            return candidate, cost
+            return candidate, cost, stdout
         step *= growth
 
     raise RuntimeError("Unable to inflate factors to achieve feasibility.")
@@ -1275,7 +1276,7 @@ def run_workflow(
         candidate, cost = base_factors.copy(), initial_cost
     else:
         print("Starting point infeasible; inflating capacity factors.")
-        candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths)
+        candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths)
 
     print(
         "{} starting from feasible point (cost {:.3f}).".format(
@@ -1422,9 +1423,20 @@ def run_ga_from_lp_workflow(
 
     if lp_feasible:
         candidate, cost = base_factors.copy(), lp_cost
+        # LP itself is the first feasible point — copy its summary
+        import shutil as _shutil
+        _shutil.copy2(paths["lp_eval_summary"], paths["first_feasible_summary"])
     else:
         print("  LP solution infeasible in Fortran — inflating capacity factors...")
-        candidate, cost = inflate_until_feasible(base_factors, region=region, paths=paths_ga)
+        candidate, cost, ff_stdout = inflate_until_feasible(
+            base_factors, region=region, paths=paths_ga)
+        _parse_and_save(
+            ff_stdout,
+            factors=candidate,
+            region=region,
+            run_type="first_feasible",
+            out_path=paths["first_feasible_summary"],
+        )
 
     # 3. GA from LP warm-start
     print(f"Running GA from LP warm-start (population={ga_population}, "
