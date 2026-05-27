@@ -169,6 +169,9 @@ def load(path: Path, feasible_only: bool = True) -> pd.DataFrame:
         "Annual cost ($B/yr)/Cost LO ($B/yr)": "cost_lo",
         "Annual cost ($B/yr)/Cost MN ($B/yr)": "cost_mn",
         "Annual cost ($B/yr)/Cost HI ($B/yr)": "cost_hi",
+        # Capital cost from the LP solver (T$/yr); only populated for LP rows.
+        # For infeasible LP regions this is the only cost available.
+        "Annual cost ($B/yr)/Capital ($T/yr, MN)": "capital_mn_tusd",
     })
     df = df.rename(columns={
         c: c.replace("Optimised factors/", "") for c in df.columns
@@ -219,9 +222,12 @@ def plot_overview(df: pd.DataFrame, df_all: pd.DataFrame, out: Path) -> None:
     lo_n = lo.div(bl, axis=0)
     hi_n = hi.div(bl, axis=0)
 
-    # LP costs read directly from df_all — captures infeasible rows the pivot skips
+    # LP costs read directly from df_all — captures infeasible rows the pivot skips.
+    # For infeasible LP regions, cost_mn is null; fall back to the LP solver's own
+    # capital-cost objective (capital_mn_tusd × 1000 converts T$/yr → B$/yr).
     bl_cost_sr = df_all[df_all["case"] == "Baseline"].set_index("region")["cost_mn"]
-    lp_cost_sr = df_all[df_all["case"] == "LP"].set_index("region")["cost_mn"]
+    lp_df      = df_all[df_all["case"] == "LP"].set_index("region")
+    lp_cost_sr = lp_df["cost_mn"].fillna(lp_df["capital_mn_tusd"] * 1000)
     lp_infeas  = set(
         df_all.loc[(df_all["case"] == "LP") & (~df_all["feasible"]), "region"]
     )
@@ -235,10 +241,6 @@ def plot_overview(df: pd.DataFrame, df_all: pd.DataFrame, out: Path) -> None:
     lp_norm = np.array([
         lp_cost_sr.get(r, np.nan) / bl_cost_sr.get(r, np.nan) for r in order
     ])
-    n_valid = int(np.isfinite([lp_norm[i] for i, r in enumerate(order)
-                                if r in lp_infeas]).sum()) if lp_infeas else 0
-    print(f"  [fig1] infeasible LP: {len(lp_infeas)} regions, "
-          f"{n_valid} with valid cost_mn")
 
     fig, ax = plt.subplots(figsize=(3.5, max(2.625, n * 0.27)))
 
@@ -295,7 +297,7 @@ def plot_overview(df: pd.DataFrame, df_all: pd.DataFrame, out: Path) -> None:
             if np.isfinite(v) and v > xlim_right:
                 ax.scatter(xlim_right, i, marker=">", color=C[case],
                            s=22, zorder=6, clip_on=False)
-                tag = " (inf.)" if (case == "LP" and region in lp_infeas) else ""
+                tag = " (CAPEX only, infeas.)" if (case == "LP" and region in lp_infeas) else ""
                 ax.text(xlim_right - 0.01, i + 0.42,
                         f"{LBL[case]}{tag}: {v:.2f}×",
                         ha="right", va="bottom", fontsize=6.0, color=C[case])
@@ -304,7 +306,7 @@ def plot_overview(df: pd.DataFrame, df_all: pd.DataFrame, out: Path) -> None:
         mpl.lines.Line2D([], [], color=C["LP"], marker=MK["LP"], linestyle="",
                          markersize=5, markerfacecolor="none",
                          markeredgecolor=C["LP"], markeredgewidth=0.9,
-                         label="LP (infeasible)"),
+                         label="LP (LOADMATCH-infeasible; CAPEX only)"),
     ]
     ax.legend(handles=legend_handles,
               loc="upper center", bbox_to_anchor=(0.5, -0.06),
