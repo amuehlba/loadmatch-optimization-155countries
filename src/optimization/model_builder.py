@@ -37,7 +37,7 @@ Fixed physical constants
   PHSMIN  = 0.016 TW   minimum PHS power
   HEAT_COP = 4.0  CPERFORM
   COLD_COP = 3.0
-  H2_EFF   = 0.60  round-trip H2 efficiency (electrolyser × fuel-cell)
+  H2_EFF   ≈ 0.447 round-trip H2 efficiency (H2CHAREFF × H2DCEFF from powerworld.f)
 """
 
 from typing import Dict, List, Tuple
@@ -51,43 +51,105 @@ HWFAC    = 1.0         # hot-water STES charge rate factor (fixed)
 PHSMIN   = 0.016       # TW — minimum PHS nameplate power (fixed)
 HEAT_COP = 4.0         # CPERFORM (fixed)
 COLD_COP = 3.0         # cold COP (fixed)
-H2_RT_EFF = 0.60       # H2 round-trip efficiency (electrolyser → fuel cell)
-BAT_EFF   = 0.95       # battery one-way efficiency
-HRSPDAY   = 24.0
-DAYSPY    = 365.0
+HRSPDAY  = 24.0
+DAYSPY   = 365.0
 
-# ── Cost proxies ($/MW-year) for LP objective ───────────────────────────────
-# Relative magnitudes matter; absolute values do not affect the GA warm-start.
-_CRF = 0.05 * (1.05**25) / ((1.05**25) - 1)   # capital recovery factor (5%, 25 yr)
+# H2 efficiencies — from powerworld.f
+H2_CHAREFF = 0.8338    # electrolyser charge efficiency (H2CHAREFF)
+H2_DCEFF   = 0.5362    # fuel-cell discharge efficiency (H2DCEFF = 0.65 × 0.846 × 0.975)
+H2_RT_EFF  = H2_CHAREFF * H2_DCEFF   # ≈ 0.447 round-trip
 
-def _capex(usd_per_mw):
-    return usd_per_mw * _CRF
+# Storage one-way efficiencies = sqrt(round-trip) — from powerworld.f
+BAT_EFF    = 0.895 ** 0.5   # EFFBAT=0.895 RT   → ≈ 0.9461
+PHS_EFF    = 0.80  ** 0.5   # EFFPHS=0.80  RT   → ≈ 0.8944
+HWSTES_EFF = 0.83  ** 0.5   # EFFHSTES=0.83 RT  → ≈ 0.9110
+HBAT_EFF   = 0.98  ** 0.5   # EFFHTBAT=0.98 RT  → ≈ 0.9899
+UTES_EFF   = 0.56  ** 0.5   # EFFUTES=0.56  RT  → ≈ 0.7483
+COLD_EFF   = 0.88  ** 0.5   # EFFCSTES=0.88 RT  → ≈ 0.9381
 
-GEN_COST = {   # $/MW installed → annualised
-    "onshore_wind":  _capex(1_350_000),
-    "offshore_wind": _capex(3_800_000),
-    "res_pv":        _capex(  900_000),
-    "com_pv":        _capex(  900_000),
-    "utility_pv":    _capex(1_100_000),
-    "csp":           _capex(4_500_000),
-    "solar_thermal": _capex(  800_000),
+# ── Fortran-aligned techno-economic costs ───────────────────────────────────
+# Discount rate: DISCOUNTM = 2% (mean social rate, powerworld.f lines ~150-200)
+# Generator lifetimes: YEARLIFEM = (YEARLIFEL + YEARLIFEH) / 2
+# Storage lifetimes:   STORLIFEM = (25 + 40) / 2 = 32.5 yr (most storage)
+_D       = 0.02    # DISCOUNTM
+_STOR_OM = 0.015   # OPMAINTM: storage O&M = 1.5%/yr of upfront capital
+
+def _crf(n: float) -> float:
+    """Capital recovery factor at DISCOUNTM=2% for n-year lifetime."""
+    return _D * (1 + _D)**n / ((1 + _D)**n - 1)
+
+# Generator annualized costs [$/MW/yr]:
+#   capex × CRF(2%, life) × (1 + decom_frac) + om_$/KW/yr × 1000
+# capex: mean(CAP2022LO + CAP2022HI + CAP2050LO + CAP2050HI) / 4 × 1e6 $/MW
+# om:    OPMANTM ($/KW/yr) × 1000 → $/MW/yr
+# decom: DECOMCOSTM ≈ 0.02 (2% of capital, approximate mean across technologies)
+_DECOM = 0.02
+
+_GEN = {   # (capex_$/MW, lifetime_yr, om_$/MW/yr)
+    "onshore_wind":  (1_010_000, 30, 37_500),   # (1.025+1.45+0.648+0.917)/4 M$/MW; 37.5 $/KW/yr
+    "offshore_wind": (2_336_000, 30, 80_000),   # (2.50+4.00+1.236+1.609)/4 M$/MW; 80.0 $/KW/yr
+    "res_pv":        (1_837_000, 30, 27_500),   # (2.23+2.825+0.897+1.396)/4 M$/MW; 27.5 $/KW/yr
+    "com_pv":        (1_266_000, 30, 16_500),   # (1.20+2.16+0.538+1.167)/4 M$/MW; 16.5 $/KW/yr
+    "utility_pv":    (  710_000, 30, 19_500),   # (0.775+1.060+0.383+0.621)/4 M$/MW; 19.5 $/KW/yr
+    "csp":           (5_326_000, 30, 50_000),   # (6.00+9.09+2.138+4.075)/4 M$/MW; 50.0 $/KW/yr
+    "solar_thermal": (1_177_000, 35, 50_000),   # (1.30+1.50+0.822+1.086)/4 M$/MW; 50.0 $/KW/yr
+}
+GEN_COST = {   # $/MW/yr
+    k: cap * _crf(life) * (1 + _DECOM) + om
+    for k, (cap, life, om) in _GEN.items()
 }
 
-STOR_COST_POWER  = {   # $/MW power
-    "battery":    _capex(  300_000),
-    "h2_fc":      _capex(  800_000),
-    "h2_chg":     _capex(  500_000),
-    "heat_bat":   _capex(  200_000),
+# H2 power-equipment installed costs and O&M — from powerworld.f
+# Electrolyser + rectifier: (334.5+93.5) $/KW × 1.25 install = 535 $/KW = 535,000 $/MW
+# O&M: electrolyser 7.8%/yr, rectifier 1%/yr of respective installed costs
+_h2_el_mw   = (334.5 + 93.5) * 1.25 * 1_000                         # $/MW installed
+_h2_el_om   = (334.5 * 1.25 * 0.078 + 93.5 * 1.25 * 0.010) * 1_000 # $/MW/yr O&M
+# Compressor: 39.3 $/KW × 1.87 install = 73.5 $/KW = 73,500 $/MW; O&M 4%/yr
+_h2_comp_mw = 39.3 * 1.87 * 1_000
+_h2_comp_om = _h2_comp_mw * 0.04
+# Fuel cell: 500 $/KW × 1.33 install = 665 $/KW = 665,000 $/MW; O&M 3.5%/yr
+_h2_fc_mw   = 500.0 * 1.33 * 1_000
+_h2_fc_om   = _h2_fc_mw * 0.035
+_H2_LIFE    = 30   # H2 power equipment lifetime [yr]
+
+STOR_COST_POWER = {   # $/MW/yr (annualised power-equipment capital + O&M)
+    "battery":  0.0,   # battery priced per energy only in powerworld.f (COSTSTORM $/KWh)
+    "h2_chg":  (_h2_el_mw + _h2_comp_mw) * _crf(_H2_LIFE) + _h2_el_om + _h2_comp_om,
+    "h2_fc":   _h2_fc_mw * _crf(_H2_LIFE) + _h2_fc_om,
+    "heat_bat": 0.0,   # heat battery priced per energy only in powerworld.f
 }
-STOR_COST_ENERGY = {   # $/MWh energy
-    "battery":    _capex(  150_000),
-    "phs":        _capex(   20_000),
-    "cold_tes":   _capex(   30_000),
-    "hw_stes":    _capex(   15_000),
-    "h2":         _capex(    8_000),
-    "heat_bat":   _capex(   50_000),
-    "utes":       _capex(    5_000),
+
+# Storage energy costs [$/MWh/yr] = COSTSTORM ($/KWh × 1000) × (CRF + OPMAINTM)
+# COSTSTORM from powerworld.f (upfront lifecycle capital, electrical-equivalent):
+#   PHS=14 $/KWh-elec; cold-TES=3 $/KWh-th (COP=1 for cold charging);
+#   HW-STES=12 $/KWh-elec (= 3 $/KWh-th × CPERFORM=4);
+#   battery=60 $/KWh-elec; firebrick=6 $/KWh-th;
+#   UTES=1.6 $/KWh-elec (= 0.4 $/KWh-th × CPERFORM=4)
+# H2 tank: COSTH2TKM=250 $/kg ÷ 33.3 kWh/kg = 7508 $/MWh-H2-HHV;
+#   converted to LP elec-equiv by ÷ H2DCEFF; O&M=1%/yr; lifetime 15 yr mean
+_STOR_LIFE = 32.5   # STORLIFEM = (25+40)/2 yr  (PHS, HW-STES, cold-TES, UTES)
+_BAT_LIFE  = 17.0   # STORLIFBM = (12+22)/2 yr  (Li-ion battery)
+_HBAT_LIFE = 40.0   # STORLIFHBM (firebrick heat battery)
+_H2TK_LIFE = 15.0   # H2 tank mean lifetime [yr]
+
+STOR_COST_ENERGY = {   # $/MWh/yr
+    "battery":  60_000 * (_crf(_BAT_LIFE)  + _STOR_OM),
+    "phs":      14_000 * (_crf(_STOR_LIFE) + _STOR_OM),
+    "cold_tes":  3_000 * (_crf(_STOR_LIFE) + _STOR_OM),
+    "hw_stes":  12_000 * (_crf(_STOR_LIFE) + _STOR_OM),
+    "h2":   (250.0 / 0.0333 / H2_DCEFF) * (_crf(_H2TK_LIFE) + 0.01),
+    "heat_bat":  6_000 * (_crf(_HBAT_LIFE) + _STOR_OM),
+    "utes":      1_600 * (_crf(_STOR_LIFE) + _STOR_OM),
 }
+
+# CSP PCM (phase-change salt) storage cost — from COSTSTORM(IPCMCSP) in powerworld.f
+# Fortran accounts for PCM material separately from the turbine+mirror capital (AVCAPMN).
+# PCM cost = 20 $/KWh-elec × storage_energy_MWh/MW × (CRF + OPMAINTM)
+# Storage energy per MW turbine = HCHARCSP (14 h) × CSPSTORGAT (2.61244594) ≈ 36.57 MWh/MW
+# Both HCHARCSP and CSPSTORGAT are fixed — CSP PCM cost is proportional to turbine MW.
+_CSP_PCM_KWH     = 20_000.0             # $/MWh-elec (COSTSTORM[IPCMCSP])
+_CSP_STOR_PER_MW = 14.0 * 2.61244594   # MWh stored per MW turbine (HCHARCSP × CSPSTORGAT)
+CSP_PCM_PER_MW   = _CSP_PCM_KWH * _CSP_STOR_PER_MW * (_crf(_STOR_LIFE) + _STOR_OM)  # $/MW/yr
 
 LOAD_SHED_PENALTY = 5_000_000   # $/MWh — unmet demand
 CURTAIL_PENALTY   =         1   # $/MWh — excess generation (small, allow curtailment)
@@ -342,7 +404,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
 
     def _phs_soc(m_, t):
         prev = m_.soc_phs[t - 1] if t > 0 else m_.soc_phs[n - 1]
-        return m_.soc_phs[t] == prev + 0.90 * m_.chg_phs[t] - m_.dis_phs[t] / 0.90
+        return m_.soc_phs[t] == prev + PHS_EFF * m_.chg_phs[t] - m_.dis_phs[t] / PHS_EFF
     m.c_phs_soc = pyo.Constraint(m.T, rule=_phs_soc)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -385,7 +447,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
 
     def _hwstes_soc(m_, t):
         prev = m_.soc_hwstes[t - 1] if t > 0 else m_.soc_hwstes[n - 1]
-        return m_.soc_hwstes[t] == prev + 0.95 * m_.chg_hwstes[t] - m_.dis_hwstes[t] / 0.95
+        return m_.soc_hwstes[t] == prev + HWSTES_EFF * m_.chg_hwstes[t] - m_.dis_hwstes[t] / HWSTES_EFF
     m.c_hwstes_soc = pyo.Constraint(m.T, rule=_hwstes_soc)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -402,7 +464,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
 
     def _hbat_soc(m_, t):
         prev = m_.soc_hbat[t - 1] if t > 0 else m_.soc_hbat[n - 1]
-        return m_.soc_hbat[t] == prev + 0.95 * m_.chg_hbat[t] - m_.dis_hbat[t] / 0.95
+        return m_.soc_hbat[t] == prev + HBAT_EFF * m_.chg_hbat[t] - m_.dis_hbat[t] / HBAT_EFF
     m.c_hbat_soc = pyo.Constraint(m.T, rule=_hbat_soc)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -419,7 +481,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
 
     def _utes_soc(m_, t):
         prev = m_.soc_utes[t - 1] if t > 0 else m_.soc_utes[n - 1]
-        return m_.soc_utes[t] == prev + 0.90 * m_.chg_utes[t] - m_.dis_utes[t] / 0.90
+        return m_.soc_utes[t] == prev + UTES_EFF * m_.chg_utes[t] - m_.dis_utes[t] / UTES_EFF
     m.c_utes_soc = pyo.Constraint(m.T, rule=_utes_soc)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -436,7 +498,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
 
     def _cold_soc(m_, t):
         prev = m_.soc_cold[t - 1] if t > 0 else m_.soc_cold[n - 1]
-        return m_.soc_cold[t] == prev + 0.95 * m_.chg_cold[t] - m_.dis_cold[t] / 0.95
+        return m_.soc_cold[t] == prev + COLD_EFF * m_.chg_cold[t] - m_.dis_cold[t] / COLD_EFF
     m.c_cold_soc = pyo.Constraint(m.T, rule=_cold_soc)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -491,7 +553,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
         + GEN_COST["res_pv"]        * res_base               * m.facrespv
         + GEN_COST["com_pv"]        * com_base               * m.faccompv
         + GEN_COST["utility_pv"]    * base["utility_pv"]    * m.facutilpv
-        + GEN_COST["csp"]           * base["csp"]            * m.cspturbfac
+        + (GEN_COST["csp"] + CSP_PCM_PER_MW) * base["csp"]   * m.cspturbfac
         + GEN_COST["solar_thermal"] * base["solar_thermal"]  * m.facsht
     )
 
@@ -616,8 +678,9 @@ def collect_lp_solution(
         JSON-serialisable summary: LP proxy cost (B$/yr, by component),
         installed capacities (GW), storage energy (GWh), annual energy
         totals (TWh/yr), load-shed per sector, and exemplary-month metadata.
-        NOTE: costs use proxy CAPEX coefficients designed for warm-starting
-        only — they are NOT comparable to Fortran c/kWh × TWh costs.
+        NOTE: costs use Fortran-aligned CAPEX coefficients (DISCOUNTM=2%,
+        tech-specific lifetimes from powerworld.f) and are comparable to
+        Fortran annual cost output.
     dispatch_rows : list[dict]
         One dict per hour for the exemplary month, containing all dispatch
         variables and loads in MW / MWh.  Convert to a DataFrame or CSV
@@ -698,7 +761,7 @@ def collect_lp_solution(
         + GEN_COST["res_pv"]        * res_base               * facrespv
         + GEN_COST["com_pv"]        * com_base               * faccompv
         + GEN_COST["utility_pv"]    * base["utility_pv"]    * facutilpv
-        + GEN_COST["csp"]           * base["csp"]            * csptf
+        + (GEN_COST["csp"] + CSP_PCM_PER_MW) * base["csp"]   * csptf
         + GEN_COST["solar_thermal"] * base["solar_thermal"]  * facsht
     )
     stor_capex_usd = (
@@ -727,7 +790,7 @@ def collect_lp_solution(
 
     USD2B = 1e-9
     cost_proxy = {
-        "note":                  "LP proxy CAPEX — NOT comparable to Fortran c/kWh costs",
+        "note":                  "Fortran-aligned annualised CAPEX (DISCOUNTM=2%, tech-specific lifetimes) — comparable to Fortran cost output",
         "total_B_usd_per_yr":    round(total_obj_usd    * USD2B, 4),
         "gen_capex_B_usd_per_yr":  round(gen_capex_usd  * USD2B, 4),
         "stor_capex_B_usd_per_yr": round(stor_capex_usd * USD2B, 4),

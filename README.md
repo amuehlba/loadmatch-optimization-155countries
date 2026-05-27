@@ -272,6 +272,97 @@ When `lp_warmstart: false` (default), the GA starts from:
 1. `data/raw/baseline_results.<REGION>.dat` — if present
 2. Fortran hardcoded region defaults — otherwise
 
+#### LP techno-economic assumptions (`src/optimization/model_builder.py`)
+
+The LP objective uses cost parameters drawn directly from `powerworld.f`, so the LP and
+the GA minimise the same cost function.  The key settings are:
+
+| Assumption | LP value | Fortran source |
+|---|---|---|
+| Discount rate | 2% (DISCOUNTM) | social rate for intergenerational projects |
+| Generator lifetimes | 30 yr (wind/PV/CSP), 35 yr (solar thermal) | YEARLIFEM = (YEARLIFEL+YEARLIFEH)/2 |
+| Storage lifetimes | 32.5 yr most, 17 yr battery, 40 yr firebrick, 15 yr H2 tank | STORLIFEM / STORLIFBM / STORLIFHBM |
+| Storage O&M | 1.5%/yr of capital | OPMAINTM |
+| Decommissioning | ~2% of capital (approximate) | DECOMCOSTM |
+
+**Generator capital costs** (mean of 2022 lo/hi and 2050 lo/hi from the Fortran data arrays):
+
+| Technology | Capital ($/MW) | O&M ($/MW/yr) | Annualised total ($/MW/yr) |
+|---|---:|---:|---:|
+| Onshore wind | 1,010,000 | 37,500 | 83,500 |
+| Offshore wind | 2,336,000 | 80,000 | 186,400 |
+| Residential PV | 1,837,000 | 27,500 | 111,200 |
+| Commercial PV | 1,266,000 | 16,500 | 74,200 |
+| Utility PV | 710,000 | 19,500 | 51,800 |
+| CSP turbine + mirrors | 5,326,000 | 50,000 | 292,600 |
+| CSP PCM storage (COSTSTORM[IPCMCSP]=20 $/KWh × 36.57 MWh/MW) | — | — | +41,800 |
+| Solar thermal | 1,177,000 | 50,000 | 98,000 |
+
+> The CSP PCM material cost is accounted separately in Fortran's `TRILSTORM` loop (not
+> bundled into `AVCAPMN(ICSPSTOR)`), so the LP adds it as a proportional surcharge on
+> `cspturbfac` using fixed parameters HCHARCSP=14 h and CSPSTORGAT=2.61.
+
+**Storage energy costs** (COSTSTORM $/KWh × 1000, annualised):
+
+| Storage | COSTSTORM ($/KWh) | Lifetime (yr) | Annualised ($/MWh/yr) |
+|---|---:|---:|---:|
+| Li-ion battery | 60 $/KWh-elec | 17 | 5,098 |
+| PHS | 14 $/KWh-elec | 32.5 | 800 |
+| HW-STES (hot water) | 3 $/KWh-th × COP=4 = 12 $/KWh-elec | 32.5 | 686 |
+| Cold TES (chilled water) | 3 $/KWh-th (COP=1 for cold) | 32.5 | 171 |
+| H2 tank | 250 $/kg ÷ 33.3 kWh/kg ÷ H2DCEFF | 15 | 1,230 |
+| Firebrick heat battery | 6 $/KWh-th | 40 | 309 |
+| UTES (seasonal heat) | 0.4 $/KWh-th × COP=4 = 1.6 $/KWh-elec | 32.5 | 91 |
+
+**H2 power-equipment costs** (annualised installed capital + O&M):
+
+| Component | Installed ($/MW) | O&M | Annualised ($/MW/yr) |
+|---|---:|---|---:|
+| Electrolyser + rectifier | 535,000 | 7.8%/1%/yr | 57,600 |
+| Compressor | 73,500 | 4%/yr | 6,300 |
+| Fuel cell | 665,000 | 3.5%/yr | 52,970 |
+
+**Storage efficiencies** (one-way = √round-trip from Fortran):
+
+| Storage | Fortran RT efficiency | One-way used in LP |
+|---|---|---|
+| Li-ion battery (EFFBAT) | 0.895 | 0.946 |
+| PHS (EFFPHS) | 0.80 | 0.894 |
+| HW-STES (EFFHSTES) | 0.83 | 0.911 |
+| Firebrick heat battery (EFFHTBAT) | 0.98 | 0.990 |
+| UTES (EFFUTES) | 0.56 | 0.748 |
+| Cold TES (EFFCSTES) | 0.88 | 0.938 |
+| H2 round-trip (H2CHAREFF × H2DCEFF) | — | 0.447 |
+
+**Technology coverage by sector:**
+
+| Technology | In LP | Treatment |
+|---|---|---|
+| Onshore wind | Yes | Decision variable (FACONWIN), full cost |
+| Offshore wind | Yes | Decision variable (FACOFFWIN), full cost |
+| Residential PV | Yes | Decision variable (FACRESPV), full cost |
+| Commercial PV | Yes | Decision variable (FACCOMPV), full cost |
+| Utility PV | Yes | Decision variable (FACUTILPV), full cost |
+| CSP-with-storage | Yes | Decision variable (CSPTURBFAC); turbine+mirror+PCM costs |
+| Solar thermal | Yes | Decision variable (FACSHT), full cost |
+| Geothermal electric | Partial | Fixed constant dispatch; capital cost not in objective (capacity not a GA variable) |
+| Hydroelectric | Partial | Fixed constant dispatch; capital cost not in objective |
+| Tidal | Partial | Fixed constant dispatch; capital cost not in objective |
+| Wave | Partial | Fixed constant dispatch; capital cost not in objective |
+| EGS geothermal | Partial | Fixed constant dispatch; capital cost not in objective |
+| Geothermal heat | Partial | Fixed constant heat supply; capital cost not in objective |
+| Li-ion battery | Yes | Power + energy decision variables; energy-only cost (per COSTSTORM) |
+| PHS | Yes | Energy decision variable (STORHPHS); power rate fixed from load data |
+| HW-STES | Yes | Energy decision variable (STORHHWAT); power rate fixed from load data |
+| Cold TES (CW-STES) | Yes | Energy decision variable (STORHCOLD); power rate fixed from load data |
+| UTES seasonal | Yes | Energy decision variable (STORUGDYS); power rate fixed from load data |
+| Firebrick heat battery | Yes | Power + energy decision variables; energy-only cost (per COSTSTORM) |
+| H2 (electrolyser) | Yes | Power decision variable (FCCHARG/h2_chg_mw); full equipment cost |
+| H2 (fuel cell) | Yes | Power decision variable (FCDISCH/h2_fc_mw); full equipment cost |
+| H2 (tank) | Yes | Energy decision variables (h2_energy_mwh + h2_seasonal_mwh); tank cost |
+| PCM-ICE cold storage | No | Inactive in Fortran (commented out); correctly absent |
+| Heat pumps for STES/UTES | Partial | Charging included in heat balance; capital cost is constant (not in objective since power rates are fixed) |
+
 ### New flags added to Python scripts
 
 | Script | Flag | Effect |
