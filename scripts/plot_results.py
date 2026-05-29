@@ -2574,6 +2574,41 @@ def fig14_four_case_comparison(region: str, save_dir: Path):
             return None
 
     data = {label: _load(path) for label, path in cases.items()}
+
+    # If Fortran LP evaluation is missing or has no usable cost data, substitute
+    # the LP solver's own dispatch summary from lp_solution.json.  This makes the
+    # LP column visible in the figure even when the LP starting point was Fortran-
+    # infeasible and got inflated away before the GA ran.
+    if data.get("LP") is None or data["LP"].get("annual_cost_mn_bil_per_yr") is None:
+        _lp_sol_path = REPO_ROOT / "data" / "results_python" / region / "lp_solution.json"
+        if _lp_sol_path.exists():
+            try:
+                _sol = json.loads(_lp_sol_path.read_text())
+                _twh = _sol.get("annual_twh", {})
+                _cap = _sol.get("cost_proxy", {})
+                _wind  = _twh.get("gen_wind_on", 0) + _twh.get("gen_wind_off", 0)
+                _solar = (_twh.get("gen_pv_res", 0) + _twh.get("gen_pv_com", 0)
+                          + _twh.get("gen_pv_util", 0) + _twh.get("gen_csp", 0)
+                          + _twh.get("gen_solth", 0))
+                _hydro = _twh.get("fixed_elec", 0) + _twh.get("fixed_heat", 0)
+                _curt  = (_twh.get("surplus_elec", 0) + _twh.get("surplus_heat", 0)
+                          + _twh.get("surplus_cold", 0))
+                _cost  = (_cap.get("gen_capex_B_usd_per_yr", 0)
+                          + _cap.get("stor_capex_B_usd_per_yr", 0))
+                data["LP"] = {
+                    "wind_twh":              _wind,
+                    "solar_twh":             _solar,
+                    "hydro_twh":             _hydro,
+                    "curtailment_twh":       _curt,
+                    "td_loss_twh":           0.0,
+                    "annual_cost_mn_bil_per_yr": _cost,
+                    "feasible":              False,
+                    "_lp_solver_only":       True,
+                }
+                print(f"  LP Fortran eval missing — substituting LP solver dispatch from lp_solution.json")
+            except Exception as exc:
+                print(f"  LP fallback from lp_solution.json failed: {exc}")
+
     labels  = list(cases.keys())
     present = [d is not None for d in data.values()]
     if not any(present):

@@ -369,6 +369,9 @@ CAPACITY_FACTOR_KEYS = [
     "FACONWIN", "FACOFFWIN", "FACUTILPV", "FACRESPV",
     "FACCOMPV", "CSPTURBFAC", "FACSHT",
 ]
+# Electric-only subset: scale these first during infeasibility expansion since
+# electric-sector shortfalls are far more common than heat-sector shortfalls.
+ELECTRIC_CAPACITY_FACTOR_KEYS = [k for k in CAPACITY_FACTOR_KEYS if k != "FACSHT"]
 
 # Parameters locked by default (not engineering design variables)
 DEFAULT_LOCKED = {"HCDDADD", "FMORTBAU"}
@@ -783,16 +786,37 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
         if not changed:
             break
 
-    # Phase 2: expand capacity factors once everything is >= 1
+    # Ensure all capacity factors are at least 1.0 before scaling
     for key in CAPACITY_FACTOR_KEYS:
         candidate[key] = max(1.0, candidate.get(key, 1.0))
-    for attempt in range(1, max_attempts + 1):
-        candidate = inflate_factors(candidate, step)
-        label = "inflate-step{}".format(attempt)
+
+    # Phase 2A: scale only electric generation factors (wind/PV/CSP).
+    # Electric shortfalls are much more common than heat shortfalls; targeting
+    # electric factors first avoids inflating solar-thermal unnecessarily.
+    # Uses its own step schedule, independent of Phase 2B.
+    half = max(max_attempts // 2, 4)
+    step_elec = initial_step
+    for attempt in range(1, half + 1):
+        for key in ELECTRIC_CAPACITY_FACTOR_KEYS:
+            val = candidate.get(key, 1.0)
+            candidate[key] = max(MIN_FACTOR, val * (1.0 + step_elec))
+        label = "inflate-electric{}".format(attempt)
         feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
             return candidate, cost, stdout
-        step *= growth
+        step_elec *= growth
+
+    # Phase 2B: scale all 7 capacity factors together (electric + heat).
+    # Gets a full max_attempts budget with a fresh step schedule so that a heat-
+    # sector shortfall (requiring FACSHT inflation) never runs out of attempts.
+    step_all = initial_step
+    for attempt in range(1, max_attempts + 1):
+        candidate = inflate_factors(candidate, step_all)
+        label = "inflate-all{}".format(attempt)
+        feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
+        if feasible:
+            return candidate, cost, stdout
+        step_all *= growth
 
     raise RuntimeError("Unable to inflate factors to achieve feasibility.")
 

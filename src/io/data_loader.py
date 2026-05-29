@@ -314,6 +314,20 @@ def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, objec
         "solar_thermal":  stats.get("TMWSOLTH",           0.0),
     }
 
+    # ── Existing (current) installed capacities [MW] ───────────────────────────
+    # EMW... columns = actual installations as of the data collection year.
+    # Used as lower bounds in the LP so the optimizer cannot zero out capacity
+    # that is already built.  Solar thermal uses SolThmGW-Exist (GW → MW).
+    existing_capacities_mw = {
+        "onshore_wind":  stats.get("EMWONWIND",      0.0),
+        "offshore_wind": stats.get("EMWOFFWIND",     0.0),
+        "res_pv":        stats.get("EMWRESPV",       0.0),
+        "com_pv":        stats.get("EMWCOMPV",       0.0),
+        "utility_pv":    stats.get("EMWUTILPV",      0.0),
+        "csp":           stats.get("EMWCSPORIG",     0.0),
+        "solar_thermal": stats.get("SolThmGW-Exist", 0.0) * 1_000.0,
+    }
+
     # ── Fixed baseload (constant dispatch, not LP decision variables) ──────────
     # SUPHYD2050 etc. are average annual supply in GW → convert to MW.
     fixed_baseload_mw = {
@@ -369,6 +383,7 @@ def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, objec
         "solar_thermal_availability":solar_thermal_availability,
         "base_capacities_mw":        base_capacities_mw,
         "base_capacities_detail":    base_capacities_detail,
+        "existing_capacities_mw":    existing_capacities_mw,
         "fixed_baseload_mw":         fixed_baseload_mw,
         "storage":                   storage_defaults,
         "supply_profiles_mw":        supply_profiles_mw,

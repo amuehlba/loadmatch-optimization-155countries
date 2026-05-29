@@ -176,11 +176,12 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
     n       = len(hours)
     T       = range(n)
 
-    base    = inputs["base_capacities_mw"]        # dict tech → MW
-    detail  = inputs.get("base_capacities_detail", {})
-    avail   = inputs["availability"]              # dict tech → array[n]
-    sol_av  = inputs["solar_thermal_availability"]  # array[n]
-    fixed   = inputs.get("fixed_baseload_mw", {}) # dict tech → avg MW (constant dispatch)
+    base     = inputs["base_capacities_mw"]        # dict tech → MW (2050 Jacobson target)
+    detail   = inputs.get("base_capacities_detail", {})
+    existing = inputs.get("existing_capacities_mw", {})  # current installed MW
+    avail    = inputs["availability"]              # dict tech → array[n]
+    sol_av   = inputs["solar_thermal_availability"]  # array[n]
+    fixed    = inputs.get("fixed_baseload_mw", {}) # dict tech → avg MW (constant dispatch)
 
     elec_load = np.asarray(inputs["electric_load_mw"], dtype=float)
     heat_load = np.asarray(inputs["heat_load_mw"],     dtype=float)
@@ -222,21 +223,39 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
     # We use a conservative 5% of annual electric load as H2 demand proxy.
     annual_h2_proxy_mwh = float(np.sum(elec_load)) * 0.05
 
+    # ── Per-technology lower bounds from existing installations ───────────────
+    # Lower bound factor = EMW_existing / TMW_target.
+    # Ensures the LP cannot zero out capacity that is already built.
+    # Returns 0 when either value is zero (no existing capacity, or no target).
+    def _gen_lb(exist_key: str, target_mw: float) -> float:
+        exist = existing.get(exist_key, 0.0)
+        if target_mw <= 0.0 or exist <= 0.0:
+            return 0.0
+        return exist / target_mw
+
     # ── Model ────────────────────────────────────────────────────────────────
     m = pyo.ConcreteModel(name=f"LoadMatchLP_{inputs['region']}")
     m.T = pyo.RangeSet(0, n - 1)
 
     # ════════════════════════════════════════════════════════════════════════
     # Decision variables — generation factors (→ PARAM_REGISTRY)
-    # Installed capacity [MW] = factor × base_capacity_mw
+    # Installed capacity [MW] = factor × base_capacity_mw (2050 Jacobson target)
+    # Lower bound = existing_mw / target_mw so current installations are preserved.
     # ════════════════════════════════════════════════════════════════════════
-    m.faconwin   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
-    m.facoffwin  = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
-    m.facutilpv  = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
-    m.facrespv   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
-    m.faccompv   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
-    m.cspturbfac = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 12))
-    m.facsht     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 8))
+    m.faconwin   = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("onshore_wind",  base["onshore_wind"]),  8))
+    m.facoffwin  = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("offshore_wind", base["offshore_wind"]), 8))
+    m.facutilpv  = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("utility_pv",    base["utility_pv"]),    8))
+    m.facrespv   = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("res_pv",        res_base),              8))
+    m.faccompv   = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("com_pv",        com_base),              8))
+    m.cspturbfac = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("csp",           base["csp"]),          12))
+    m.facsht     = pyo.Var(within=pyo.NonNegativeReals,
+                           bounds=(_gen_lb("solar_thermal", base["solar_thermal"]), 8))
 
     # ════════════════════════════════════════════════════════════════════════
     # Decision variables — storage with load-derived power rates
@@ -268,13 +287,13 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
 
     # H2 fuel cell  →  FCDISCH [TW] = h2_fc_mw / 1e6
     # H2 electrolyser → FCCHARG [TW] = h2_chg_mw / 1e6
-    # H2 storage    →  STORHHFC [h] = h2_energy_mwh / h2_fc_mw  (post-solve)
+    # H2 seasonal storage → DAYH2STOR [days] (post-solve)
+    # NOTE: STORHHFC (short-term H2 hours) is inert in Fortran when IMERGH2=1 —
+    # it is always overridden to 0.  No h2_energy_mwh variable; only seasonal storage.
     m.h2_fc_mw       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e6))
     m.h2_chg_mw      = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e6))
-    m.h2_energy_mwh  = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e8))
 
     # H2 seasonal  →  DAYH2STOR [days] = h2_seasonal_mwh / (annual_h2_proxy / 365)
-    #                                    (post-solve)
     m.h2_seasonal_mwh = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 5e8))
 
     # Heat battery  →  HBTDISCH [TW] = hbat_power_mw / 1e6
@@ -408,21 +427,17 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
     m.c_phs_soc = pyo.Constraint(m.T, rule=_phs_soc)
 
     # ════════════════════════════════════════════════════════════════════════
-    # H2 storage
+    # H2 storage (seasonal only — STORHHFC is inert in Fortran at IMERGH2=1)
     # Charge power cap: h2_chg_mw (electrolyser)
     # Discharge power cap: h2_fc_mw (fuel cell)
-    # Energy cap: max(h2_energy_mwh, h2_seasonal_mwh)
-    # To keep LP linear: soc_h2 ≤ h2_energy_mwh  AND  soc_h2 ≤ h2_seasonal_mwh
-    # would give min; instead use a single combined energy variable.
+    # Energy cap: h2_seasonal_mwh (maps to DAYH2STOR, the only active H2 size param)
     # ════════════════════════════════════════════════════════════════════════
     m.c_h2_chg_pow   = pyo.Constraint(m.T, rule=lambda _m, t:
         _m.electrolyser[t] <= _m.h2_chg_mw)
     m.c_h2_dis_pow   = pyo.Constraint(m.T, rule=lambda _m, t:
         _m.fuelcell[t]     <= _m.h2_fc_mw)
-    # Total H2 capacity = max of short-term (h2_energy_mwh) and seasonal (h2_seasonal_mwh)
-    # LP: soc ≤ h2_energy_mwh + h2_seasonal_mwh (conservative upper bound)
     m.c_h2_soc_max   = pyo.Constraint(m.T, rule=lambda _m, t:
-        _m.soc_h2[t] <= _m.h2_energy_mwh + _m.h2_seasonal_mwh)
+        _m.soc_h2[t] <= _m.h2_seasonal_mwh)
     # Seasonal buffer must cover a minimum fraction of annual H2 proxy demand
     m.c_h2_seasonal_min = pyo.Constraint(
         expr=m.h2_seasonal_mwh >= annual_h2_proxy_mwh / DAYSPY)
@@ -564,7 +579,7 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
         + STOR_COST_ENERGY["phs"]      * phs_power_mw * m.storhphs
         + STOR_COST_POWER["h2_fc"]     * m.h2_fc_mw
         + STOR_COST_POWER["h2_chg"]    * m.h2_chg_mw
-        + STOR_COST_ENERGY["h2"]       * (m.h2_energy_mwh + m.h2_seasonal_mwh)
+        + STOR_COST_ENERGY["h2"]       * m.h2_seasonal_mwh
         + STOR_COST_POWER["heat_bat"]  * m.hbat_power_mw
         + STOR_COST_ENERGY["heat_bat"] * m.hbat_energy_mwh
         + STOR_COST_ENERGY["hw_stes"]  * avg_heat * m.storhhwat
@@ -624,7 +639,6 @@ def collect_results(model: pyo.ConcreteModel) -> Dict[str, float]:
 
     # Duration = energy / power (post-solve, guaranteed finite)
     storhbat  = v(model.bat_energy_mwh) / bat_power
-    storhhfc  = v(model.h2_energy_mwh)  / h2_fc
     storhhbt  = v(model.hbat_energy_mwh) / hbat_power
 
     # DAYH2STOR: seasonal H2 energy / (daily H2 proxy demand in MWh)
@@ -647,7 +661,6 @@ def collect_results(model: pyo.ConcreteModel) -> Dict[str, float]:
         "STORUGDYS": v(model.storugdys),
         # Storage durations (computed post-solve)
         "STORHBAT":  storhbat,
-        "STORHHFC":  storhhfc,
         "STORHHBT":  storhhbt,
         "DAYH2STOR": dayh2stor,
         # Storage power rates [TW]
@@ -719,7 +732,7 @@ def collect_lp_solution(
     bat_nrg   = v(model.bat_energy_mwh)
     h2_fc     = v(model.h2_fc_mw)
     h2_chg    = v(model.h2_chg_mw)
-    h2_nrg    = v(model.h2_energy_mwh) + v(model.h2_seasonal_mwh)
+    h2_nrg    = v(model.h2_seasonal_mwh)
     hbat_pow  = v(model.hbat_power_mw)
     hbat_nrg  = v(model.hbat_energy_mwh)
 
