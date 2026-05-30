@@ -224,14 +224,22 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
     annual_h2_proxy_mwh = float(np.sum(elec_load)) * 0.05
 
     # ── Per-technology lower bounds from existing installations ───────────────
-    # Lower bound factor = EMW_existing / TMW_target.
-    # Ensures the LP cannot zero out capacity that is already built.
-    # Returns 0 when either value is zero (no existing capacity, or no target).
+    # For any technology currently deployed (EMW > 0), force the LP to build at
+    # least LB_MIN_FRAC of the Jacobson 2050 target.
+    #
+    # Rationale: EMW/TMW ratios are tiny (e.g. US offshore wind = 41/526 242 ≈
+    # 0.008%) so a pure EMW/TMW lower bound is invisible in practice — the LP
+    # still zeroes out offshore wind and rooftop PV because utility PV is
+    # cheaper.  LB_MIN_FRAC = 10% ensures every deployed technology appears at
+    # meaningful scale without over-constraining the optimisation.
+    LB_MIN_FRAC = 0.10
+
     def _gen_lb(exist_key: str, target_mw: float) -> float:
         exist = existing.get(exist_key, 0.0)
         if target_mw <= 0.0 or exist <= 0.0:
             return 0.0
-        return exist / target_mw
+        # Use whichever is larger: the exact existing/target ratio or the floor.
+        return max(exist / target_mw, LB_MIN_FRAC)
 
     # ── Model ────────────────────────────────────────────────────────────────
     m = pyo.ConcreteModel(name=f"LoadMatchLP_{inputs['region']}")
