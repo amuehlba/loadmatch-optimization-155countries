@@ -57,6 +57,7 @@ snakemake \
     --profile  profiles/slurm \
     --jobs     29 \
     --rerun-incomplete \
+    "$@" \
     all
 
 EXIT_CODE=$?
