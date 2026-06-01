@@ -411,6 +411,14 @@ def build_model(inputs: Dict) -> pyo.ConcreteModel:
         _m.dis_bat[t] <= _m.bat_power_mw)
     m.c_bat_soc_max  = pyo.Constraint(m.T, rule=lambda _m, t:
         _m.soc_bat[t] <= _m.bat_energy_mwh)
+    # Minimum duration: energy ≥ STORHBAT_MIN × power.
+    # bat_power_mw has no direct cost (Fortran prices battery per energy).
+    # Without this, the LP inflates bat_power_mw to absorb PV peak surpluses
+    # at zero cost, producing STORHBAT << 4h and BATDISCH >> Fortran baseline.
+    # This constraint adds an implicit power cost ≈ 4 × battery energy cost/yr.
+    STORHBAT_MIN = 4.0  # hours — matches Fortran STORHBAT default
+    m.c_bat_min_dur = pyo.Constraint(
+        expr=m.bat_energy_mwh >= STORHBAT_MIN * m.bat_power_mw)
 
     def _bat_soc(m_, t):
         prev = m_.soc_bat[t - 1] if t > 0 else m_.soc_bat[n - 1]

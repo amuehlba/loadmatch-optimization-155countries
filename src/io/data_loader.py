@@ -140,13 +140,13 @@ def load_countrystats(region: str, filepath: Path) -> Dict[str, float]:
     """
     all_rows = _read_countrystats_rows(filepath)
 
-    # Exact country match first
-    exact = [r for r in all_rows if r.get("Country", "").strip() == region]
+    # Exact country match first (case-insensitive — countrystats uses mixed case)
+    exact = [r for r in all_rows if r.get("Country", "").strip().upper() == region.upper()]
     if exact:
         return _row_to_floats(exact[0])
 
     # Aggregate by GRID-REGION
-    grid_rows = [r for r in all_rows if r.get("GRID-REGION", "").strip() == region]
+    grid_rows = [r for r in all_rows if r.get("GRID-REGION", "").strip().upper() == region.upper()]
     if grid_rows:
         print(f"  [INFO] countrystats: aggregating {len(grid_rows)} countries "
               f"for region '{region}'")
@@ -187,9 +187,9 @@ def load_electric_load(region: str, filepath: Path,
             if name and not name.startswith("Times"):
                 load_rows.append((name, _parse_row(line)))
 
-    # 1. Exact match
+    # 1. Exact match (case-insensitive — loadreg uses mixed case, region is uppercase)
     for name, arr in load_rows:
-        if name == region:
+        if name.upper() == region.upper():
             return arr
 
     # 2. Multi-country: match loadreg rows whose name tokens overlap with region's countries
@@ -264,8 +264,8 @@ def load_inputs(region: str, data_dir: Optional[Path] = None) -> Dict[str, objec
     country_names: List[str] = [
         r["Country"].strip()
         for r in all_rows
-        if r.get("GRID-REGION", "").strip() == region
-           or r.get("Country", "").strip() in (region, alias)
+        if r.get("GRID-REGION", "").strip().upper() == region
+           or r.get("Country", "").strip().upper() in (region, alias.upper())
     ]
 
     # ── Electric load ──────────────────────────────────────────────────────────
