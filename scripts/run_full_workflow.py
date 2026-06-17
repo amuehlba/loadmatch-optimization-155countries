@@ -514,9 +514,15 @@ def load_baseline_start(path: Path) -> Dict[str, float]:
     """
     _factor_key_set = set(FACTOR_KEYS)
 
+    # The PI's xx output files (xx.<CODE> / xxEGS.<REGION>) carry this header and
+    # contain many unrelated "KEY = value" lines.  Route them straight to the
+    # multi-value publication-format parser instead of the simple-format
+    # heuristic below, which is otherwise sensitive to those stray '=' lines.
+    _is_xx = "POWERWORLD.F LOADMATCH" in path.read_text(errors="replace")
+
     # Try the simple KEY = VALUE format first.
     # read_dat returns a dict; check how many keys match PARAM_REGISTRY.
-    simple_raw = read_dat(str(path))
+    simple_raw = {} if _is_xx else read_dat(str(path))
     simple_hits = {k.upper(): float(v) for k, v in simple_raw.items()
                    if k.upper() in PARAM_REGISTRY}
 

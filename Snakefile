@@ -44,7 +44,8 @@ configfile: "config/workflow.yaml"
 REGIONS = [r.strip() for r in config.get("regions", [
     "AFRICA-EAST",   "AFRICA-NORTH", "AFRICA-SOUTH",  "AFRICA-WEST",
     "AUSTRALIA",     "CANADA",       "CENTRAL-AMERIC","CENTRAL-ASIA",
-    "CHINA",         "CUBA",         "EUROPE",         "HAITI",
+    "CHINA",         "CUBA",         "EUROPE",         "GREENLAND",
+    "HAITI",
     "ICELAND",       "INDIA",        "ISRAEL",         "JAMAICA",
     "JAPAN",         "MADAGASCAR",   "MAURITIUS",      "MIDEAST",
     "NEW-ZEALAND",   "PHILIPPINES",  "RUSSIA",         "SOUTHAM-NW",

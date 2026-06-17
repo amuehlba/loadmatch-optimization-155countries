@@ -658,13 +658,10 @@ C COUNTRY = NAME OF COUNTRY READ IN FROM countrystats.dat
 C GRIDNAM = NAME OF GRID WHEN READ IN FROM countrystats.dat
 C GRIDUSE = NAME OF GRID REGION SIMULATED FOR PRESENT SIMULATION (SET HERE)
 C     
-      CHARACTER(11) PATHHOME
-      CHARACTER(11) PATHTEMP 
-      CHARACTER(11) PATHLOAD
-      CHARACTER(20) PTH2LOAD
-      CHARACTER(14) FACREGION
-      CHARACTER(14) GRIDARG
-      CHARACTER(1)  IFARG
+      CHARACTER(28) PATHHOME 
+      CHARACTER(28) PATHTEMP  
+      CHARACTER(39) PATHLOAD
+      CHARACTER(48) PTH2LOAD  
       CHARACTER(14) COUNTRY, NAMEGRID, GRIDNAM,  NAMCOUNGR, GRIDUSE,
      1              NAMECOUN,DOMAIN,   NAMEREAD, DUMMY,     GRIDLOAD,
      1              GRIDCOUN,NAMHTREG, NH,       NAMEORIG,  NAMORIGGR,
@@ -1132,10 +1129,10 @@ C PATHHOME = DIRECTORY WHERE POWERWORLD.F AND MOST INPUT/OUTPUT LIE
 C PATHTEMP = DIRECTORY WHERE wwssupworld.dat READ FROM WHEN IFREWRITE=1,2
 C PATHLOAD = DIRECTORY WHERE HOURLY LOAD DATA ARE LOCATED
 C
-      PATHHOME = './data/raw/'
-      PATHTEMP = './data/raw/'
-      PATHLOAD = './data/raw/'
-      PTH2LOAD = './data/raw/ELECMAPS/'
+      PATHHOME = '/scratch/jacobson/loadmatch/'
+      PATHTEMP = '/scratch/jacobson/loadmatch/'
+      PATHLOAD = '/scratch/jacobson/loadmatch/LOADHOURLY/'
+      PTH2LOAD = '/scratch/jacobson/loadmatch/LOADHOURLY/ELECMAPS/'
 C
 C *****************************************************************************
 C                  PARAMETERS THAT MODEL USERS CHANGE 
@@ -1472,12 +1469,6 @@ C
        GRIDUSE = 'CONUS'
       ENDIF
 C
-C     Override GRIDUSE from command-line argument 1 (automated multi-region runs).
-C     If no argument is provided, the default selected above is kept.
-      GRIDARG = ' '
-      CALL GET_COMMAND_ARGUMENT(1, GRIDARG)
-      IF (GRIDARG.NE.' ') GRIDUSE = GRIDARG
-C
       WRITE(IOUT,111) GRIDUSE
  111  FORMAT('DOMAIN: ',A14,' POWERWORLD.F LOADMATCH GRID INTEGRATION ',
      1       'MODEL'/)
@@ -1527,14 +1518,6 @@ C      IFREWRITE = 1
 C      IFREWRITE = 2 
        IFREWRITE = 3 
       ENDIF
-C
-C     Override IFREWRITE from command-line argument 2 (automated preprocessing).
-C     Usage: powerworld [REGION] [1|2|3] -- if omitted, default above is kept.
-      IFARG = ' '
-      CALL GET_COMMAND_ARGUMENT(2, IFARG)
-      IF (IFARG.EQ.'1') IFREWRITE = 1
-      IF (IFARG.EQ.'2') IFREWRITE = 2
-      IF (IFARG.EQ.'3') IFREWRITE = 3
 C
 C INITYEAR = INITIAL YEAR OF SIMULATIONS
 C
@@ -5639,28 +5622,6 @@ C
       ENDIF
 C     ENDIF GRIDUSE
 C
-C     Apply fortran_factors.dat overrides AFTER all region-specific defaults,
-C     so the factor file always wins regardless of which region is active.
-C
-      IF (IFCONUS.EQ.1) THEN
-       FACREGION = 'UNITED-STATES'
-      ELSE
-       FACREGION = GRIDUSE
-      ENDIF
-      CALL READ_FACTOR_OVERRIDES(PATHHOME, FACREGION,
-     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
-     2    FACUTILPV, CSPTURBFAC, FACSHT,
-     3    CSPSTORGAT, MXHRDRM, BATDISCH, HCHARCSP, STORHBAT,
-     4    STORHCOLD, STORHHWAT, STORHPHS,
-     5    UGFAC, STORUGDYS, DAYH2STOR,
-     6    HPTURBRAT, DAMCAPRAT, DAYBASHYD,
-     7    COOLSTES, PHSMIN, FHEATFLX,
-     8    FCOLDFLX, FRSTORINIT, FDISTHEAT,
-     9    CPERFORM, HCDDADD, FMORTBAU,
-     A    HWFAC, FCDISCH, FCCHARG,
-     B    STORHHFC, HBTDISCH, STORHHBT,
-     C    FRCIHFLEX)
-C
 C *****************************************************************************
 C                        FIND TIME ZONE IN MIDDLE OF DOMAIN
 C *****************************************************************************
@@ -6621,7 +6582,7 @@ C
 C INPUT SUPPLY DATA
 C
        IF (IFREWRITE.EQ.3) THEN
-        OPEN(KWWS, FILE = PATHHOME//'wwssupworld.'//GRIDUSE)
+        OPEN(KWWS, FILE = PATHHOME//'READSUPPLY/wwssupworld.'//GRIDUSE)
        ELSEIF (IFREWRITE.EQ.2) THEN
         OPEN(KWWS, FILE = PATHHOME//'wwssupreform.dat')
        ELSEIF (IFREWRITE.EQ.1.OR.IFREWRITE.EQ.0) THEN 
@@ -11590,7 +11551,7 @@ C
 C STORHOURS = AVG NUMBER OF HOURS OF STORAGE AMONG ALL NON-UTES, NON-H2 STORAGE
 C             EXCEPT, IT INCLUDES H2 STORAGE FOR GRID ELECTRICITY
 C
-      STORHOURS = STORTWH / (DISCHTW + SMAL30)
+      STORHOURS = STORTWH / DISCHTW
 C             
 C UTESTWH   = MAX STORAGE CAPACITY (TWH) UNDERGROUND SEAS HEAT STORAGE IN SOIL 
 C             REALLY TWH OF ELECTRICITY STORAGE THAT GIVES NECESSARY
@@ -11607,7 +11568,7 @@ C
 C FEXISTPHS = FRACTION OF PROPOSED PHS STORAGE THAT ALREADY EXISTS
 C TEXISTPHS = EXISTING PUMPED-HYDRO STORAGE (PHS) INSTALLED CAPACITY (TW)
 C
-      FEXISTPHS = TEXISTPHS / (TSTORPHS + SMAL30)
+      FEXISTPHS = TEXISTPHS / TSTORPHS 
 C
 C FRACCSP   = FRAC OF KWH OF NON-UTES STORAGE IN PHASE-CHANGE MATERIAL FROM CSP
 C FRACPHS   = FRAC OF KWH OF NON-UTES STORAGE IN PUMPED-HYDRO STORAGE
@@ -11649,14 +11610,14 @@ C             ASSUMES GRID H2 STORAGE ENERGY IS ENERGY USED TO
 C             PRODUCE AND COMPRESS H2 = ENERGY EMBODIED IN H2 / H2CHAREFF
 C           = FCDISCH (TW) / (H2DCEFF * H2CHAREFF)
 C     
-      FRACCSP  = CSPCHSTO  * HCHARCSP  / (STORTWH + SMAL30)
-      FRACPHS  = TSTORPHS  * STORHPHS  / (STORTWH + SMAL30)
-      FRACOLD  = CHILDISCH * STORHCOLD / (STORTWH + SMAL30)
-      FRACPCM  = PCMDISCH  * STORHCOLD / (STORTWH + SMAL30)
-      FRACHOT  = HOTDISCH  * STORHHWAT / (STORTWH + SMAL30)
-      FRACBAT  = BATDISCH  * STORHBAT  / (STORTWH + SMAL30)
-      FRACHFC  = H2SDISCH  * STORHHFC  / (STORTWH + SMAL30)
-      FRACHBT  = HBTDISCH  * STORHHBT  / (STORTWH + SMAL30)
+      FRACCSP  = CSPCHSTO  * HCHARCSP  / STORTWH
+      FRACPHS  = TSTORPHS  * STORHPHS  / STORTWH
+      FRACOLD  = CHILDISCH * STORHCOLD / STORTWH
+      FRACPCM  = PCMDISCH  * STORHCOLD / STORTWH
+      FRACHOT  = HOTDISCH  * STORHHWAT / STORTWH
+      FRACBAT  = BATDISCH  * STORHBAT  / STORTWH
+      FRACHFC  = H2SDISCH  * STORHHFC  / STORTWH
+      FRACHBT  = HBTDISCH  * STORHHBT  / STORTWH
 C     
       SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
      1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
@@ -21339,222 +21300,4 @@ C                        END OF PROGRAM POWERWORLD.F
 C *****************************************************************************
 C
       STOP
-      END
-
-      SUBROUTINE READ_FACTOR_OVERRIDES(PATHHOME, REGION,
-     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
-     2    FACUTILPV, CSPTURBFAC, FACSHT,
-     3    CSPSTORGAT, MXHRDRM, BATDISCH, HCHARCSP, STORHBAT,
-     4    STORHCOLD, STORHHWAT, STORHPHS,
-     5    UGFAC, STORUGDYS, DAYH2STOR,
-     6    HPTURBRAT, DAMCAPRAT, DAYBASHYD,
-     7    COOLSTES, PHSMIN, FHEATFLX,
-     8    FCOLDFLX, FRSTORINIT, FDISTHEAT,
-     9    CPERFORM, HCDDADD, FMORTBAU,
-     A    HWFAC, FCDISCH, FCCHARG,
-     B    STORHHFC, HBTDISCH, STORHHBT,
-     C    FRCIHFLEX)
-      IMPLICIT NONE
-      CHARACTER*(*) PATHHOME, REGION
-C --- Original 7 capacity factors ---
-      DOUBLE PRECISION FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV
-      DOUBLE PRECISION FACUTILPV, CSPTURBFAC, FACSHT
-C --- CSP / storage configuration ---
-      DOUBLE PRECISION CSPSTORGAT, BATDISCH, HCHARCSP, STORHBAT
-      DOUBLE PRECISION STORHCOLD, STORHHWAT, STORHPHS
-      INTEGER MXHRDRM
-C --- UTES and hydrogen storage ---
-      DOUBLE PRECISION UGFAC, STORUGDYS, DAYH2STOR
-C --- Hydropower ---
-      DOUBLE PRECISION HPTURBRAT, DAMCAPRAT, DAYBASHYD
-C --- Thermal storage and demand response ---
-      DOUBLE PRECISION COOLSTES, PHSMIN, FHEATFLX
-      DOUBLE PRECISION FCOLDFLX, FRSTORINIT, FDISTHEAT
-C --- Heat pump and health ---
-      DOUBLE PRECISION CPERFORM, HCDDADD, FMORTBAU
-C --- Hot-water, H2, heat battery ---
-      DOUBLE PRECISION HWFAC, FCDISCH, FCCHARG
-      DOUBLE PRECISION STORHHFC, HBTDISCH, STORHHBT
-C --- Industrial heat flexibility ---
-      DOUBLE PRECISION FRCIHFLEX
-C --- Local variables ---
-      CHARACTER*256 FNAME, LINE
-      CHARACTER*32 KEY
-      DOUBLE PRECISION VALUE
-      INTEGER UNIT, IOS, IEQ, LPATH
-      INTEGER LEN_TRIM_F77
-
-      UNIT = 99
-      LPATH = LEN_TRIM_F77(PATHHOME)
-      IF (LPATH.LE.0) LPATH = LEN(PATHHOME)
-      FNAME = PATHHOME(1:LPATH)//'fortran_factors.dat'
-
-      OPEN(UNIT, FILE=FNAME, STATUS='OLD', IOSTAT=IOS)
-      IF (IOS.NE.0) RETURN
-
-  10  CONTINUE
-        READ(UNIT,'(A)',IOSTAT=IOS) LINE
-        IF (IOS.NE.0) GOTO 900
-        IF (LINE.EQ.' ') GOTO 10
-        IF (LINE(1:1).EQ.'!'.OR.LINE(1:1).EQ.'#') GOTO 10
-        IEQ = INDEX(LINE,'=')
-        IF (IEQ.GT.0) LINE(IEQ:IEQ) = ' '
-        READ(LINE,*,IOSTAT=IOS) KEY, VALUE
-        IF (IOS.NE.0) THEN
-          IOS = 0
-          GOTO 10
-        ENDIF
-        CALL TOUPPER(KEY)
-C --- Original 7 capacity factors ---
-        IF (KEY(1:8).EQ.'FACONWIN') THEN
-          FACONWIN = VALUE
-        ELSEIF (KEY(1:9).EQ.'FACOFFWIN') THEN
-          FACOFFWIN = VALUE
-        ELSEIF (KEY(1:8).EQ.'FACRESPV') THEN
-          FACRESPV = VALUE
-        ELSEIF (KEY(1:8).EQ.'FACCOMPV') THEN
-          FACCOMPV = VALUE
-        ELSEIF (KEY(1:9).EQ.'FACUTILPV') THEN
-          FACUTILPV = VALUE
-        ELSEIF (KEY(1:10).EQ.'CSPTURBFAC') THEN
-          CSPTURBFAC = VALUE
-        ELSEIF (KEY(1:6).EQ.'FACSHT') THEN
-          FACSHT = VALUE
-C --- CSP / storage configuration ---
-        ELSEIF (KEY(1:10).EQ.'CSPSTORGAT') THEN
-          CSPSTORGAT = VALUE
-        ELSEIF (KEY(1:7).EQ.'MXHRDRM') THEN
-          MXHRDRM = NINT(VALUE)
-        ELSEIF (KEY(1:8).EQ.'BATDISCH') THEN
-          BATDISCH = VALUE
-        ELSEIF (KEY(1:8).EQ.'HCHARCSP') THEN
-          HCHARCSP = VALUE
-        ELSEIF (KEY(1:8).EQ.'STORHBAT') THEN
-          STORHBAT = VALUE
-        ELSEIF (KEY(1:9).EQ.'STORHCOLD') THEN
-          STORHCOLD = VALUE
-        ELSEIF (KEY(1:9).EQ.'STORHHWAT') THEN
-          STORHHWAT = VALUE
-        ELSEIF (KEY(1:8).EQ.'STORHPHS') THEN
-          STORHPHS = VALUE
-C --- UTES and hydrogen storage ---
-        ELSEIF (KEY(1:5).EQ.'UGFAC') THEN
-          UGFAC = VALUE
-        ELSEIF (KEY(1:9).EQ.'STORUGDYS') THEN
-          STORUGDYS = VALUE
-        ELSEIF (KEY(1:9).EQ.'DAYH2STOR') THEN
-          DAYH2STOR = VALUE
-C --- Hydropower ---
-        ELSEIF (KEY(1:9).EQ.'HPTURBRAT') THEN
-          HPTURBRAT = VALUE
-        ELSEIF (KEY(1:9).EQ.'DAMCAPRAT') THEN
-          DAMCAPRAT = VALUE
-        ELSEIF (KEY(1:9).EQ.'DAYBASHYD') THEN
-          DAYBASHYD = VALUE
-C --- Thermal storage and demand response ---
-        ELSEIF (KEY(1:8).EQ.'COOLSTES') THEN
-          COOLSTES = VALUE
-        ELSEIF (KEY(1:6).EQ.'PHSMIN') THEN
-          PHSMIN = VALUE
-        ELSEIF (KEY(1:8).EQ.'FHEATFLX') THEN
-          FHEATFLX = VALUE
-        ELSEIF (KEY(1:8).EQ.'FCOLDFLX') THEN
-          FCOLDFLX = VALUE
-        ELSEIF (KEY(1:10).EQ.'FRSTORINIT') THEN
-          FRSTORINIT = VALUE
-        ELSEIF (KEY(1:9).EQ.'FDISTHEAT') THEN
-          FDISTHEAT = VALUE
-C --- Heat pump and health ---
-        ELSEIF (KEY(1:8).EQ.'CPERFORM') THEN
-          CPERFORM = VALUE
-        ELSEIF (KEY(1:7).EQ.'HCDDADD') THEN
-          HCDDADD = VALUE
-        ELSEIF (KEY(1:8).EQ.'FMORTBAU') THEN
-          FMORTBAU = VALUE
-C --- Hot-water, H2, heat battery ---
-        ELSEIF (KEY(1:5).EQ.'HWFAC') THEN
-          HWFAC = VALUE
-        ELSEIF (KEY(1:7).EQ.'FCDISCH') THEN
-          FCDISCH = VALUE
-        ELSEIF (KEY(1:7).EQ.'FCCHARG') THEN
-          FCCHARG = VALUE
-        ELSEIF (KEY(1:8).EQ.'STORHHFC') THEN
-          STORHHFC = VALUE
-        ELSEIF (KEY(1:8).EQ.'HBTDISCH') THEN
-          HBTDISCH = VALUE
-        ELSEIF (KEY(1:8).EQ.'STORHHBT') THEN
-          STORHHBT = VALUE
-C --- Industrial heat flexibility ---
-        ELSEIF (KEY(1:9).EQ.'FRCIHFLEX') THEN
-          FRCIHFLEX = VALUE
-        ENDIF
-        GOTO 10
-
-900   CONTINUE
-      CLOSE(UNIT)
-      WRITE(*,'(A,1X,A)') 'APPLIED FACTOR OVERRIDES FOR', REGION
-      WRITE(*,'(A,1PE12.5)') '  FACONWIN   = ', FACONWIN
-      WRITE(*,'(A,1PE12.5)') '  FACOFFWIN  = ', FACOFFWIN
-      WRITE(*,'(A,1PE12.5)') '  FACRESPV   = ', FACRESPV
-      WRITE(*,'(A,1PE12.5)') '  FACCOMPV   = ', FACCOMPV
-      WRITE(*,'(A,1PE12.5)') '  FACUTILPV  = ', FACUTILPV
-      WRITE(*,'(A,1PE12.5)') '  CSPTURBFAC = ', CSPTURBFAC
-      WRITE(*,'(A,1PE12.5)') '  FACSHT     = ', FACSHT
-      WRITE(*,'(A,1PE12.5)') '  CSPSTORGAT = ', CSPSTORGAT
-      WRITE(*,'(A,I6)')      '  MXHRDRM    = ', MXHRDRM
-      WRITE(*,'(A,1PE12.5)') '  BATDISCH   = ', BATDISCH
-      WRITE(*,'(A,1PE12.5)') '  HCHARCSP   = ', HCHARCSP
-      WRITE(*,'(A,1PE12.5)') '  STORHBAT   = ', STORHBAT
-      WRITE(*,'(A,1PE12.5)') '  STORHCOLD  = ', STORHCOLD
-      WRITE(*,'(A,1PE12.5)') '  STORHHWAT  = ', STORHHWAT
-      WRITE(*,'(A,1PE12.5)') '  STORHPHS   = ', STORHPHS
-      WRITE(*,'(A,1PE12.5)') '  UGFAC      = ', UGFAC
-      WRITE(*,'(A,1PE12.5)') '  STORUGDYS  = ', STORUGDYS
-      WRITE(*,'(A,1PE12.5)') '  DAYH2STOR  = ', DAYH2STOR
-      WRITE(*,'(A,1PE12.5)') '  HPTURBRAT  = ', HPTURBRAT
-      WRITE(*,'(A,1PE12.5)') '  DAMCAPRAT  = ', DAMCAPRAT
-      WRITE(*,'(A,1PE12.5)') '  DAYBASHYD  = ', DAYBASHYD
-      WRITE(*,'(A,1PE12.5)') '  COOLSTES   = ', COOLSTES
-      WRITE(*,'(A,1PE12.5)') '  PHSMIN     = ', PHSMIN
-      WRITE(*,'(A,1PE12.5)') '  FHEATFLX   = ', FHEATFLX
-      WRITE(*,'(A,1PE12.5)') '  FCOLDFLX   = ', FCOLDFLX
-      WRITE(*,'(A,1PE12.5)') '  FRSTORINIT = ', FRSTORINIT
-      WRITE(*,'(A,1PE12.5)') '  FDISTHEAT  = ', FDISTHEAT
-      WRITE(*,'(A,1PE12.5)') '  CPERFORM   = ', CPERFORM
-      WRITE(*,'(A,1PE12.5)') '  HCDDADD    = ', HCDDADD
-      WRITE(*,'(A,1PE12.5)') '  FMORTBAU   = ', FMORTBAU
-      WRITE(*,'(A,1PE12.5)') '  HWFAC      = ', HWFAC
-      WRITE(*,'(A,1PE12.5)') '  FCDISCH    = ', FCDISCH
-      WRITE(*,'(A,1PE12.5)') '  FCCHARG    = ', FCCHARG
-      WRITE(*,'(A,1PE12.5)') '  STORHHFC   = ', STORHHFC
-      WRITE(*,'(A,1PE12.5)') '  HBTDISCH   = ', HBTDISCH
-      WRITE(*,'(A,1PE12.5)') '  STORHHBT   = ', STORHHBT
-      WRITE(*,'(A,1PE12.5)') '  FRCIHFLEX  = ', FRCIHFLEX
-      RETURN
-      END
-
-      INTEGER FUNCTION LEN_TRIM_F77(STR)
-      CHARACTER*(*) STR
-      INTEGER I, L
-      L = LEN(STR)
-      DO I = L, 1, -1
-        IF (STR(I:I).NE.' ') THEN
-          LEN_TRIM_F77 = I
-          RETURN
-        ENDIF
-      ENDDO
-      LEN_TRIM_F77 = 0
-      RETURN
-      END
-
-      SUBROUTINE TOUPPER(STR)
-      CHARACTER*(*) STR
-      INTEGER I, CODE
-      DO I = 1, LEN(STR)
-        CODE = ICHAR(STR(I:I))
-        IF (CODE.GE.97 .AND. CODE.LE.122) THEN
-          STR(I:I) = CHAR(CODE-32)
-        ENDIF
-      ENDDO
-      RETURN
       END
