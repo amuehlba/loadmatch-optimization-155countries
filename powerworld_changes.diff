@@ -1,6 +1,6 @@
 --- a/fortran/src/powerworld.f
 +++ b/fortran/src/powerworld.f
-@@ -658,10 +658,13 @@
+@@ -659,10 +659,14 @@
  C GRIDNAM = NAME OF GRID WHEN READ IN FROM countrystats.dat
  C GRIDUSE = NAME OF GRID REGION SIMULATED FOR PRESENT SIMULATION (SET HERE)
  C     
@@ -15,10 +15,11 @@
 +      CHARACTER(14) FACREGION
 +      CHARACTER(14) GRIDARG
 +      CHARACTER(1)  IFARG
++      CHARACTER(1)  DCARG
        CHARACTER(14) COUNTRY, NAMEGRID, GRIDNAM,  NAMCOUNGR, GRIDUSE,
       1              NAMECOUN,DOMAIN,   NAMEREAD, DUMMY,     GRIDLOAD,
       1              GRIDCOUN,NAMHTREG, NH,       NAMEORIG,  NAMORIGGR,
-@@ -1129,10 +1132,10 @@
+@@ -1132,10 +1136,10 @@
  C PATHTEMP = DIRECTORY WHERE wwssupworld.dat READ FROM WHEN IFREWRITE=1,2
  C PATHLOAD = DIRECTORY WHERE HOURLY LOAD DATA ARE LOCATED
  C
@@ -33,23 +34,40 @@
  C
  C *****************************************************************************
  C                  PARAMETERS THAT MODEL USERS CHANGE 
-@@ -1468,6 +1471,12 @@
-       ELSE
+@@ -1232,7 +1236,14 @@
+ C
+ C     IFDATCEN  = 1
+ C     IFDATCEN  = 2 
+-      IFDATCEN  = 0 
++      IFDATCEN  = 0
++C     Override IFDATCEN from command-line argument 3 (data-center scenarios):
++C     0 = base WWS, 1 = EGS-powered data centers, 2 = WWS-powered data centers.
++C     If no argument is provided the default (0) is kept.
++      DCARG = ' '
++      CALL GET_COMMAND_ARGUMENT(3, DCARG)
++      IF (DCARG.EQ.'1') IFDATCEN = 1
++      IF (DCARG.EQ.'2') IFDATCEN = 2
+ C
+       IF (IFDATCEN.GE.1) THEN
+ C      FDATCEN  = 0.02  
+@@ -1506,6 +1517,12 @@
         GRIDUSE = 'CONUS'
        ENDIF
-+C
+ C
 +C     Override GRIDUSE from command-line argument 1 (automated multi-region runs).
 +C     If no argument is provided, the default selected above is kept.
 +      GRIDARG = ' '
 +      CALL GET_COMMAND_ARGUMENT(1, GRIDARG)
 +      IF (GRIDARG.NE.' ') GRIDUSE = GRIDARG
- C
++C
        WRITE(IOUT,111) GRIDUSE
   111  FORMAT('DOMAIN: ',A14,' POWERWORLD.F LOADMATCH GRID INTEGRATION ',
-@@ -1519,6 +1528,14 @@
+      1       'MODEL'/)
+@@ -1555,6 +1572,14 @@
+ C      IFREWRITE = 2 
         IFREWRITE = 3 
        ENDIF
- C
++C
 +C     Override IFREWRITE from command-line argument 2 (automated preprocessing).
 +C     Usage: powerworld [REGION] [1|2|3] -- if omitted, default above is kept.
 +      IFARG = ' '
@@ -57,11 +75,10 @@
 +      IF (IFARG.EQ.'1') IFREWRITE = 1
 +      IF (IFARG.EQ.'2') IFREWRITE = 2
 +      IF (IFARG.EQ.'3') IFREWRITE = 3
-+C
+ C
  C INITYEAR = INITIAL YEAR OF SIMULATIONS
  C
-       IF (IFCAISO.EQ.1) THEN
-@@ -5622,6 +5639,28 @@
+@@ -5664,6 +5689,28 @@
        ENDIF
  C     ENDIF GRIDUSE
  C
@@ -90,7 +107,7 @@
  C *****************************************************************************
  C                        FIND TIME ZONE IN MIDDLE OF DOMAIN
  C *****************************************************************************
-@@ -6582,7 +6621,7 @@
+@@ -6624,7 +6671,7 @@
  C INPUT SUPPLY DATA
  C
         IF (IFREWRITE.EQ.3) THEN
@@ -99,7 +116,7 @@
         ELSEIF (IFREWRITE.EQ.2) THEN
          OPEN(KWWS, FILE = PATHHOME//'wwssupreform.dat')
         ELSEIF (IFREWRITE.EQ.1.OR.IFREWRITE.EQ.0) THEN 
-@@ -11551,7 +11590,7 @@
+@@ -11609,7 +11656,7 @@
  C STORHOURS = AVG NUMBER OF HOURS OF STORAGE AMONG ALL NON-UTES, NON-H2 STORAGE
  C             EXCEPT, IT INCLUDES H2 STORAGE FOR GRID ELECTRICITY
  C
@@ -108,7 +125,7 @@
  C             
  C UTESTWH   = MAX STORAGE CAPACITY (TWH) UNDERGROUND SEAS HEAT STORAGE IN SOIL 
  C             REALLY TWH OF ELECTRICITY STORAGE THAT GIVES NECESSARY
-@@ -11568,7 +11607,7 @@
+@@ -11626,7 +11673,7 @@
  C FEXISTPHS = FRACTION OF PROPOSED PHS STORAGE THAT ALREADY EXISTS
  C TEXISTPHS = EXISTING PUMPED-HYDRO STORAGE (PHS) INSTALLED CAPACITY (TW)
  C
@@ -117,7 +134,7 @@
  C
  C FRACCSP   = FRAC OF KWH OF NON-UTES STORAGE IN PHASE-CHANGE MATERIAL FROM CSP
  C FRACPHS   = FRAC OF KWH OF NON-UTES STORAGE IN PUMPED-HYDRO STORAGE
-@@ -11610,14 +11649,14 @@
+@@ -11668,14 +11715,14 @@
  C             PRODUCE AND COMPRESS H2 = ENERGY EMBODIED IN H2 / H2CHAREFF
  C           = FCDISCH (TW) / (H2DCEFF * H2CHAREFF)
  C     
@@ -140,7 +157,7 @@
  C     
        SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
       1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
-@@ -21301,3 +21340,221 @@
+@@ -21384,3 +21431,221 @@
  C
        STOP
        END

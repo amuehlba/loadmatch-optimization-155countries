@@ -12,7 +12,7 @@ C *****************************************************************************
 C *****************************************************************************
 C               WRITTEN BY MARK Z. JACOBSON (JACOBSON@STANFORD.EDU) 
 C                       STANFORD UNIVERSITY (1-650-723-6836)
-C            FIRST CODING: NOV. 10, 2014. LAST UPDATE: JUNE 10, 2026 
+C            FIRST CODING: NOV. 10, 2014. LAST UPDATE: JUNE 27, 2026 
 C              (C) COPYRIGHT, MARK Z. JACOBSON/STANFORD UNIVERSITY      
 C *****************************************************************************
 C *****************************************************************************
@@ -247,6 +247,7 @@ C MODEL SWITCHES
 C   IFREWRITE,  IFCONUS,  GRIDUSE,  INITYLOAD, IFINYLOAD, IBEGYLOAD,
 C   ISUPYEAR,   IFGATHEAT NYEARS,   IFHRLOAD,  IFCANARY,  IFSTATES,   
 C   IMERGH2,    IFHEATBAT IFEGS,    IFNEWLOAD, IFCAISO,   IFCOUNTRY 
+C   IFDATCEN
 C
 C MODEL PARAMETERS TO VARY HERE FOR BOTH 50 STATES AND 145 COUNTRIES 
 C   FACONWIN,   FACOFFWIN,  FACRESPV, FACCOMPV, FACUTILPV,  FACSHT
@@ -1076,6 +1077,7 @@ C CENTPDOL = 100.     CENTS PER DOLLAR
 C PCT      = 100.     CONVERTS FRACTION TO PERCENT 
 C TRILFACT = CENTS-TW/(TRIL$-KW) = 100 CENTS/$/($TRIL/$ * 1.0E+09 KWH/TWH) 
 C SMAL30   = 1.0E-30 = SMALL NUMBER TO PREVENT DIVIDE BY ZERO
+C SMAL50   = 1.0E-50 = SMALL NUMBER TO PREVENT DIVIDE BY ZERO
 C AVHRSPYR = 8760 HOURS PER YEAR IN NON-LEAP YEARS
 C CVER3    = MULTIPLY BY CVER3 TO CONVERT CENTS-TWH/KWH TO $BILLION =
 C          = 10^-11 $BILLION/CENTS x 10^9 KWH/TWH 
@@ -1091,6 +1093,7 @@ C
       PCT      = 100.
       TRILFACT = CENTPDOL / (TRILPDOL * AKWPTW) 
       SMAL30   = 1.0E-30
+      SMAL50   = 1.0E-50
       AVHRSPYR = 8760. 
       CVER3    = 0.01 
 C                                        
@@ -1210,6 +1213,40 @@ C
 C      IFEGS    = 1
       ENDIF
 C
+C IFDATCEN  = 1: INCREASE 2050 DEMAND BY A CONSTANT TW AMOUNT EACH TIME STEP
+C                DUE TO DATA CENTERS. PROVIDE THE DEMAND WITH CONSTANT
+C                AMOUNT OF EGS EACH TIME STEP.
+C                DEMAND IS ADDED AS AN INFLEXIBLE DEMAND (CLOAD)
+C           = 2: INCREASE 2050 DEMAND BY A CONSTANT TW AMOUNT EACH TIME STEP
+C                DUE TO DATA CENTERS. PROVIDE THE ADDED DEMAND WITH
+C                WIND, SOLAR, BATTERIES, & H2 FUEL CELLS ONLY,
+C           = 0: DO NOT INCREASE DATA CENTER DEMAND OR SUPPLY AT ALL
+C FDATCEN   = FRACTION OF ANNUAL AVG ALL PURPOSE LOAD (TLFIN2050) ADDED ON
+C             TOP OF TLFIN2050 AS INFLEXIBLE LOAD FOR DATACENTERS  
+C           = 0.12 GIVES ~111 GW OF DEMAND IN THE U.S. IN 2050
+C                        ~1075 GW OF DEMAND 155 COUNTRIES IN 2050
+C           = 0.02 GIVES ~18 GW OF DEMAND IN THE U.S. IN 2050
+C                        ~179 GW OF DEMAND 155 COUNTRIES IN 2050
+C FEGSDC    = ADDITIONAL FRACTION OF TOTAL LOAD TLFINA2050 SUPPLIED BY EGS
+C DATCENTW  = TW CONSTANT INFLEXIBLE LOAD DUE TO DATA CENTERS IN 2050
+C
+C     IFDATCEN  = 1
+C     IFDATCEN  = 2 
+      IFDATCEN  = 0 
+C
+      IF (IFDATCEN.GE.1) THEN
+C      FDATCEN  = 0.02  
+       FDATCEN  = 0.12 
+      ELSE
+       FDATCEN  = 0
+      ENDIF
+C
+      IF (IFDATCEN.EQ.1.AND.IFEGS.EQ.1) THEN
+       FEGSDC   = FDATCEN
+      ELSE
+       FEGSDC   = 0.
+      ENDIF
+C
 C IFNEWLOAD = 1: USE NEW HOURLY LOAD DATA FROM ELECTRICITY MAPS
 C                DATA FOR 2024 FOR ALL COUNTRIES & FOR REGIONS IN COUNTRIES 
 C           = 0: USE PROJECTED 2030 DATA NEOCARBON ENERGY &
@@ -1315,10 +1352,10 @@ C            29 GRID REGIONS IN 149- AND 150-COUNTRY ROADMAP PAPERS
 C *****************************************************************************
 C
       IF (IFCOUNTRY.EQ.1) THEN
-C      GRIDUSE = 'AFRICA-EAST'
+       GRIDUSE = 'AFRICA-EAST'
 C      GRIDUSE = 'AFRICA-NORTH'
 C      GRIDUSE = 'AFRICA-SOUTH'
-       GRIDUSE = 'AFRICA-WEST'
+C      GRIDUSE = 'AFRICA-WEST'
 C      GRIDUSE = 'AUSTRALIA'
 C      GRIDUSE = 'CANADA'
 C      GRIDUSE = 'CENTRAL-AMERIC'
@@ -1597,6 +1634,8 @@ C     DEGXLON  = 0.
 C
 C IFEGS    = INCLUDE ENHANCED GEOTHERMAL SYSTEMS FOR SENSITIVITY TEST 
 C FRCLDEGS = FRACTION OF TOTAL END-USE LOAD ASSIGNED TO EGS WHEN IFEGS=1
+C            THIS DEFAULT VALUE IS OVERRIDDEN FOR EACH COUNTRY/STATE
+C            BELOW 
 C
       IF (IFEGS.EQ.1) THEN
        IF (IFCAISO.EQ.1) THEN
@@ -1882,13 +1921,16 @@ C
        FLDISELEC  = 0.3
        HCDDADD    = 1.
 C  
+C FEGSDC  = ADDITIONAL FRACTION OF TOTAL LOAD TLFINA2050 SUPPLIED BY EGS
+C
        IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 1.45  
-        FACOFFWIN  = 0.95   
-        FACUTILPV  = 1.45      
-        BATDISCH   = 0.27                 
-        DAYH2STOR  = 4. 
-        STORUGDYS  = 6.
+        FRCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 1.4  
+        FACOFFWIN  = 0.9   
+        FACUTILPV  = 1.4      
+        BATDISCH   = 0.19                 
+        DAYH2STOR  = 10. 
+        STORUGDYS  = 10.
        ENDIF
 C
 C *****************************************************************************
@@ -1942,6 +1984,7 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.6  
         FACOFFWIN  = 1.
         FACUTILPV  = 1.1 
@@ -2003,10 +2046,15 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.29       
         FACOFFWIN  = 1.  
         FACUTILPV  = 1.
-        BATDISCH   = 0.39             
+        BATDISCH   = 0.35             
+C       FCCHARG    = 0.029 
+C       FCDISCH    = 0.029      
+        FCCHARG    = 0.002 
+        FCDISCH    = 0.002      
         DAYH2STOR  = 3.  
         STORUGDYS  = 0. 
        ENDIF
@@ -2062,10 +2110,13 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 2.6   
         FACOFFWIN  = 0.0   
         FACUTILPV  = 0.85 
         BATDISCH   = 0.4           
+        FCDISCH    = 0.025      
+        FCCHARG    = 0.025  
         DAYH2STOR  = 6.  
         STORUGDYS  = 6. 
        ENDIF
@@ -2186,6 +2237,7 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.7  
         FACOFFWIN  = 0.7  
         FACUTILPV  = 1.6 
@@ -2239,6 +2291,7 @@ C
        HCDDADD    = 1.
 C
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.63     
         FACOFFWIN  = 1. 
         FACUTILPV  = 0.5
@@ -2305,10 +2358,11 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 1.6 
-        FACOFFWIN  = 0.7    
-        FACUTILPV  = 1.63     
-        BATDISCH   = 0.11           
+        FRCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 1.595 
+        FACOFFWIN  = 0.45    
+        FACUTILPV  = 1.9      
+        BATDISCH   = 0.07           
         DAYH2STOR  = 2.  
         STORUGDYS  = 1. 
        ENDIF
@@ -2370,6 +2424,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.75   
         FACOFFWIN  = 0. 
         FACUTILPV  = 0.8     
@@ -2437,6 +2492,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.5  
         FACOFFWIN  = 1.
         FACUTILPV  = 1.5  
@@ -2504,6 +2560,7 @@ C
        HCDDADD    = 2.
 C
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.
         FACOFFWIN  = 1.
         FACUTILPV  = 1.64     
@@ -2520,6 +2577,7 @@ C                           LITHUANIA (57%), SWEDEN (>50%), POLAND (>50%)
 C                           FINLAND (>50%)  
 C
 C (GRIDLOAD=GRIDUSE) 
+C
       ELSEIF (GRIDUSE.EQ.'EUROPE') THEN 
        DEGXLON    = 15.2551         
        GRIDLOAD   = GRIDUSE 
@@ -2574,68 +2632,12 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 1.3      
-        FACOFFWIN  = 0.98  
-        FACUTILPV  = 1.
-        BATDISCH   = 0.001 
-        DAYH2STOR  = 31.  
-        STORUGDYS  = 25. 
-C
-        IF (FRCLDEGS.EQ.0.) THEN
-         FACONWIN   = 1.5     
-         FACOFFWIN  = 1.
-         FACUTILPV  = 1.2
-         STORUGDYS  = 30. 
-        ELSEIF (FRCLDEGS.EQ.0.05) THEN
-         FACONWIN   = 1.5     
-         FACOFFWIN  = 0.99  
-         FACUTILPV  = 1.2
-         STORUGDYS  = 15. 
-         DAYH2STOR  = 17.  
-        ELSEIF (FRCLDEGS.EQ.0.1) THEN
-         STORUGDYS  = 25. 
-        ELSEIF (FRCLDEGS.EQ.0.15) THEN
-         FACONWIN   = 1.2       
-         FACOFFWIN  = 0.98  
-         FACUTILPV  = 0.9 
-         STORUGDYS  = 1. 
-         DAYH2STOR  = 31. 
-        ELSEIF (FRCLDEGS.EQ.0.2) THEN
-         FACONWIN   = 1.2       
-         FACOFFWIN  = 0.98  
-         FACUTILPV  = 0.6 
-         STORUGDYS  = 1. 
-         DAYH2STOR  = 12. 
-        ELSEIF (FRCLDEGS.EQ.0.3) THEN
-         FACONWIN   = 1.1       
-         FACOFFWIN  = 0.9  
-         FACUTILPV  = 0.55  
-         FCCHARG    = 0.  
-         FCDISCH    = 0.       
-         BATDISCH   = 0.   
-         STORUGDYS  = 1. 
-         DAYH2STOR  = 5. 
-        ELSEIF (FRCLDEGS.EQ.0.5) THEN
-         FACONWIN   = 0.9        
-         FACOFFWIN  = 0.4  
-         FACUTILPV  = 0.5 
-         BATDISCH   = 0.   
-         FCCHARG    = 0. 
-         FCDISCH    = 0.       
-         STORUGDYS  = 1. 
-         DAYH2STOR  = 1. 
-        ELSEIF (FRCLDEGS.EQ.0.7) THEN
-         FACONWIN   = 0.4         
-         FACOFFWIN  = 0.3  
-         FACUTILPV  = 0.25   
-         FACRESPV   = 0.65
-         CSPTURBFAC = 0. 
-         BATDISCH   = 0.   
-         FCCHARG    = 0. 
-         FCDISCH    = 0.       
-         STORUGDYS  = 1. 
-         DAYH2STOR  = 1. 
-        ENDIF
+        FRCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 1.5     
+        FACOFFWIN  = 0.99  
+        FACUTILPV  = 1.18
+        STORUGDYS  = 11. 
+        DAYH2STOR  = 17.  
        ENDIF
 C      ENDIF IFEGS
 C
@@ -2685,7 +2687,7 @@ C WITH NO BATTERIES
         DAYH2STOR  = 1. 
        ENDIF
 C
-C      STORUGDYS  = 0.
+       STORUGDYS  = 0.
 C
        PHSMIN     = 0.
        FRSTORINIT = 0.9
@@ -2693,6 +2695,10 @@ C
        HWFAC      = 0.  
        FLDISELEC  = 0.
        HCDDADD    = 1.
+C
+       IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
+       ENDIF 
 C  
 C *****************************************************************************
 C                       HAITI-DOMINICAN REPUBLIC
@@ -2753,6 +2759,7 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 2.69    
         FACOFFWIN  = 0.94  
         FACUTILPV  = 1.1   
@@ -2811,6 +2818,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.45  
         FACOFFWIN  = 0.
         FACUTILPV  = 0.
@@ -2877,10 +2885,13 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.2 
         FACOFFWIN  = 0.6
         FACUTILPV  = 1.6
         BATDISCH   = 1.2 
+        FCCHARG    = 0.23  
+        FCDISCH    = 0.23      
         DAYH2STOR  = 1. 
         STORUGDYS  = 4.
        ENDIF
@@ -2944,13 +2955,14 @@ C
        HCDDADD    = 2.
 C
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.4
         FACOFFWIN  = 0.
         FACUTILPV  = 3.
         FACCOMPV   = 1.5 
         BATDISCH   = 0.2
-        FCCHARG    = 0.001
-        FCDISCH    = 0.001    
+        FCCHARG    = 0.00001
+        FCDISCH    = 0.00001    
         DAYH2STOR  = 14.
         STORUGDYS  = 21.
        ENDIF
@@ -3014,6 +3026,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 0.71 
         FACOFFWIN  = 1.8 
         FACUTILPV  = 1.18  
@@ -3079,6 +3092,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 0.2
         FACOFFWIN  = 2.3 
         FACUTILPV  = 1.5 
@@ -3137,12 +3151,13 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 2.25 
         FACOFFWIN  = 0.95
         FACUTILPV  = 3.    
         BATDISCH   = 0.04
-        FCCHARG    = 0.0005   
-        FCDISCH    = 0.0005       
+        FCCHARG    = 0.00001   
+        FCDISCH    = 0.00001       
         DAYH2STOR  = 10.
         STORUGDYS  = 1.
        ENDIF
@@ -3205,6 +3220,7 @@ C
        HCDDADD    = 1.
 C
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 0.88  
         FACOFFWIN  = 2.03 
         FACUTILPV  = 1.71    
@@ -3274,6 +3290,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 2.
         FACOFFWIN  = 0.94 
         FACUTILPV  = 1.4 
@@ -3341,6 +3358,7 @@ C
        HCDDADD    = 1.
 C  
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.35
         FACOFFWIN  = 1.89 
         FACUTILPV  = 1.35   
@@ -3406,10 +3424,27 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1.
         FACOFFWIN  = 0.89 
         FACUTILPV  = 2.8    
         BATDISCH   = 0.19    
+        FCCHARG    = 0.   
+        FCDISCH    = 0.   
+        DAYH2STOR  = 3.
+        STORUGDYS  = 8.
+       ENDIF
+C
+       HCDDADD    = 1.
+C 
+       IF (IFEGS.EQ.1) THEN
+        RCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 1.
+        FACOFFWIN  = 0.89 
+        FACUTILPV  = 2.8    
+        BATDISCH   = 0.19    
+        FCCHARG    = 0.   
+        FCDISCH    = 0.   
         DAYH2STOR  = 3.
         STORUGDYS  = 8.
        ENDIF
@@ -3461,6 +3496,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 2.2
         FACOFFWIN  = 0.53
         FACUTILPV  = 0.63
@@ -3519,9 +3555,10 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 1.24   
-        FACOFFWIN  = 0.72
-        FACUTILPV  = 1.38
+        FRCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 1.   
+        FACOFFWIN  = 0.5
+        FACUTILPV  = 1.3
         BATDISCH   = 0.
         DAYH2STOR  = 1.
         STORUGDYS  = 2.
@@ -3577,6 +3614,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 1. 
         FACOFFWIN  = 0.73
         FACUTILPV  = 1.1  
@@ -3686,6 +3724,7 @@ C
        HCDDADD    = 1.
 C 
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 0.2
         FACOFFWIN  = 1.5    
         FACUTILPV  = 1.4   
@@ -3754,6 +3793,7 @@ C
        HCDDADD    = 5.
 C
        IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 0.1
         FACOFFWIN  = 2.5 
         FACUTILPV  = 1.05  
@@ -3820,69 +3860,78 @@ C
        HCDDADD    = 1.
 C
        IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 0.37 
-        FACOFFWIN  = 1.53 
-        FACUTILPV  = 0.8    
-        BATDISCH   = 0.16       
-        STORUGDYS  = 2.
+        FRCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 0.35 
+        FACOFFWIN  = 2.
+        FACUTILPV  = 0.9    
+        BATDISCH   = 0.2        
+        FCCHARG    = 0.047    
+        FCDISCH    = 0.047  
+        STORUGDYS  = 1.
+        DAYH2STOR  = 90.
 C
-        IF (FRCLDEGS.EQ.0.) THEN
-         FACONWIN   = 0.44 
-         FACOFFWIN  = 1.6
-         FACUTILPV  = 1.  
-         BATDISCH   = 0.23
-         STORUGDYS  = 16.
-         DAYH2STOR  = 79.
-        ELSEIF (FRCLDEGS.EQ.0.05) THEN
-         FACONWIN   = 0.35 
-         FACOFFWIN  = 2.
-         FACUTILPV  = 0.9    
-         BATDISCH   = 0.2        
-         FCCHARG    = 0.047    
-         FCDISCH    = 0.047  
-         STORUGDYS  = 1.
-         DAYH2STOR  = 90.
-        ELSEIF (FRCLDEGS.EQ.0.1) THEN
-        ELSEIF (FRCLDEGS.EQ.0.15) THEN
-         FACONWIN   = 0.35  
-         FACOFFWIN  = 1.50 
-         FACUTILPV  = 0.8    
-         BATDISCH   = 0.14       
-         STORUGDYS  = 2.
-         DAYH2STOR  = 30.
-        ELSEIF (FRCLDEGS.EQ.0.2) THEN
-         FACONWIN   = 0.35 
-         FACOFFWIN  = 1.43 
-         FACUTILPV  = 0.8    
-         BATDISCH   = 0.11       
-         STORUGDYS  = 2.
-         DAYH2STOR  = 20.
-        ELSEIF (FRCLDEGS.EQ.0.3) THEN
-         FACONWIN   = 0.30 
-         FACOFFWIN  = 1.18 
-         FACUTILPV  = 0.8    
-         BATDISCH   = 0.06       
-         STORUGDYS  = 2.
-         DAYH2STOR  = 15.
-        ELSEIF (FRCLDEGS.EQ.0.5) THEN
-         FACONWIN   = 0.30 
-         FACOFFWIN  = 1. 
-         FACUTILPV  = 0.74    
-         FCCHARG    = 0.01     
-         FCDISCH    = 0.01  
-         BATDISCH   = 0.01       
-         STORUGDYS  = 1.
-         DAYH2STOR  = 3.
-        ELSEIF (FRCLDEGS.EQ.0.7) THEN
-         FACONWIN   = 0.30 
-         FACOFFWIN  = 0.6  
-         FACUTILPV  = 0.6      
-         FCCHARG    = 0.01     
-         FCDISCH    = 0.01  
-         BATDISCH   = 0.01       
-         STORUGDYS  = 1.
-         DAYH2STOR  = 3.
-        ENDIF
+C       IF (FRCLDEGS.EQ.0.) THEN
+C        FACONWIN   = 0.44 
+C        FACOFFWIN  = 1.6
+C        FACUTILPV  = 1.  
+C        BATDISCH   = 0.23
+C        STORUGDYS  = 16.
+C        DAYH2STOR  = 79.
+C       ELSEIF (FRCLDEGS.EQ.0.05) THEN
+C        FACONWIN   = 0.35 
+C        FACOFFWIN  = 2.
+C        FACUTILPV  = 0.9    
+C        BATDISCH   = 0.2        
+C        FCCHARG    = 0.047    
+C        FCDISCH    = 0.047  
+C        STORUGDYS  = 1.
+C        DAYH2STOR  = 90.
+C       ELSEIF (FRCLDEGS.EQ.0.1) THEN
+C        FACONWIN   = 0.37 
+C        FACOFFWIN  = 1.53 
+C        FACUTILPV  = 0.8    
+C        BATDISCH   = 0.16       
+C        STORUGDYS  = 2.
+C       ELSEIF (FRCLDEGS.EQ.0.15) THEN
+C        FACONWIN   = 0.35  
+C        FACOFFWIN  = 1.50 
+C        FACUTILPV  = 0.8    
+C        BATDISCH   = 0.14       
+C        STORUGDYS  = 2.
+C        DAYH2STOR  = 30.
+C       ELSEIF (FRCLDEGS.EQ.0.2) THEN
+C        FACONWIN   = 0.35 
+C        FACOFFWIN  = 1.43 
+C        FACUTILPV  = 0.8    
+C        BATDISCH   = 0.11       
+C        STORUGDYS  = 2.
+C        DAYH2STOR  = 20.
+C       ELSEIF (FRCLDEGS.EQ.0.3) THEN
+C        FACONWIN   = 0.30 
+C        FACOFFWIN  = 1.18 
+C        FACUTILPV  = 0.8    
+C        BATDISCH   = 0.06       
+C        STORUGDYS  = 2.
+C        DAYH2STOR  = 15.
+C       ELSEIF (FRCLDEGS.EQ.0.5) THEN
+C        FACONWIN   = 0.30 
+C        FACOFFWIN  = 1. 
+C        FACUTILPV  = 0.74    
+C        FCCHARG    = 0.01     
+C        FCDISCH    = 0.01  
+C        BATDISCH   = 0.01       
+C        STORUGDYS  = 1.
+C        DAYH2STOR  = 3.
+C       ELSEIF (FRCLDEGS.EQ.0.7) THEN
+C        FACONWIN   = 0.30 
+C        FACOFFWIN  = 0.6  
+C        FACUTILPV  = 0.6      
+C        FCCHARG    = 0.01     
+C        FCDISCH    = 0.01  
+C        BATDISCH   = 0.01       
+C        STORUGDYS  = 1.
+C        DAYH2STOR  = 3.
+C       ENDIF
        ENDIF
 C      ENDIF IFEGS.EQ.1
 C
@@ -3940,16 +3989,6 @@ C WITH NO BATTERIES
 
        STORUGDYS  = 12.
 C
-       IF (IFEGS.EQ.1) THEN
-        FACONWIN   = 1.6 
-        FACOFFWIN  = 0.88    
-        FACUTILPV  = 1.95
-        BATDISCH   = 0.84     
-        FCCHARG    = 0.13 
-        FCDISCH    = 0.13  
-        DAYH2STOR  = 10.
-       ENDIF
-C
 C DATA FROM FERC: 
 C https://www.ferc.gov/licensing/pumped-storage-projects
 C LICENSES:                    18.897 GW MAY 22, 2023
@@ -3964,6 +4003,26 @@ C TOTAL PENDING:               94.38  GW
        HWFAC      = 1.0
        FLDISELEC  = 0.3
        HCDDADD    = 1. 
+C
+       IF (IFEGS.EQ.1) THEN
+        FRCLDEGS   = 0.05 + FEGSDC
+        FACONWIN   = 1.6 
+        FACOFFWIN  = 0.88    
+        FACUTILPV  = 1.95
+        BATDISCH   = 0.84
+        FCCHARG    = 0.13 
+        FCDISCH    = 0.13  
+        DAYH2STOR  = 10.
+C
+        IF (IFDATCEN.EQ.2) THEN
+         FACONWIN   = 2.
+         FACOFFWIN  = 1.
+         FACUTILPV  = 2.3    
+         BATDISCH   = 0.88
+         FCCHARG    = 0.2  
+         FCDISCH    = 0.2   
+        ENDIF
+       ENDIF
 C
 C *****************************************************************************
 C                INDIVIDUAL + COMBINATIONS OF EUROPEAN COUNTRIES 
@@ -5593,6 +5652,7 @@ C
        HCDDADD    = 0. 
 C
        IF (IFEGS.EQ.1) THEN 
+        FRCLDEGS   = 0.05 + FEGSDC
         FACONWIN   = 2.5   
         FACUTILPV  = 4.3  
         BATDISCH   = 0.04     
@@ -5600,24 +5660,6 @@ C
         FCDISCH    = 0.018    
         STORHHFC   = 128.
        ENDIF
-C
-C THIS GIVES A SET OF RESULTS FOR PREVIOUS VERSION OF CODE
-C WHERE MXHRDRM=0
-C
-C      IF (MXHRDRM.EQ.0) THEN
-C       FACONWIN   = 3.0  
-C       FACUTILPV  = 5.0 
-C       STORHHFC   = 50.
-C       IF (IFEGS.EQ.1) THEN
-C        BATDISCH  = 0.12        
-C        FCCHARG   = 0.006 
-C        FCDISCH   = 0.006 
-C       ELSE
-C        BATDISCH  = 0.2    
-C        FCCHARG   = 0.008 
-C        FCDISCH   = 0.008 
-C       ENDIF
-C      ENDIF
 C
       ENDIF
 C     ENDIF GRIDUSE
@@ -11159,17 +11201,31 @@ C DECLOAD   = TLOAD2050 - TLFIN2050 SHOULD = 0.
 C CPERFORM  = COEFFICIENT OF PERFORMANCE OF HEAT PUMPS
 C            (J-TH/J-ELEC = = KWH-TH/KWH-ELEC = KW-TH/KW-ELEC)
 C           = RATIO OF JOULES OF HEAT MOVED OR PRODUCED PER JOULE OF ELECTRICITY 
+C IFDATCEN  = 1: INCREASE 2050 DEMAND BY A CONSTANT AMOUNT EACH TIME STEP
+C FDATCEN   = FRACTION OF ANNUAL AVG ALL PURPOSE LOAD (TLFIN2050) ADDED ON
+C             TOP OF TLFIN2050 AS INFLEXIBLE LOAD FOR DATACENTERS  
+C DATCENTW  = TW CONSTANT INFLEXIBLE LOAD DUE TO DATA CENTERS IN 2050
+C EVERYLOAD = TOTAL 2050 REGIONAL ALL-SECTOR LOAD (TW) PLUS DATA CENTER LOAD 
 C
       TLFIN2050 = BLOADRES+BLOADCOM+BLOADIND+BLOADTRA+BLOADAGF+BLOADOTH 
       DECLOAD   = TLOAD2050 - TLFIN2050
 C
-      WRITE(IOUT,160) TLOAD2050*GWPTW,TLFIN2050*GWPTW,
+      IF (IFDATCEN.GE.1) THEN 
+       DATCENTW   = TLFIN2050 * FDATCEN
+       EVERYLOAD  = TLFIN2050 + DATCENTW  
+      ELSE
+       DATCENTW   = 0.
+       EVERYLOAD  = TLFIN2050   
+      ENDIF
+C
+      WRITE(IOUT,160) (TLOAD2050+DATCENTW)*GWPTW,EVERYLOAD*GWPTW,
      1                BLOADRES *GWPTW,BLOADRES *GWPTW,
      1                BLOADCOM *GWPTW,BLOADCOM *GWPTW,
      1                BLOADTRA *GWPTW,BLOADTRA *GWPTW,
      1                BLOADIND *GWPTW,BLOADIND *GWPTW,
      1                BLOADAGF *GWPTW,BLOADAGF *GWPTW,
      1                BLOADOTH *GWPTW,BLOADOTH *GWPTW,
+     1                DATCENTW *GWPTW,DATCENTW *GWPTW,
      1                FDISTHEAT, FMORTBAU,
      1                CPERFORM,  CPERF1,
      1                DECLOAD*GWPTW
@@ -11181,6 +11237,7 @@ C
      1  'INDUSTRIAL  LOAD (GW) BEF/AFT HEAT PUMPS       = ',2(0PF12.6),/
      1  'AG/FOR/FISH LOAD (GW) BEF/AFT HEAT PUMPS       = ',2(0PF12.6),/
      1  'OTHER       LOAD (GW) BEF/AFT HEAT PUMPS       = ',2(0PF12.6),/
+     1  'DATA CENTER LOAD (GW) BEF/AFT HEAT PUMPS       = ',2(0PF12.6),/
      1  'FDISTHEAT-FRAC HEAT,COLD THAT IS DH, FMORTBAU  = ',2(0PF12.6),/
      1  'HEAT PUMP COEFFICIENT OF PERFORMANCE, CPERF1   = ',2(0PF12.6),/
      1  'DECLOAD (GW) SHOULD = 0                        = ',0PF12.6,/) 
@@ -11239,6 +11296,7 @@ C *****************************************************************************
 C                  PRINT LOAD AND H2 STATISTICS BY SECTOR
 C *****************************************************************************
 C TLFIN2050 = TOTAL 2050 ALL-SECTOR LOAD WITH WWS (TW) AFTER HEAT PUMPS
+C EVERYLOAD = TOTAL 2050 REGIONAL ALL-SECTOR LOAD (TLFIN2050 TW) PLUS DATA CENTER LOAD 
 C BLOADRES  = 2050 RESIDENTIAL      WWS LOAD (TW) AFTER HEAT PUMPS 
 C BLOADCOM  = 2050 COMMERCIAL       WWS LOAD (TW) AFTER HEAT PUMPS
 C BLOADIND  = 2050 INDUSTRIAL       WWS LOAD (TW) AFTER HEAT PUMPS
@@ -11247,17 +11305,17 @@ C BLOADAGF  = 2050 AG/FORESTRY/FISH WWS LOAD (TW) AFTER HEAT PUMPS
 C BLOADOTH  = 2050 OTHER            WWS LOAD (TW) AFTER HEAT PUMPS
 C HOTINDDEM = INDUSTRIAL DEMAND (TW) THAT CAN BE MET WITH HI-TEMP BRICK STORAGE
 C
-      WRITE(IOUT,184) TLFIN2050*GWPTW,TLOADINFX*GWPTW,TLOADFLEX*GWPTW,
+      WRITE(IOUT,184) EVERYLOAD*GWPTW,TLOADINFX*GWPTW,TLOADFLEX*GWPTW,
      1                TSTORCOOL*GWPTW,TSTORAWH *GWPTW,TLOADDRM *GWPTW,
-     1                TLOADH2  *GWPTW, HOTINDDEM*GWPTW
+     1                TLOADH2  *GWPTW, HOTINDDEM*GWPTW, DATCENTW*GWPTW
  184  FORMAT('TLFIN2050-GW TLOADINFX TLOADFLEX TSTORCOOL  TSTORAWH   ',
-     1       'TLOADDRM     TLOADH2   HOTINDDEM',/8(0PF11.5)/) 
+     1       'TLOADDRM     TLOADH2   HOTINDDEM  DATCENGW',/9(0PF11.5)/) 
 C
       WRITE(IOUT,169) BLOADRES *GWPTW, BLOADCOM*GWPTW, BLOADIND*GWPTW, 
      1                BLOADTRA *GWPTW, BLOADAGF*GWPTW, BLOADOTH*GWPTW,
-     1                TLFIN2050*GWPTW  
+     1                DATCENTW *GWPTW, EVERYLOAD*GWPTW   
  169  FORMAT('BLOADRES-GW BLOADCOM  BLOADIND   BLOADTRA   BLOADAGF   ',
-     1       'BLOADOTH    BLFIN2050 '/,7(0PF11.4)/)
+     1       'BLOADOTH    DATCENGW  BLFIN2050 '/,8(0PF11.4)/)
 C 
 C TFLEXTRA = TOTAL EV LOAD (TW) THAT IS FLEXIBLE PLUS ELEC LOAD TO PRODUCE
 C            H2 FOR TRANSPORT H2  
@@ -13395,7 +13453,7 @@ C
      1                DAYH2STOR,  FFLXCAIS,
      1                TWHH2TOT,
      1                DAMCAPRAT,  HPTURBRAT,
-     1                FLDISELEC,  FRCLDEGS,
+     1                FLDISELEC,  FRCLDEGS,  IFDATCEN,
      1                IFSTATES,   IFCANARY,  IMERGH2, 
      1                IFHEATBAT,  IFEGS,     IFNEWLOAD      
 C
@@ -13418,8 +13476,8 @@ C
      1       'DAYH2STOR FFLXCAIS             = ',2(1X,0PF12.5),/
      1       'TWHH2TOT (TWH/YR ELEC FOR H2)  = ',1(1X,0PF12.5),/
      1       'DAMCAPRAT (YR)                 = ',1(1X,0PF12.5),/
-     1       'HPTURBRAT (--)                 = ',1(1X,0PF12.5),/
-     1       'FLDISELEC (--) FRCLDEGS        = ',2(1X,0PF12.5),/ 
+     1       'HPTURBRAT(-)                   = ',1(1X,0PF12.5),/
+     1       'FLDISELEC(-) FRCLDEGS IFDATCEN = ',2(1X,0PF12.5),1X,I12/ 
      1       'IFSTATES IFCANARY IMERGH2      = ',3(I13),/
      1       'IFHEATBAT IFEGS IFNEWLOAD      = ',3(I13),/)
 C
@@ -14181,6 +14239,11 @@ C             OF EACH 1..NUMGRIDS REGION
 C NLOADFILE = NUMBER OF HOURLY LOAD DATA FILES TO READ & SUM OVER GRID REGION
 C           = 0 FOR U.S. STATES (IFSTATES=1) & 143 COUNTRIES OUTSIDE EUROPE 
 C IFNEWLOAD = 1: USE NEW HOURLY LOAD DATA FROM ELECTRICITY MAPS
+C                https://portal.electricitymaps.com/datasets
+C                CITATION: ELECTRICITY MAPS (2025) COUNTRY DATA FOR 2024, VERSION 
+C                JAN 27, 205, ELECTRICITY MAPS, https://www.electricitymaps.com 
+C                DATA PROVIDED BY  RYAN SHOLIN FROM ELECTRICITY MAPS AND REFORMATTED 
+C                BY ANDREAS MUHLBAUER MAY 2025.
 C                DATA FOR 2024 FOR ALL COUNTRIES & FOR REGIONS IN COUNTRIES 
 C           = 0: USE PROJECTED 2030 DATA NEOCARBON ENERGY &
 C                2006-2015 DATA FROM ENTSOE 
@@ -14498,7 +14561,7 @@ C *****************************************************************************
 C BLOAD     = CURRENT HOUR NON-COLD, NOT HOT INFLEX LOAD (TW) ACROSS ALL SECTORS 
 C DLOAD     = 2050 30-SECOND INFLEXIBLE LOAD DATA (TW) FOR GRID REGION FROM LOAD DATA
 C             EXTRAPOLATED TO 2050
-C TLOADINFX = EXTIMATED INFLEXIBLE LOAD IN 2050 WITH WWS (TW)
+C TLOADINFX = ESTIMATED INFLEXIBLE LOAD IN 2050 WITH WWS (TW)
 C INITYLOAD = INITIAL YEAR (2006-2016 CURRENTLY) OF LOAD DATA USED. 
 C             IF ONLY 1 YEAR OF LOAD DATA --> INITYLOAD=IFINYLOAD=IBEGYLOAD
 C           = 2006 AND IFCONUS=1 OR GRIDLOAD='CONUS'
@@ -15122,6 +15185,7 @@ C
         IF (TIMWWS(J).GE.TIMLOAD(I).AND.TIMWWS(J).LT.TIMLOAD(I+1).AND.
      1      TIMWWS(J).LT.TIMLOAD(NHRSIM)) THEN
 C
+C CLOAD     = 2050 HOURLY INFLEXIBLE LOAD (TW) FOR EACH TIMWWS TIME INCREMENT
 C ELECCOLD  = ANNUAL AVG ELEC LOAD (TW) TO SATISFY INFLEX COLD LOAD W/HEAT PUMPS
 C ELECHOT   = ANNUAL AVG ELEC LOAD (TW) TO SATISFY INFLEX HOT LOAD W/HEAT PUMPS
 C CINFXCLD  = CURRENT ELEC LOAD (TW) TO SATISFY INFLEX COLD LOAD W/HEAT PUMPS
@@ -15131,11 +15195,23 @@ C
           CLOAD(J) = BLOAD(I) 
          ENDIF
 C
+C ADD BUILDING COOLING AND HEATING ELECTRIC DEMAND
+C
          IF (IFGATHEAT.EQ.1) THEN
           CLOAD(J) = CLOAD(J) + CINFXHLD(J) + CINFXCLD(J)
          ELSEIF (IFGATHEAT.GE.2) THEN 
           CLOAD(J) = CLOAD(J) + HOTHOUR(I) + COLDHOUR(I)
          ENDIF
+C
+C *********************************************************************
+C          ADD INFLEXIBLE DEMAND DUE TO ADDITIONAL DATA CENTERS
+C *********************************************************************
+C IFDATCEN  = 1: INCREASE 2050 DEMAND BY A CONSTANT AMOUNT EACH TIME STEP
+C DATCENTW  = TW CONSTANT INFLEXIBLE LOAD DUE TO DATA CENTERS IN 2050
+C
+         IF (IFDATCEN.GE.1) THEN
+          CLOAD(J) = CLOAD(J) + DATCENTW 
+         ENDIF 
 C
 C AMAXLOAD  = MAXIMUM LOAD (TW) ANY TIME BETWEEN 1..NYEARS
 C AMINLOAD  = MINIMUM LOAD (TW) ANY TIME BETWEEN 1..NYEARS
@@ -17735,7 +17811,8 @@ C
 C
 C LOSSES INTO ALL STORAGE
      1                       HCSTLI( I,J) + PHSTLI(I,J) + HBSTLI(I,J) 
-     1                     + HOSTLI( I,J) + HTSTLI(I,J) + UGSTLI(I,J),
+     1                     + HOSTLI( I,J) + HTSTLI(I,J) + UGSTLI(I,J)
+     1                     + BRSTLI( I,J),
 C
 C LOSSES INTO AND OUT OF ALL STORAGE
      1                       HCSTLI( I,J) + HCSTLS(I,J) 
@@ -17867,7 +17944,8 @@ C
 C
 C LOSSES INTO ALL STORAGE
      1                       HCSTLI( I,J) + PHSTLI(I,J) + HBSTLI(I,J) 
-     1                     + HOSTLI( I,J) + HTSTLI(I,J) + UGSTLI(I,J),
+     1                     + HOSTLI( I,J) + HTSTLI(I,J) + UGSTLI(I,J)
+     1                     + BRSTLI( I,J),
 C
 C LOSSES INTO AND OUT OF ALL STORAGE
      1                       HCSTLI( I,J) + HCSTLS(I,J) 
@@ -17917,6 +17995,7 @@ C
      1                     + HOSTLI( I,J) + HOSTOR( I,J)
      1                     + HTSTLI( I,J) + HTSTOR( I,J)
      1                     + UGSTLI( I,J) + UGSTOR( I,J)
+     1                     + BRSTLI( I,J) + BRSTOR( I,J)
      1                     + H2LOAD( I,J) + H2STOR( I,J)
      1                     + HRSHED( I,J) + HRTDLS( I,J),
 C
@@ -20774,11 +20853,15 @@ C  TREMCSTOR = NET EN (TWH) (NOT LOSSES) DISCHARGED FROM CSP STORAGE DURING SIM
 C  CFCSP    = CAPACITY FACTOR (FRAC) OF CSP STORAGE 
 C           = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFCSP    = TREMCSTOR / (CSPCHSTO * TSUMHRS + SMAL30) 
+      IF (CSPCHSTO.GT.SMAL30) THEN
+       CFCSP   = TREMCSTOR / (CSPCHSTO * TSUMHRS + SMAL50) 
+      ELSE
+       CFCSP   = 0.
+      ENDIF
       DELCSTOR = TSUMCSTOR + TSUMCSTLS - TSUMCSTLI
       FINCSTOR = DELCSTOR * RTCSPEFF
       FINEFFIC = PCT * (TREMCSTOR + FINCSTOR)
-     1         /       (TREMCSTOR + DELCSTOR + TSUMCSTLS + SMAL30)
+     1         /       (TREMCSTOR + DELCSTOR + TSUMCSTLS + SMAL50)
       WRITE(IOUT,289) TSUMCSTLS,TREMCSTOR,FINEFFIC,PCT*EFFCSP,CFCSP 
 C
 C PHS STORAGE
@@ -20786,11 +20869,11 @@ C  TREMPSTOR = NET EN (TWH) (NOT LOSSES) DISCHARGED FROM PHS STORAGE DURING SIM
 C  CFPHS    = CAPACITY FACTOR (FRAC) OF PHS STORAGE 
 C           = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFPHS    = TREMPSTOR / (TSTORPHS * TSUMHRS + SMAL30) 
+      CFPHS    = TREMPSTOR / (TSTORPHS * TSUMHRS + SMAL50) 
       DELPSTOR = TSUMPSTOR + TSUMPSTLS - TSUMPSTLI
       FINPSTOR = DELPSTOR * RTPHSEFF
       FINEFFIC = PCT * (TREMPSTOR + FINPSTOR)
-     1         /       (TREMPSTOR + DELPSTOR + TSUMPSTLS + SMAL30)
+     1         /       (TREMPSTOR + DELPSTOR + TSUMPSTLS + SMAL50)
       WRITE(IOUT,292) TSUMPSTLS,TREMPSTOR,FINEFFIC,PCT*EFFPHS,CFPHS
 C
 C HYDROGEN STORAGE FOR ELECTRICITY
@@ -20801,11 +20884,11 @@ C  CFH2GRID = CAPACITY FACTOR (FRAC) OF GRID HYDROGEN STORAGE
 C           = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C              CELL EFFIC, ETC. 
 C
-      CFH2GRID = TREMFSTOR / (H2SDISCH * TSUMHRS + SMAL30) 
+      CFH2GRID = TREMFSTOR / (H2SDISCH * TSUMHRS + SMAL50) 
       DELFSTOR = TSUMFSTOR + TSUMFSTLS - TSUMFSTLI
       FINFSTOR = DELFSTOR * EFFH2CD 
       FINEFFIC = PCT * (TREMFSTOR + FINFSTOR)
-     1         /       (TREMFSTOR + DELFSTOR + TSUMFSTLS + SMAL30)
+     1         /       (TREMFSTOR + DELFSTOR + TSUMFSTLS + SMAL50)
       WRITE(IOUT,293) TSUMFSTLS,TREMFSTOR,FINEFFIC,PCT*EFFH2CD,CFH2GRID
 C
 C HYDROPOWER STORAGE
@@ -20826,9 +20909,9 @@ C            = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPU
 C  CFBSHYD   = CAPACITY FACTOR (FRAC) OF HYDROPOWER FOR BASELOAD 
 C            = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFHYD    = TWHHYD   / (HYDISCHTW * TSUMHRS + SMAL30) 
-      CFBSHYD  = TWHBSHYD / (BASEHYD   * TSUMHRS + SMAL30) 
-      CFPKHYD  = TWHPKHYD / (PKHYDISCH * TSUMHRS + SMAL30) 
+      CFHYD    = TWHHYD   / (HYDISCHTW * TSUMHRS + SMAL50) 
+      CFBSHYD  = TWHBSHYD / (BASEHYD   * TSUMHRS + SMAL50) 
+      CFPKHYD  = TWHPKHYD / (PKHYDISCH * TSUMHRS + SMAL50) 
       DELFSTOR = TSUMFSTOR + TSUMFSTLS - TSUMFSTLI
       WRITE(IOUT,597) 0.,TWHHYD,  0.,0.,CFHYD
       WRITE(IOUT,599) 0.,TWHBSHYD,0.,0.,CFBSHYD
@@ -20839,11 +20922,11 @@ C  TREMOSTOR = NET EN (TWH) (NOT LOSSES) REM FROM CW-STES + PCM-ICE DURING SIM
 C  CFCOOL    = CAPACITY FACTOR (FRAC) OF CW-STES PLUS ICE STORAGE 
 C            = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFCOOL   = TREMOSTOR / (TSTORCOOL * TSUMHRS + SMAL30)
+      CFCOOL   = TREMOSTOR / (TSTORCOOL * TSUMHRS + SMAL50)
       DELOSTOR = TSUMOSTOR + TSUMOSTLS - TSUMOSTLI
       FINOSTOR = DELOSTOR * RTCOLDEF
       FINEFFIC = PCT * (TREMOSTOR + FINOSTOR)
-     1         /       (TREMOSTOR + DELOSTOR + TSUMOSTLS + SMAL30)
+     1         /       (TREMOSTOR + DELOSTOR + TSUMOSTLS + SMAL50)
       WRITE(IOUT,290) TSUMOSTLS,TREMOSTOR,FINEFFIC,PCT*EFFCOLD,CFCOOL 
 C
 C HOT WATER STORAGE (HW-STES)
@@ -20852,11 +20935,11 @@ C  HOTDISCH  = MAX DISCHARGE AND CHARGE RATE (TW) OF HOT WATER (HW)-STES
 C  CFHWSTES  = CAPACITY FACTOR (FRAC) OF HW-STES STORAGE 
 C            = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFHWSTES = TREMHSTOR / (HOTDISCH * TSUMHRS + SMAL30)
+      CFHWSTES = TREMHSTOR / (HOTDISCH * TSUMHRS + SMAL50)
       DELHSTOR = TSUMHSTOR + TSUMHSTLS - TSUMHSTLI
       FINHSTOR = DELHSTOR * RTHTESEF
       FINEFFIC = PCT * (TREMHSTOR + FINHSTOR)
-     1         /       (TREMHSTOR + DELHSTOR + TSUMHSTLS + SMAL30)
+     1         /       (TREMHSTOR + DELHSTOR + TSUMHSTLS + SMAL50)
       WRITE(IOUT,295) TSUMHSTLS,TREMHSTOR,FINEFFIC,PCT*EFFHSTES,CFHWSTES
 C
 C HI-T BRICK HEAT STORAGE FOR INDUSTRY 
@@ -20868,11 +20951,11 @@ C  TSUMHRS  = NUMBER OF HOURS OF SIMULATION THAT DATA HAVE BEEN ACCUMULATED FOR
 C  CFBRICK  = CAPACITY FACTOR (FRAC) OF HI-T BRICK STORAGE FOR INDUSTRY
 C           = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFBRICK  = TBRICKTWH / (HBTDISCH * TSUMHRS + SMAL30)
+      CFBRICK  = TBRICKTWH / (HBTDISCH * TSUMHRS + SMAL50)
       DELBRSTO = TSUMBRSTO + TSUMBRSTL - TSUMBRSTI
       FINBRSTO = DELBRSTO * RTHBTEFF
       FINEFFIC = PCT * (TBRICKTWH + FINBRSTO)
-     1         /       (TBRICKTWH + DELBRSTO + TSUMBRSTL + SMAL30)
+     1         /       (TBRICKTWH + DELBRSTO + TSUMBRSTL + SMAL50)
       WRITE(IOUT,296) TSUMBRSTL,TBRICKTWH,FINEFFIC,PCT*EFFHTBAT,CFBRICK
 C
 C UNDERGROUND THERMAL ENERGY STORAGE
@@ -20882,14 +20965,14 @@ C  UTESDISCH = MAX DISCHARGE RATE (TW) UNDERGROUND SEASONAL HEAT STORAGE
 C  TREMUSTOR = NET EN (TWH) (NOT LOSSES) REM FROM UTES
 C
       IF (UTESDISCH.GT.0.) THEN
-       CFUTES  = TREMUSTOR / (UTESDISCH * TSUMHRS + SMAL30)
+       CFUTES  = TREMUSTOR / (UTESDISCH * TSUMHRS + SMAL50)
       ELSE
        CFUTES  = 0.
       ENDIF
       DELUGSTO = TSUMBRSTO + TSUMUGSTL - TSUMUGSTI
       FINUGSTO = DELUGSTO * RTUGEFF
       FINEFFIC = PCT * (TREMUSTOR + FINUGSTO)
-     1         /       (TREMUSTOR + DELUGSTO + TSUMUGSTL + SMAL30)
+     1         /       (TREMUSTOR + DELUGSTO + TSUMUGSTL + SMAL50)
       WRITE(IOUT,297) TSUMUGSTL,TREMUSTOR,FINEFFIC,PCT*EFFUTES,CFUTES
 C
 C BATTERY STORAGE
@@ -20933,11 +21016,11 @@ C
 C  CFBAT    = CAPACITY FACTOR (FRAC) OF GRID BATTERY STORAGE 
 C           = ENERGY OUTPUT (NOT LOSSES) FROM STORAGE OVER SIM / MAX POSS OUTPUT
 C
-      CFBAT    = TREMBSTOR / (BATDISCH * TSUMHRS + SMAL30) 
+      CFBAT    = TREMBSTOR / (BATDISCH * TSUMHRS + SMAL50) 
       DELBSTOR = TSUMBSTOR + TSUMBSTLS - TSUMBSTLI
       FINBSTOR = DELBSTOR * RTBATEFF
       FINEFFIC = PCT * (TREMBSTOR + FINBSTOR)
-     1         /       (TREMBSTOR + DELBSTOR + TSUMBSTLS + SMAL30)
+     1         /       (TREMBSTOR + DELBSTOR + TSUMBSTLS + SMAL50)
       WRITE(IOUT,291) TSUMBSTLS, TREMBSTOR, FINEFFIC, PCT*EFFBAT,
      1                CYCLES, CYCPDAY, CYCPYR, BATLIFE, HRMAXBAT,
      1                BATMXOUT,CFBAT 
