@@ -31,7 +31,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-module load python/3.12.1
+module load python/3.9.0
 source "${REPO_ROOT}/.venv/bin/activate"
 cd "${REPO_ROOT}"
 
