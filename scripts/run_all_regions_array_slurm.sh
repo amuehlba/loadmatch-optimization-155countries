@@ -73,7 +73,8 @@ echo "Done: $REGION   $(date)"
 # (light; run on a login node or in a small salloc):
 #
 #   source .venv/bin/activate
-#   python -m scripts.plot_results --all-regions        # per-region + figA1-A5
-#   python -m scripts.export_comparison                 # comparison_summary.csv
+#   python -m scripts.export_comparison                 # comparison_summary.csv (+ TOTAL)
+#   python -m scripts.plot_comparison                   # fig_cost_comparison + fig_solve_time
+#   python -m scripts.plot_results --all-regions        # figA1-A3 overview
 #   python -m scripts.export_results --regions $(sed -n 's/^[[:space:]]*-[[:space:]]*//p' config/workflow.yaml | grep -E '^[A-Z]' | tr '\n' ' ')
 # ----------------------------------------------------------------------------

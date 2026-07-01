@@ -1990,67 +1990,6 @@ def fig_all_ternary(region_data, overview_dir):
     _save(fig, "figA3_all_regions_ternary", overview_dir)
 
 
-def fig_all_cost_comparison(region_data, overview_dir):
-    """Grouped bars: PI trial-and-error baseline vs GA-optimized annual cost,
-    per region, sorted by % saving, with a TOTAL group.  The paper's headline."""
-    items = [(r, rd) for r, rd in region_data.items()
-             if rd.get("baseline_cost") and rd.get("optimal_cost") is not None]
-    if not items:
-        return
-
-    def _pct(rd):
-        b, g = rd["baseline_cost"], rd["optimal_cost"]
-        return (b - g) / b * 100 if b else 0.0
-
-    items.sort(key=lambda rg: _pct(rg[1]), reverse=True)
-    labels = [_rshort(r) for r, _ in items]
-    base = [rd["baseline_cost"] for _, rd in items]
-    ga   = [rd["optimal_cost"]  for _, rd in items]
-    labels.append("TOTAL")
-    base.append(sum(base))
-    ga.append(sum(ga))
-
-    x = np.arange(len(labels))
-    w = 0.4
-    fig, ax = plt.subplots(figsize=(max(11, 0.5 * len(labels) + 3), 6))
-    ax.bar(x - w / 2, base, w, label="PI baseline (trial & error)", color="#9aa7b4")
-    ax.bar(x + w / 2, ga,   w, label="GA optimized",                color="#2c7fb8")
-    for xi, b, g in zip(x, base, ga):
-        if b:
-            ax.annotate(f"{(b - g) / b * 100:+.1f}%", (xi, max(b, g)),
-                        textcoords="offset points", xytext=(0, 3),
-                        ha="center", fontsize=7, color="#08519c")
-    ax.axvline(len(labels) - 1.5, color="gray", lw=0.8, ls="--", alpha=0.6)
-    ax.set_ylabel("Annual system cost ($B/yr)")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
-    ax.legend(frameon=False)
-    ax.set_title("Baseline vs GA-optimized annual cost by region")
-    _save(fig, "figA4_cost_comparison", overview_dir)
-
-
-def fig_all_solve_time(region_data, overview_dir):
-    """GA solve time per region (minutes), with the cumulative total in the title."""
-    items = [(r, rd) for r, rd in region_data.items()
-             if isinstance(rd.get("solve_seconds"), (int, float))]
-    if not items:
-        return
-    items.sort(key=lambda rg: rg[1]["solve_seconds"], reverse=True)
-    labels = [_rshort(r) for r, _ in items]
-    mins = [rd["solve_seconds"] / 60.0 for _, rd in items]
-    total_h = sum(rd["solve_seconds"] for _, rd in items) / 3600.0
-
-    x = np.arange(len(labels))
-    fig, ax = plt.subplots(figsize=(max(11, 0.5 * len(labels) + 3), 6))
-    ax.bar(x, mins, color="#41ab5d")
-    ax.set_ylabel("GA solve time (minutes)")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
-    ax.set_title("GA solve time by region  "
-                 f"(total = {total_h:.1f} h over {len(labels)} regions)")
-    _save(fig, "figA5_solve_time", overview_dir)
-
-
 def plot_all_regions(repo_root):
     """Load results for all available regions and generate overview figures."""
     results_root = repo_root / "data" / "results_verification"
@@ -2136,10 +2075,9 @@ def plot_all_regions(repo_root):
              fig_all_wind_solar, region_data, overview_dir)
     _try_fig("FigA3 — All-region ternary",
              fig_all_ternary, region_data, overview_dir)
-    _try_fig("FigA4 — Baseline vs GA cost by region",
-             fig_all_cost_comparison, region_data, overview_dir)
-    _try_fig("FigA5 — GA solve time by region",
-             fig_all_solve_time, region_data, overview_dir)
+    # Cost-comparison and solve-time figures are produced by
+    # scripts/plot_comparison.py (reads comparison_summary.csv) — publication
+    # styling (log axis, neutral labels, per-region cost reduction).
 
 
 # ══════════════════════════════════════════════════════════════════════════════

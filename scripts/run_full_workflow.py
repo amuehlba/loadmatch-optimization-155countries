@@ -33,20 +33,9 @@ _DEFAULT_REGION = "UNITED-STATES"
 # (datacenter=...) and passed to the binary as command-line arg 3.
 _IFDATCEN = 0
 
-# Region name (config/Fortran GRIDUSE) -> the PI's xx-file shortcode.  His
-# 30-region post-processing program keys on xx.<SHORTCODE> filenames.
-REGION_SHORTCODE = {
-    "AFRICA-EAST": "AFRICAE",   "AFRICA-NORTH": "AFRICAN",  "AFRICA-SOUTH": "AFRICAS",
-    "AFRICA-WEST": "AFRICAW",   "AUSTRALIA": "AUSTRALIA",   "CANADA": "CANADA",
-    "CENTRAL-AMERIC": "CENAMERICA", "CENTRAL-ASIA": "CENASIA", "CHINA": "CHINA",
-    "CUBA": "CUBA",             "EUROPE": "EUROPE",         "GREENLAND": "GREENLAND",
-    "HAITI": "HAITI",           "ICELAND": "ICELAND",       "INDIA": "INDIA",
-    "ISRAEL": "ISRAEL",         "JAMAICA": "JAMAICA",       "JAPAN": "JAPAN",
-    "MADAGASCAR": "MADAGASCAR", "MAURITIUS": "MAURITIUS",   "MIDEAST": "MIDEAST",
-    "NEW-ZEALAND": "NEWZEALAND","PHILIPPINES": "PHILIPPINES","RUSSIA": "RUSSIA",
-    "SOUTHAM-NW": "SOUTHAMNW",  "SOUTHAM-SE": "SOUTHAMSE",  "SOUTHEAST-ASIA": "SEASIA",
-    "SOUTH-KOREA": "SKOREA",    "TAIWAN": "TAIWAN",         "UNITED-STATES": "USA",
-}
+# Region name -> the PI's xx-file shortcode (shared, stdlib-only module so the
+# standalone reporting can reuse it without importing this heavy driver).
+from src.region_shortcodes import REGION_SHORTCODE
 
 
 def _xx_deliverable_path(region):

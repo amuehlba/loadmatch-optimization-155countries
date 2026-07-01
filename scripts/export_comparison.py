@@ -21,11 +21,32 @@ Only stdlib is used so this runs on any machine, with or without the GA env.
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from src.region_shortcodes import REGION_SHORTCODE
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_ROOT = REPO_ROOT / "data" / "results_verification"
+RAW_DIR = REPO_ROOT / "data" / "raw"
+
+# Mean ($/yr) from a Fortran/xx "ANNUAL TOT ENERGY COST ... LO MN HI=" line.
+_ANNUAL_COST_RE = re.compile(
+    r"ANNUAL TOT ENERGY COST.*?LO MN HI=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)")
+
+
+def _pi_xx_cost(region: str, raw_dir: Path) -> Optional[float]:
+    """Mean annual cost parsed directly from the PI's pristine xx.<SHORTCODE> file
+    in raw_dir.  Used only as a fallback when our re-run baseline failed."""
+    shortcode = REGION_SHORTCODE.get(region)
+    if not shortcode:
+        return None
+    xx = raw_dir / "xx.{}".format(shortcode)
+    if not xx.exists():
+        return None
+    m = _ANNUAL_COST_RE.search(xx.read_text(encoding="ascii", errors="replace"))
+    return float(m.group(2)) if m else None
 
 # Column order for CSV + console table: (dict key, header, format spec)
 COLUMNS = [
@@ -38,6 +59,7 @@ COLUMNS = [
     ("total_seconds",             "Total s",           ".0f"),
     ("n_evaluations",             "Evals",             ".0f"),
     ("ga_feasible",               "Feasible",          "s"),
+    ("baseline_source",           "Baseline src",      "s"),
 ]
 
 
@@ -52,8 +74,15 @@ def _cost(data: Optional[dict]) -> Optional[float]:
     return data.get("annual_cost_mn_bil_per_yr") if data else None
 
 
-def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dict]:
-    """One row per region that has an optimal_summary.json (i.e. was optimized)."""
+def collect(results_root: Path, regions: Optional[List[str]] = None,
+            raw_dir: Path = RAW_DIR) -> List[Dict]:
+    """One row per region that has an optimal_summary.json (i.e. was optimized).
+
+    Baseline cost priority: use OUR re-run (baseline_summary.json) when it is
+    feasible with a cost — this demonstrates we reproduce the PI's results.  Only
+    when the re-run failed (infeasible / no cost) do we fall back to the PI's
+    pristine xx.<SHORTCODE> result in raw_dir.
+    """
     rows: List[Dict] = []
     if not results_root.exists():
         return rows
@@ -66,7 +95,20 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
         opt = _load(rdir / "optimal_summary.json")
         if opt is None:
             continue  # region not optimized yet — skip
-        base_cost = _cost(_load(rdir / "baseline_summary.json"))
+
+        bl = _load(rdir / "baseline_summary.json")
+        base_cost = _cost(bl)
+        base_feasible = bl.get("feasible") if bl else None
+        if base_feasible and isinstance(base_cost, (int, float)):
+            baseline_source = "rerun"
+        else:
+            xx_cost = _pi_xx_cost(region, raw_dir)
+            if xx_cost is not None:
+                base_cost, baseline_source = xx_cost, "PI xx (fallback)"
+            else:
+                base_cost = None
+                baseline_source = "rerun infeasible; no xx" if bl is not None else "missing"
+
         ga_cost = _cost(opt)
         timing = opt.get("timing") or {}
         abs_sav = (base_cost - ga_cost) if (base_cost is not None and ga_cost is not None) else None
@@ -74,6 +116,7 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
         rows.append({
             "region":                   region,
             "baseline_cost_bil_per_yr": base_cost,
+            "baseline_source":          baseline_source,
             "ga_cost_bil_per_yr":       ga_cost,
             "abs_savings_bil_per_yr":   abs_sav,
             "pct_savings":              pct_sav,
@@ -86,22 +129,36 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
 
 
 def total_row(rows: List[Dict]) -> Dict:
-    def _sum(key: str) -> Optional[float]:
-        vals = [r[key] for r in rows if isinstance(r.get(key), (int, float))]
+    def _sum(key: str, src: List[Dict]) -> Optional[float]:
+        vals = [r[key] for r in src if isinstance(r.get(key), (int, float))]
         return sum(vals) if vals else None
 
-    tb, tg = _sum("baseline_cost_bil_per_yr"), _sum("ga_cost_bil_per_yr")
+    # Cost totals + % saving MUST be summed over the SAME regions — only those
+    # that have both a baseline and a GA cost.  Otherwise a region missing its
+    # baseline (e.g. an infeasible/failed baseline run) silently skews the saving.
+    matched = [r for r in rows
+               if isinstance(r.get("baseline_cost_bil_per_yr"), (int, float))
+               and isinstance(r.get("ga_cost_bil_per_yr"), (int, float))]
+    tb = _sum("baseline_cost_bil_per_yr", matched)
+    tg = _sum("ga_cost_bil_per_yr", matched)
     abs_sav = (tb - tg) if (tb is not None and tg is not None) else None
+    label = "TOTAL ({} regions)".format(len(matched))
+    if len(matched) != len(rows):
+        label = "TOTAL ({} of {} regions w/ baseline)".format(len(matched), len(rows))
     return {
-        "region":                   "TOTAL ({} regions)".format(len(rows)),
+        "region":                   label,
         "baseline_cost_bil_per_yr": tb,
         "ga_cost_bil_per_yr":       tg,
         "abs_savings_bil_per_yr":   abs_sav,
         "pct_savings":              (100.0 * abs_sav / tb) if (abs_sav is not None and tb) else None,
-        "optimize_seconds":         _sum("optimize_seconds"),
-        "total_seconds":            _sum("total_seconds"),
-        "n_evaluations":            _sum("n_evaluations"),
+        # Timing totals are independent of the baseline, so sum over all rows.
+        "optimize_seconds":         _sum("optimize_seconds", rows),
+        "total_seconds":            _sum("total_seconds", rows),
+        "n_evaluations":            _sum("n_evaluations", rows),
         "ga_feasible":              all(r.get("ga_feasible") for r in rows) if rows else None,
+        "baseline_source":          "rerun:{} fallback:{}".format(
+            sum(1 for r in rows if r.get("baseline_source") == "rerun"),
+            sum(1 for r in rows if str(r.get("baseline_source", "")).startswith("PI xx"))),
     }
 
 
@@ -162,9 +219,12 @@ def main(argv: Optional[List[str]] = None) -> None:
                         help="CSV destination (default: %(default)s).")
     parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT,
                         help="Root of per-region result folders (default: %(default)s).")
+    parser.add_argument("--raw-dir", type=Path, default=RAW_DIR,
+                        help="Folder holding the PI's pristine xx.<SHORTCODE> files, "
+                             "used only as a baseline fallback (default: %(default)s).")
     args = parser.parse_args(argv)
 
-    rows = collect(args.results_root, args.regions)
+    rows = collect(args.results_root, args.regions, args.raw_dir)
     if not rows:
         print("No optimized regions found under {} (need optimal_summary.json).".format(
             args.results_root))
