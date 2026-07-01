@@ -28,7 +28,7 @@ cluster: >-
   --partition=serc
 
 # Maximum number of simultaneously running jobs (one per region for run_ga)
-jobs: 29
+jobs: 30
 
 # Wait this many seconds for output files to appear after a job finishes.
 # Set generously because Sherlock's filesystem can be slow.

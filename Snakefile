@@ -535,6 +535,7 @@ rule export_results:
     output:
         xlsx = "data/results_verification/results_export.xlsx",
         csv  = "data/results_verification/results_export.csv",
+        comparison = "data/results_verification/comparison_summary.csv",
     log:
         "logs/export_results.log",
     resources:
@@ -550,4 +551,8 @@ rule export_results:
             --out     {output.xlsx} \
             --csv     {output.csv} \
             2>&1 | tee {log}
+        python -m scripts.export_comparison \
+            --regions {params.regions} \
+            --output  {output.comparison} \
+            2>&1 | tee -a {log}
         """

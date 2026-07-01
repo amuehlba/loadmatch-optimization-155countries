@@ -8,13 +8,18 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, Sequence, List, Tuple
 
 from src.io.dat_parser import read_dat, write_dat
 from scripts import run_python_model, export_fortran_factors
-from scripts.parse_fortran_output import parse_and_save as _parse_and_save, _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN
+from scripts.parse_fortran_output import (
+    parse_and_save as _parse_and_save,
+    save_summary as _save_summary,
+    _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN,
+)
 # plot_results is imported lazily inside run_workflow() to avoid a circular
 # import (plot_results imports PARAM_REGISTRY etc. from this module).
 
@@ -23,6 +28,38 @@ FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
 WORKSPACE_BASE = Path("data/tmp_workspaces")
 _DEFAULT_REGION = "UNITED-STATES"
+# Data-center scenario (Fortran IFDATCEN): 0 = base WWS, 1 = EGS-powered data
+# centers, 2 = WWS-powered data centers.  Set once per workflow via run_workflow
+# (datacenter=...) and passed to the binary as command-line arg 3.
+_IFDATCEN = 0
+
+# Region name (config/Fortran GRIDUSE) -> the PI's xx-file shortcode.  His
+# 30-region post-processing program keys on xx.<SHORTCODE> filenames.
+REGION_SHORTCODE = {
+    "AFRICA-EAST": "AFRICAE",   "AFRICA-NORTH": "AFRICAN",  "AFRICA-SOUTH": "AFRICAS",
+    "AFRICA-WEST": "AFRICAW",   "AUSTRALIA": "AUSTRALIA",   "CANADA": "CANADA",
+    "CENTRAL-AMERIC": "CENAMERICA", "CENTRAL-ASIA": "CENASIA", "CHINA": "CHINA",
+    "CUBA": "CUBA",             "EUROPE": "EUROPE",         "GREENLAND": "GREENLAND",
+    "HAITI": "HAITI",           "ICELAND": "ICELAND",       "INDIA": "INDIA",
+    "ISRAEL": "ISRAEL",         "JAMAICA": "JAMAICA",       "JAPAN": "JAPAN",
+    "MADAGASCAR": "MADAGASCAR", "MAURITIUS": "MAURITIUS",   "MIDEAST": "MIDEAST",
+    "NEW-ZEALAND": "NEWZEALAND","PHILIPPINES": "PHILIPPINES","RUSSIA": "RUSSIA",
+    "SOUTHAM-NW": "SOUTHAMNW",  "SOUTHAM-SE": "SOUTHAMSE",  "SOUTHEAST-ASIA": "SEASIA",
+    "SOUTH-KOREA": "SKOREA",    "TAIWAN": "TAIWAN",         "UNITED-STATES": "USA",
+}
+
+
+def _xx_deliverable_path(region):
+    """Destination for a GA-optimal xx file (the PI's deliverable format/name).
+
+    Written to a dedicated folder — NOT data/raw/ — so it can never overwrite the
+    PI's pristine baseline xx.<SHORTCODE> files.  Scenarios get their own folders.
+    """
+    shortcode = REGION_SHORTCODE.get(region, region)
+    subdir = "xx_optimized" if not _IFDATCEN else "xx_optimized_dc{}".format(_IFDATCEN)
+    dest_dir = Path("data/results_verification") / subdir
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir / "xx.{}".format(shortcode)
 # Lock file used to serialise all direct (non-workspace) Fortran calls so that
 # concurrent cluster jobs writing to the shared fortran/fortran_factors.dat do
 # not clobber each other.
@@ -630,13 +667,26 @@ def preprocess_region(region):
     )
 
 
+def _fortran_region_args(region):
+    """Command-line args for the Fortran binary.
+
+    arg1 = region (GRIDUSE).  The region is ALWAYS passed explicitly: the new
+    powerworld.f defaults to AFRICA-EAST when no argument is given, so relying on
+    the binary's hardcoded default would silently simulate the wrong region.
+    For data-center scenarios we also pass arg2 = IFREWRITE (kept at the country
+    default of 3) and arg3 = IFDATCEN.
+    """
+    args = [region]
+    if _IFDATCEN:
+        args += ["3", str(_IFDATCEN)]
+    return args
+
+
 def run_fortran(region=_DEFAULT_REGION, paths=None):
     preprocess_region(region)
     if paths is None:
         paths = _region_paths(region)
-    cmd = [str(FORTRAN_EXE)]
-    if region != _DEFAULT_REGION:
-        cmd.append(region)
+    cmd = [str(FORTRAN_EXE)] + _fortran_region_args(region)
     return _run_fortran_raw(cmd, paths)
 
 
@@ -865,9 +915,7 @@ def run_fortran_worker(label, factors, region=_DEFAULT_REGION):
     workspace, data_raw = prepare_workspace()
     try:
         write_dat(factors, data_raw / "fortran_factors.dat")
-        cmd = [str(FORTRAN_EXE)]
-        if region != _DEFAULT_REGION:
-            cmd.append(region)
+        cmd = [str(FORTRAN_EXE)] + _fortran_region_args(region)
         result = subprocess.run(
             cmd,
             cwd=str(workspace),
@@ -981,11 +1029,22 @@ def evaluate_trials_sequential(specs, region=_DEFAULT_REGION, paths=None):
     return results
 
 
+def _worker_init(ifdatcen):
+    """Runs once per spawned GA worker.  With the 'spawn' start method the module
+    is re-imported in each child, resetting module globals — so the data-center
+    scenario (_IFDATCEN) must be re-established here or parallel evals would
+    silently run the base case."""
+    global _IFDATCEN
+    _IFDATCEN = ifdatcen
+
+
 def evaluate_trials_parallel(specs, max_workers, region=_DEFAULT_REGION, paths=None):
     if paths is None:
         paths = _region_paths(region)
     results = []
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+    with ProcessPoolExecutor(max_workers=max_workers,
+                             initializer=_worker_init,
+                             initargs=(_IFDATCEN,)) as pool:
         futures = [
             pool.submit(run_fortran_worker, spec["label"], spec["factors"], region)
             for spec in specs
@@ -1207,8 +1266,17 @@ def run_workflow(
     ga_magnitude_damping=0.5,
     baseline_start=None,
     generate_plots=True,
+    datacenter=0,
+    evaluate_only=False,
 ):
-    paths = _region_paths(region)
+    global _IFDATCEN
+    _IFDATCEN = int(datacenter)
+    _t_workflow_start = time.perf_counter()
+    # Data-center scenarios (IFDATCEN 1/2) write to an isolated results dir so
+    # they never overwrite the base-case (IFDATCEN=0) results.  The real region
+    # name is still passed to the Fortran binary; only the output paths change.
+    results_label = region if not _IFDATCEN else "{}_dc{}".format(region, _IFDATCEN)
+    paths = _region_paths(results_label)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
     paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
 
@@ -1218,9 +1286,11 @@ def run_workflow(
         print("Cleared previous factor history: {}".format(paths["history_file"]))
 
     # ── Parse canonical baseline output if present ────────────────────────────
-    # The file data/raw/xxEGS.<region> is the Jacobson publication baseline.
-    # It is never modified by this workflow; we only read and summarise it.
-    _canonical_bl = BASE_RAW_DIR / "xxEGS.{}".format(region)
+    # data/raw/xx.<SHORTCODE> is the PI's pristine baseline output (his exact
+    # trial-and-error result).  It is never modified here; we only read/summarise
+    # it as an extra cross-check.  Absent is fine (the "defaults" baseline run is
+    # the authoritative PI-baseline reference for the comparison).
+    _canonical_bl = BASE_RAW_DIR / "xx.{}".format(REGION_SHORTCODE.get(region, region))
     if _canonical_bl.exists():
         print(f"Parsing canonical baseline: {_canonical_bl.name}")
         _parse_and_save(
@@ -1263,7 +1333,9 @@ def run_workflow(
             write_factor_files(base_factors, paths)
         # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
         # so that fortran_last_run.out is reserved for the final optimal evaluation.
+        _t_bl = time.perf_counter()
         stdout = run_fortran(region=region, paths=baseline_paths)
+        _baseline_eval_seconds = time.perf_counter() - _t_bl
     print("Baseline Fortran output written to {}".format(paths["fortran_baseline_out"]))
 
     # Parse and save the baseline summary for all warm-start modes.
@@ -1275,10 +1347,38 @@ def run_workflow(
         out_path=paths["baseline_summary"],
     )
     print(
-        "Compare {} against data/raw/xxEGS.{} to verify correctness.".format(
-            paths["fortran_baseline_out"], region
+        "Compare {} against data/raw/xx.{} to verify correctness.".format(
+            paths["fortran_baseline_out"], REGION_SHORTCODE.get(region, region)
         )
     )
+
+    if evaluate_only:
+        # Evaluate-only mode (e.g. IFDATCEN=1: EGS covers the constant data-center
+        # load directly, so no re-optimization is needed).  The single Fortran run
+        # of the seeded factors IS the result — save it as the optimal output + xx.
+        paths["fortran_optimal_out"].write_text(stdout)
+        _xx_out = _xx_deliverable_path(region)
+        _xx_out.write_text(stdout)
+        opt_data = _parse_and_save(
+            stdout, factors=base_factors, region=region,
+            run_type="evaluate", out_path=paths["optimal_summary"],
+        )
+        opt_data["timing"] = {
+            "datacenter_scenario":   _IFDATCEN,
+            "optimizer":             "evaluate",
+            "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
+            "optimize_seconds":      0.0,
+            "final_eval_seconds":    0.0,
+            "total_seconds":         round(time.perf_counter() - _t_workflow_start, 3),
+            "n_evaluations":         1,
+            "ga_population":         None,
+            "ga_generations":        None,
+            "parallel_evals":        parallel_evals,
+        }
+        _save_summary(opt_data, paths["optimal_summary"])
+        print("Evaluate-only: cost {:.3f} $B/yr  →  {}  (xx: {})".format(
+            parse_cost(stdout), paths["optimal_summary"], _xx_out))
+        return
 
     feasible_initial = check_feasibility(stdout)
     initial_cost = parse_cost(stdout)
@@ -1314,6 +1414,7 @@ def run_workflow(
         )
     )
 
+    _t_opt = time.perf_counter()
     if optimizer == "ga":
         best_factors, best_cost = genetic_search(
             candidate,
@@ -1350,6 +1451,7 @@ def run_workflow(
         )
         print("Hooke-Jeeves produced best feasible solution (cost {:.3f}).".format(best_cost))
         write_dat(best_factors, paths["results_dir"] / "hooke_jeeves_factors.dat")
+    _optimize_seconds = time.perf_counter() - _t_opt
 
     # ── Final evaluation with optimal factors ─────────────────────────────────
     # Run Fortran once more with the best-found factors so that:
@@ -1357,25 +1459,62 @@ def run_workflow(
     #   2. optimal_summary.json captures the full structured results
     # The raw .out file and JSON are both saved; nothing is deleted.
     print("Running final Fortran evaluation with optimal factors...")
+    _t_fin = time.perf_counter()
     with _fortran_global_lock():
         write_factor_files(best_factors, paths)
         final_stdout = run_fortran(region=region, paths=paths)
+    _final_eval_seconds = time.perf_counter() - _t_fin
     paths["fortran_optimal_out"].write_text(final_stdout)
-    _parse_and_save(
+
+    # Deliverable: the GA-optimal Fortran output IS an xx file (the binary writes
+    # the "xx" report to stdout, IOUT=6).  Save it under the PI's xx.<SHORTCODE>
+    # naming, in a dedicated folder that never overwrites his pristine baselines.
+    _xx_out = _xx_deliverable_path(region)
+    _xx_out.write_text(final_stdout)
+
+    opt_data = _parse_and_save(
         final_stdout,
         factors=best_factors,
         region=region,
         run_type=f"{optimizer}_optimal",
         out_path=paths["optimal_summary"],
     )
+
+    # ── Solve-time instrumentation (paper deliverable: sum over 30 regions) ────
+    try:
+        _n_evals = paths["history_file"].read_text().count("COST_MN_BIL_PER_YEAR")
+    except OSError:
+        _n_evals = None
+    opt_data["timing"] = {
+        "datacenter_scenario":   _IFDATCEN,
+        "optimizer":             optimizer,
+        "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
+        "optimize_seconds":      round(_optimize_seconds, 3),
+        "final_eval_seconds":    round(_final_eval_seconds, 3),
+        "total_seconds":         round(time.perf_counter() - _t_workflow_start, 3),
+        "n_evaluations":         _n_evals,
+        "ga_population":         ga_population if optimizer == "ga" else None,
+        "ga_generations":        ga_generations if optimizer == "ga" else None,
+        "parallel_evals":        parallel_evals,
+    }
+    _save_summary(opt_data, paths["optimal_summary"])
+
     print(
         "Final evaluation cost: {:.3f} $B/yr  →  {}".format(
             parse_cost(final_stdout), paths["optimal_summary"]
         )
     )
+    print("Solve time: optimize={:.1f}s  total={:.1f}s  evals={}  →  xx file: {}".format(
+        _optimize_seconds, opt_data["timing"]["total_seconds"], _n_evals, _xx_out))
 
     # ── Generate plots ────────────────────────────────────────────────────────
-    if generate_plots:
+    if generate_plots and _IFDATCEN:
+        # Per-region plotting keys off the real region name (for factor extraction)
+        # but scenario results live in the isolated <region>_dc<N> folder, so the
+        # two don't line up.  Scenario runs are covered by cross-region reporting.
+        print("Skipping per-region plots for data-center scenario {} "
+              "(covered by cross-region reporting).".format(_IFDATCEN))
+    elif generate_plots:
         print("Generating plots for region {}...".format(region))
         try:
             import scripts.plot_results as _plot_results  # lazy to avoid circular import
@@ -1669,6 +1808,25 @@ def parse_args():
              "Run 'python -m scripts.plot_results --region REGION' to generate figures later.",
     )
     parser.add_argument(
+        "--datacenter",
+        type=int,
+        choices=[0, 1, 2],
+        default=0,
+        help="Data-center scenario (Fortran IFDATCEN): 0 = base WWS (default), "
+             "1 = EGS-powered data centers, 2 = WWS-powered data centers. "
+             "Scenarios 1/2 write to data/results_verification/<REGION>_dc<N>/ so "
+             "they never overwrite the base-case results.",
+    )
+    parser.add_argument(
+        "--evaluate-only",
+        action="store_true",
+        default=False,
+        help="Evaluate the --baseline-start factors once and stop (no optimization). "
+             "Use for the EGS data-center scenario (--datacenter 1), where the "
+             "Fortran adds EGS supply directly and no re-tuning is needed. Writes "
+             "optimal_summary.json + xx.<REGION> from the single evaluation.",
+    )
+    parser.add_argument(
         "--preprocess-only",
         action="store_true",
         default=False,
@@ -1797,6 +1955,8 @@ def main():
         ga_magnitude_damping=args.ga_magnitude_damping,
         baseline_start=args.baseline_start,
         generate_plots=not args.no_plots,
+        datacenter=args.datacenter,
+        evaluate_only=args.evaluate_only,
     )
 
 
