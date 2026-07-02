@@ -881,6 +881,78 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
 
 _SCRATCH_STORAGE_CATS = ("tw", "hours", "days")
 
+# Storage anchors for the scratch bootstrap — fully independent of the
+# trial-and-error solution:
+#   * Power capacities (TW) scale with the region's average all-purpose 2050
+#     load L (summed from countrystats.dat TLOADTOT, an input file):
+#       battery discharge  ~ 1.0 x L   (peak load is ~1.5-2x average and
+#                                       batteries share peak duty with
+#                                       hydro/PHS/CSP)
+#       H2 fuel cell / electrolyser ~ 0.1 x L  (long-duration backup scale)
+#   * Durations are region-independent technology-typical values:
+#       battery 4 h; PHS / cold / hot thermal 12 h (diurnal duty);
+#       H2 30 days and UTES 90 days (seasonal duty).
+_SCRATCH_TW_PER_AVG_LOAD = {"BATDISCH": 1.0, "FCDISCH": 0.10, "FCCHARG": 0.10}
+_SCRATCH_DURATION_ANCHOR = {
+    "STORHBAT": 4.0, "STORHPHS": 12.0, "STORHCOLD": 12.0, "STORHHWAT": 12.0,
+    "DAYH2STOR": 30.0, "STORUGDYS": 90.0,
+}
+
+
+def _region_avg_load_tw(region: str):
+    """Average all-purpose 2050 load (TW) of a region: sum of the TLOADTOT
+    column (GW) over the region's member countries in countrystats.dat.
+    Region matching truncates to 14 characters (Fortran CHARACTER(14), e.g.
+    CENTRAL-AMERICA -> CENTRAL-AMERIC).  Returns None if unavailable."""
+    stats = BASE_RAW_DIR / "countrystats.dat"
+    if not stats.exists():
+        return None
+    total = 0.0
+    found = False
+    try:
+        for line in stats.read_text(encoding="ascii", errors="replace").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 47 or parts[0] in ("", "Country"):
+                continue
+            if parts[1].strip()[:14] != region[:14]:
+                continue
+            try:
+                total += float(parts[46])   # TLOADTOT (GW)
+                found = True
+            except ValueError:
+                continue
+    except OSError:
+        return None
+    return total / 1000.0 if found else None
+
+
+def _scratch_storage_anchor(region: str) -> Dict[str, float]:
+    """Anchor values for every storage design variable, used by the scratch
+    bootstrap ramp.  Falls back to registry defaults (with a warning) only if
+    the region's load cannot be derived from countrystats.dat."""
+    avg_load_tw = _region_avg_load_tw(region)
+    anchors: Dict[str, float] = {}
+    for key in FACTOR_KEYS:
+        cat = PARAM_REGISTRY[key][1]
+        if cat not in _SCRATCH_STORAGE_CATS:
+            continue
+        if cat == "tw":
+            if avg_load_tw is not None:
+                coeff = _SCRATCH_TW_PER_AVG_LOAD.get(key, 0.5)
+                anchors[key] = coeff * avg_load_tw
+            else:
+                anchors[key] = PARAM_REGISTRY[key][0]
+        else:
+            anchors[key] = _SCRATCH_DURATION_ANCHOR.get(key, PARAM_REGISTRY[key][0])
+    if avg_load_tw is None:
+        print("  [WARN] Could not derive region load from countrystats.dat; "
+              "scratch storage anchor falls back to registry defaults.")
+    else:
+        print("Scratch storage anchor (avg load {:.4f} TW): {}".format(
+            avg_load_tw,
+            ", ".join("{}={:.4g}".format(k, v) for k, v in sorted(anchors.items()))))
+    return anchors
+
 
 def build_scratch_start() -> Dict[str, float]:
     """Spreadsheet starting point (per the PI): all capacity factors = 1.0 and
@@ -903,29 +975,31 @@ def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
 
     Mirrors the PI's manual procedure ("that set of assumptions fails
     immediately, so I start ramping up storage and values for FACONWIND, ..."):
-    storage design variables are raised in steps (fractions of their registry
-    defaults) with capacity factors held at 1.0; if storage alone does not reach
-    feasibility, capacity factors are inflated as usual on top of default-scale
-    storage.  Only the FEASIBILITY bootstrap uses default-scaled storage; the GA
-    then searches from wherever feasibility was first found.
+    storage design variables are raised in steps toward load-derived anchors
+    (see _scratch_storage_anchor — battery power ~ average regional load, H2
+    power ~ 10% of it, technology-typical durations) with capacity factors held
+    at 1.0; if storage alone does not reach feasibility, capacity factors are
+    inflated as usual on top of anchor-scale storage.  The anchors are derived
+    from input data only (countrystats.dat), keeping the scratch experiment
+    fully independent of the trial-and-error solution; the bootstrap merely
+    locates feasibility, and the GA searches freely from there.
     """
     if paths is None:
         paths = _region_paths(region)
-    storage_keys = [k for k in FACTOR_KEYS
-                    if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS]
+    anchors = _scratch_storage_anchor(region)
     candidate = base_factors.copy()
     for frac in ramp:
-        for key in storage_keys:
-            candidate[key] = PARAM_REGISTRY[key][0] * frac
+        for key, anchor in anchors.items():
+            candidate[key] = anchor * frac
         label = "scratch-storage-ramp{:g}".format(frac)
         feasible, cost, stdout = evaluate_factors(candidate, label=label,
                                                   region=region, paths=paths)
         if feasible:
             return candidate, cost, stdout
-    # Storage ramp alone was not enough: keep storage at registry-default scale
+    # Storage ramp alone was not enough: keep storage at the top of the ramp
     # and inflate capacity factors as in the standard bootstrap.
-    for key in storage_keys:
-        candidate[key] = PARAM_REGISTRY[key][0]
+    for key, anchor in anchors.items():
+        candidate[key] = anchor * ramp[-1]
     return inflate_until_feasible(candidate, region=region, paths=paths)
 
 
