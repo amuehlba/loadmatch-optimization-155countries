@@ -15,6 +15,7 @@ Usage:
     python -m scripts.rebuild_xx_deliverables --results-root path/to/results
 """
 import argparse
+import re
 from pathlib import Path
 from typing import Optional, List
 
@@ -36,13 +37,12 @@ def rebuild(results_root: Path) -> None:
             skipped.append(rdir.name)
             continue
 
-        # <REGION> or <REGION>_dc<N> (data-center scenario results dir)
+        # <REGION>[_scratch][_dc<N>] (isolated scratch / data-center results dirs
+        # mirror their suffix in the xx_optimized folder name)
         label = rdir.name
-        if "_dc" in label:
-            region, dc = label.rsplit("_dc", 1)
-            subdir = "xx_optimized_dc{}".format(dc)
-        else:
-            region, subdir = label, "xx_optimized"
+        m = re.match(r"(?P<region>.+?)(?P<suffix>(_scratch)?(_dc\d+)?)$", label)
+        region = m.group("region")
+        subdir = "xx_optimized" + m.group("suffix")
 
         shortcode = REGION_SHORTCODE.get(region, region)
         dest_dir = results_root / subdir

@@ -10,22 +10,24 @@ Layout
 • Two frozen header rows
     Row 1 – colour-coded group label (merged across the group's columns)
     Row 2 – individual column names
-• Data rows: five consecutive rows per region
-    (Baseline | LP | First feasible | GA (bl) | GA (LP))
+• Data rows: four consecutive rows per region
+    (Baseline | GA (trial-error) | Scratch start | GA (scratch))
   with alternating light-gray / white row-band shading so each region block
   is visually distinct.  The "region" column is always filled → fully
   machine-readable (no merged cells, no empty key columns).
+  Baseline / GA (trial-error) come from <REGION>/; the scratch pair comes from
+  the isolated <REGION>_scratch/ results (--baseline-start scratch).  LP-based
+  cases are not exported (LP warm start unused in this project).
 • Frozen panes at row 3 / column 3 so headers and the two ID columns stay
   visible while scrolling.
 
 Column groups
 -------------
-  Identification  |  Annual cost  |  Cost by category  |  Generation  |
-  End use & load  |  Losses       |  Storage net flow   |
+  Identification  |  Annual cost  |  New land  |  Cost by category  |
+  Generation  |  End use & load  |  Losses  |  Storage net flow  |
   Optimised factors  |  Fixed factors
 
-Missing cases (LP / First feasible / GA-LP not run for a region) produce blank data rows.
-  First feasible falls back to parsing lp_ga_factor_history.log if the JSON is absent.
+Missing cases (e.g. scratch runs not yet made) produce blank data rows.
 
 Usage
 -----
@@ -270,27 +272,16 @@ def _lp_eval_cost_from_log(rdir: Path) -> Optional[float]:
     return None
 
 
-# Raw Fortran output retained for each case — used to backfill the land-area
-# fields for summary JSONs written before the land parser existed.
-_LAND_RAW_FILES = {
-    "Baseline": "fortran_baseline_run.out",
-    "LP":       "fortran_lp_run.out",
-    "GA (bl)":  "fortran_optimal_run.out",
-    "GA (LP)":  "fortran_lp_ga_run.out",
-}
-
-
-def _with_land(label: str, data: Optional[dict], rdir: Path) -> Optional[dict]:
+def _with_land(data: Optional[dict], rdir: Path, raw_name: str) -> Optional[dict]:
     """Backfill new-land percentages from the case's raw output if absent."""
     if data is None or data.get("new_land_pct_regland") is not None:
         return data
-    fname = _LAND_RAW_FILES.get(label)
-    if not fname or not (rdir / fname).exists():
+    raw = rdir / raw_name
+    if not raw.exists():
         return data
     try:
         from scripts.parse_fortran_output import parse_land_area
-        land = parse_land_area(
-            (rdir / fname).read_text(encoding="ascii", errors="replace"))
+        land = parse_land_area(raw.read_text(encoding="ascii", errors="replace"))
     except Exception:
         return data
     data = dict(data)   # don't mutate cached dict
@@ -299,27 +290,28 @@ def _with_land(label: str, data: Optional[dict], rdir: Path) -> Optional[dict]:
 
 
 def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
-    """Return list of (case_label, data_dict_or_None) for all five cases."""
+    """Return (case_label, data_dict_or_None) for the four reported cases.
+
+    LP-based cases are intentionally not exported (the LP warm start is not used
+    in this project).  The scratch cases come from the isolated
+    <REGION>_scratch/ results produced by --baseline-start scratch:
+      Scratch start = the spreadsheet values (FAC*=1, storage=0) evaluated once,
+      GA (scratch)  = the GA optimum reached from that start.
+    """
     rdir = RESULTS_DIR / region
-    ff_data = (_load_json(rdir / "first_feasible_summary.json")
-               or _first_feasible_from_log(rdir))
-
-    lp_data = _load_json(rdir / "lp_summary.json")
-    if lp_data is not None and not lp_data.get("annual_cost_mn_bil_per_yr"):
-        # Older runs wrote a different key or left cost null — patch from log
-        log_cost = _lp_eval_cost_from_log(rdir)
-        if log_cost is not None:
-            lp_data = dict(lp_data)   # don't mutate cached dict
-            lp_data["annual_cost_mn_bil_per_yr"] = log_cost
-
+    sdir = RESULTS_DIR / (region + "_scratch")
     cases = [
-        ("Baseline",       _load_json(rdir / "baseline_summary.json")),
-        ("LP",             lp_data),
-        ("First feasible", ff_data),
-        ("GA (bl)",        _load_json(rdir / "optimal_summary.json")),
-        ("GA (LP)",        _load_json(rdir / "lp_ga_summary.json")),
+        ("Baseline",           rdir, "fortran_baseline_run.out",
+         _load_json(rdir / "baseline_summary.json")),
+        ("GA (trial-error)",   rdir, "fortran_optimal_run.out",
+         _load_json(rdir / "optimal_summary.json")),
+        ("Scratch start",      sdir, "fortran_baseline_run.out",
+         _load_json(sdir / "baseline_summary.json")),
+        ("GA (scratch)",       sdir, "fortran_optimal_run.out",
+         _load_json(sdir / "optimal_summary.json")),
     ]
-    return [(label, _with_land(label, data, rdir)) for label, data in cases]
+    return [(label, _with_land(data, case_dir, raw_name))
+            for label, case_dir, raw_name, data in cases]
 
 
 def _get_value(data: dict, key: str) -> Any:
@@ -343,13 +335,12 @@ def _collect_cost_categories(regions: List[str]) -> List[str]:
     """Scan all JSON files to discover the union of cost category names."""
     cats: dict = {}   # preserve insertion order, de-duplicate
     for region in regions:
-        rdir = RESULTS_DIR / region
-        for fname in ("baseline_summary.json", "optimal_summary.json",
-                      "lp_summary.json", "lp_ga_summary.json"):
-            data = _load_json(rdir / fname)
-            if data:
-                for cat in data.get("cost_per_kwh_by_category", {}):
-                    cats[cat] = None
+        for rdir in (RESULTS_DIR / region, RESULTS_DIR / (region + "_scratch")):
+            for fname in ("baseline_summary.json", "optimal_summary.json"):
+                data = _load_json(rdir / fname)
+                if data:
+                    for cat in data.get("cost_per_kwh_by_category", {}):
+                        cats[cat] = None
     return list(cats)
 
 

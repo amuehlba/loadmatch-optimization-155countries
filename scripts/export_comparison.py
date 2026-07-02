@@ -79,6 +79,8 @@ COLUMNS = [
     ("total_seconds",             "Total s",           ".0f"),
     ("n_evaluations",             "Evals",             ".0f"),
     ("ga_feasible",               "Feasible",          "s"),
+    ("ga_scratch_cost_bil_per_yr","GA-scratch $B/yr",  ".2f"),
+    ("scratch_vs_ga_pct",         "scr-GA %",          "+.2f"),
     ("bl_newland_pct_regland",    "BL land %",         ".3f"),
     ("ga_newland_pct_regland",    "GA land %",         ".3f"),
     ("land_ok",                   "Land OK",           "s"),
@@ -91,6 +93,8 @@ CSV_FIELDS = [
     "baseline_cost_bil_per_yr", "ga_cost_bil_per_yr",
     "abs_savings_bil_per_yr", "pct_savings",
     "optimize_seconds", "total_seconds", "n_evaluations", "ga_feasible",
+    "ga_scratch_cost_bil_per_yr", "scratch_vs_ga_pct",
+    "scratch_start_feasible", "scratch_optimize_seconds", "scratch_n_evaluations",
     "bl_spacing_pct_regland", "bl_footprint_pct_regland", "bl_newland_pct_regland",
     "ga_spacing_pct_regland", "ga_footprint_pct_regland", "ga_newland_pct_regland",
     "land_delta_pp", "land_ok",
@@ -131,6 +135,11 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         if not rdir.is_dir():
             continue
         region = rdir.name
+        # Isolated alternative runs (<REGION>_scratch, <REGION>_dc<N>) are not
+        # rows of their own: scratch results are joined onto the base-region row
+        # below; data-center scenarios get their own dedicated comparison.
+        if re.search(r"(_scratch|_dc\d+)$", region):
+            continue
         if regions and region not in regions:
             continue
         opt = _load(rdir / "optimal_summary.json")
@@ -161,6 +170,18 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         abs_sav = (base_cost - ga_cost) if (base_cost is not None and ga_cost is not None) else None
         pct_sav = (100.0 * abs_sav / base_cost) if (abs_sav is not None and base_cost) else None
 
+        # GA started from scratch (spreadsheet values: FAC*=1, storage=0) —
+        # produced by --baseline-start scratch into <REGION>_scratch/.
+        sdir = results_root / (region + "_scratch")
+        s_opt = _load(sdir / "optimal_summary.json")
+        s_bl = _load(sdir / "baseline_summary.json")
+        ga_scratch_cost = _cost(s_opt)
+        s_timing = (s_opt.get("timing") or {}) if s_opt else {}
+        if isinstance(ga_scratch_cost, (int, float)) and isinstance(ga_cost, (int, float)) and ga_cost:
+            scratch_vs_ga_pct = 100.0 * (ga_scratch_cost - ga_cost) / ga_cost
+        else:
+            scratch_vs_ga_pct = None
+
         bl_total = bl_land.get("new_land_pct_regland")
         ga_total = ga_land.get("new_land_pct_regland")
         if isinstance(bl_total, (int, float)) and isinstance(ga_total, (int, float)):
@@ -181,6 +202,11 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             "total_seconds":            timing.get("total_seconds"),
             "n_evaluations":            timing.get("n_evaluations"),
             "ga_feasible":              opt.get("feasible"),
+            "ga_scratch_cost_bil_per_yr": ga_scratch_cost,
+            "scratch_vs_ga_pct":        scratch_vs_ga_pct,
+            "scratch_start_feasible":   s_bl.get("feasible") if s_bl else None,
+            "scratch_optimize_seconds": s_timing.get("optimize_seconds"),
+            "scratch_n_evaluations":    s_timing.get("n_evaluations"),
             "bl_spacing_pct_regland":   bl_land.get("new_spacing_pct_regland"),
             "bl_footprint_pct_regland": bl_land.get("new_footprint_pct_regland"),
             "bl_newland_pct_regland":   bl_total,
@@ -191,6 +217,17 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             "land_ok":                  land_ok,
         })
     return rows
+
+
+def _scratch_gap_total(rows: List[Dict]) -> Optional[float]:
+    """Aggregate scratch-vs-baseline-start GA cost gap (%), over regions with both."""
+    pairs = [(r["ga_scratch_cost_bil_per_yr"], r["ga_cost_bil_per_yr"]) for r in rows
+             if isinstance(r.get("ga_scratch_cost_bil_per_yr"), (int, float))
+             and isinstance(r.get("ga_cost_bil_per_yr"), (int, float))]
+    if not pairs:
+        return None
+    ts, tg = sum(p[0] for p in pairs), sum(p[1] for p in pairs)
+    return 100.0 * (ts - tg) / tg if tg else None
 
 
 def total_row(rows: List[Dict]) -> Dict:
@@ -221,6 +258,12 @@ def total_row(rows: List[Dict]) -> Dict:
         "total_seconds":            _sum("total_seconds", rows),
         "n_evaluations":            _sum("n_evaluations", rows),
         "ga_feasible":              all(r.get("ga_feasible") for r in rows) if rows else None,
+        # Scratch totals: cost gap computed over regions that have BOTH a
+        # from-baseline and a from-scratch GA cost (same matched-set principle).
+        "ga_scratch_cost_bil_per_yr": _sum("ga_scratch_cost_bil_per_yr", rows),
+        "scratch_vs_ga_pct":        _scratch_gap_total(rows),
+        "scratch_optimize_seconds": _sum("scratch_optimize_seconds", rows),
+        "scratch_n_evaluations":    _sum("scratch_n_evaluations", rows),
         # Land percentages are shares of each region's own land area, so summing
         # across regions is meaningless; report only the check outcome counts.
         "land_ok":                  "ok:{} flagged:{} n/a:{}".format(

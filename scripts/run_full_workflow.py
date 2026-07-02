@@ -32,6 +32,10 @@ _DEFAULT_REGION = "UNITED-STATES"
 # centers, 2 = WWS-powered data centers.  Set once per workflow via run_workflow
 # (datacenter=...) and passed to the binary as command-line arg 3.
 _IFDATCEN = 0
+# Results-isolation suffix for the current run ("", "_scratch", "_dc1", ...).
+# Set by run_workflow; appended to the region results dir and the xx_optimized
+# deliverables dir so alternative runs never overwrite the base-case results.
+_RUN_SUFFIX = ""
 
 # Region name -> the PI's xx-file shortcode (shared, stdlib-only module so the
 # standalone reporting can reuse it without importing this heavy driver).
@@ -50,7 +54,7 @@ def _xx_deliverable_path(region):
     PI's pristine baseline xx.<SHORTCODE> files.  Scenarios get their own folders.
     """
     shortcode = REGION_SHORTCODE.get(region, region)
-    subdir = "xx_optimized" if not _IFDATCEN else "xx_optimized_dc{}".format(_IFDATCEN)
+    subdir = "xx_optimized" + _RUN_SUFFIX
     dest_dir = Path("data/results_verification") / subdir
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir / "xx.{}".format(shortcode)
@@ -872,6 +876,60 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
 
 
 # ---------------------------------------------------------------------------
+# Scratch start (spreadsheet values): FAC* = 1, storage design variables = 0
+# ---------------------------------------------------------------------------
+
+_SCRATCH_STORAGE_CATS = ("tw", "hours", "days")
+
+
+def build_scratch_start() -> Dict[str, float]:
+    """Spreadsheet starting point (per the PI): all capacity factors = 1.0 and
+    all storage design variables = 0; the remaining design variable (heat-pump
+    COP) stays at its registry default.  This is the pre-trial-and-error state
+    the PI starts from when tuning a region by hand."""
+    factors = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+    for key in FACTOR_KEYS:
+        cat = PARAM_REGISTRY[key][1]
+        if cat == "capacity":
+            factors[key] = 1.0
+        elif cat in _SCRATCH_STORAGE_CATS:
+            factors[key] = 0.0
+    return factors
+
+
+def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
+                      ramp=(0.25, 0.5, 1.0, 1.5, 2.0)):
+    """Find a first feasible point from the spreadsheet scratch start.
+
+    Mirrors the PI's manual procedure ("that set of assumptions fails
+    immediately, so I start ramping up storage and values for FACONWIND, ..."):
+    storage design variables are raised in steps (fractions of their registry
+    defaults) with capacity factors held at 1.0; if storage alone does not reach
+    feasibility, capacity factors are inflated as usual on top of default-scale
+    storage.  Only the FEASIBILITY bootstrap uses default-scaled storage; the GA
+    then searches from wherever feasibility was first found.
+    """
+    if paths is None:
+        paths = _region_paths(region)
+    storage_keys = [k for k in FACTOR_KEYS
+                    if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS]
+    candidate = base_factors.copy()
+    for frac in ramp:
+        for key in storage_keys:
+            candidate[key] = PARAM_REGISTRY[key][0] * frac
+        label = "scratch-storage-ramp{:g}".format(frac)
+        feasible, cost, stdout = evaluate_factors(candidate, label=label,
+                                                  region=region, paths=paths)
+        if feasible:
+            return candidate, cost, stdout
+    # Storage ramp alone was not enough: keep storage at registry-default scale
+    # and inflate capacity factors as in the standard bootstrap.
+    for key in storage_keys:
+        candidate[key] = PARAM_REGISTRY[key][0]
+    return inflate_until_feasible(candidate, region=region, paths=paths)
+
+
+# ---------------------------------------------------------------------------
 # Parallel workspace helpers
 # ---------------------------------------------------------------------------
 
@@ -1263,13 +1321,17 @@ def run_workflow(
     datacenter=0,
     evaluate_only=False,
 ):
-    global _IFDATCEN
+    global _IFDATCEN, _RUN_SUFFIX
     _IFDATCEN = int(datacenter)
     _t_workflow_start = time.perf_counter()
-    # Data-center scenarios (IFDATCEN 1/2) write to an isolated results dir so
-    # they never overwrite the base-case (IFDATCEN=0) results.  The real region
-    # name is still passed to the Fortran binary; only the output paths change.
-    results_label = region if not _IFDATCEN else "{}_dc{}".format(region, _IFDATCEN)
+    # Alternative runs (scratch start, data-center scenarios) write to isolated
+    # results dirs and xx_optimized folders so they never overwrite the
+    # base-case results.  The real region name is still passed to the Fortran
+    # binary; only the output paths change.
+    _scratch = (baseline_start == "scratch")
+    _RUN_SUFFIX = (("_scratch" if _scratch else "")
+                   + ("_dc{}".format(_IFDATCEN) if _IFDATCEN else ""))
+    results_label = region + _RUN_SUFFIX
     paths = _region_paths(results_label)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
     paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
@@ -1300,6 +1362,10 @@ def run_workflow(
     if baseline_start == "defaults":
         base_factors = extract_fortran_region_defaults(region)
         print("Using Fortran hardcoded region defaults as baseline factors (skipping LP).")
+    elif baseline_start == "scratch":
+        base_factors = build_scratch_start()
+        print("Using spreadsheet scratch start (capacity factors = 1.0, "
+              "storage design variables = 0; skipping LP).")
     elif baseline_start:
         baseline_path = Path(baseline_start)
         if not baseline_path.exists():
@@ -1359,6 +1425,7 @@ def run_workflow(
         )
         opt_data["timing"] = {
             "datacenter_scenario":   _IFDATCEN,
+            "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
             "optimizer":             "evaluate",
             "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
             "optimize_seconds":      0.0,
@@ -1398,6 +1465,12 @@ def run_workflow(
             )
         )
         candidate, cost = base_factors.copy(), initial_cost
+    elif _scratch:
+        # Expected for the spreadsheet start: no storage cannot match load at
+        # every time step.  Ramp storage first (the PI's manual procedure),
+        # then inflate capacity factors only if still needed.
+        print("Scratch start infeasible (expected); ramping storage toward feasibility.")
+        candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths)
     else:
         print("Starting point infeasible; inflating capacity factors.")
         candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths)
@@ -1481,6 +1554,7 @@ def run_workflow(
         _n_evals = None
     opt_data["timing"] = {
         "datacenter_scenario":   _IFDATCEN,
+        "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
         "optimizer":             optimizer,
         "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
         "optimize_seconds":      round(_optimize_seconds, 3),
@@ -1502,12 +1576,13 @@ def run_workflow(
         _optimize_seconds, opt_data["timing"]["total_seconds"], _n_evals, _xx_out))
 
     # ── Generate plots ────────────────────────────────────────────────────────
-    if generate_plots and _IFDATCEN:
+    if generate_plots and _RUN_SUFFIX:
         # Per-region plotting keys off the real region name (for factor extraction)
-        # but scenario results live in the isolated <region>_dc<N> folder, so the
-        # two don't line up.  Scenario runs are covered by cross-region reporting.
-        print("Skipping per-region plots for data-center scenario {} "
-              "(covered by cross-region reporting).".format(_IFDATCEN))
+        # but scratch/scenario results live in isolated <region><suffix> folders,
+        # so the two don't line up.  These runs are covered by cross-region
+        # reporting (export_comparison / plot_comparison).
+        print("Skipping per-region plots for isolated run '{}{}' "
+              "(covered by cross-region reporting).".format(region, _RUN_SUFFIX))
     elif generate_plots:
         print("Generating plots for region {}...".format(region))
         try:
@@ -1785,13 +1860,15 @@ def parse_args():
         type=str,
         default=None,
         metavar="PATH|defaults",
-        help="Starting point for the GA/HJ optimiser. Three options: "
+        help="Starting point for the GA/HJ optimiser. Four options: "
         "(1) omit: run LP and stop if feasible; "
-        "(2) 'defaults': use the hardcoded registry defaults (all factors=1), "
-        "run Fortran once as a region baseline, save output as data/raw/xxEGS.<REGION>, "
-        "then start the optimiser — use this for a new region with no existing baseline; "
-        "(3) PATH to a baseline_results.dat file: load factors from that file and skip LP. "
-        "Default: %(default)s.",
+        "(2) 'defaults': the Fortran hardcoded region values (the PI's "
+        "trial-and-error solution) — the standard base-case start; "
+        "(3) 'scratch': the spreadsheet starting point (all capacity factors=1, "
+        "storage design variables=0); results go to isolated <REGION>_scratch/ "
+        "dirs and xx_optimized_scratch/ so the base case is never overwritten; "
+        "(4) PATH to a baseline_results.dat / factors file: load factors from "
+        "that file and skip LP. Default: %(default)s.",
     )
     parser.add_argument(
         "--no-plots",
