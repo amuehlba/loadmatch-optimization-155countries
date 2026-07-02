@@ -104,6 +104,52 @@ _COST_LINE_RE = re.compile(
 _ELEC_STOR_LOSS_KEYS  = ("bat_loss_twh", "phs_loss_twh", "h2e_loss_twh", "csp_loss_twh")
 _THERM_STOR_LOSS_KEYS = ("cw_loss_twh",  "hw_loss_twh",  "utes_loss_twh", "brick_loss_twh")
 
+# Header of the land-area table in the xx output.  Row layout after the name:
+#   2020-GW  2050-GW  INSTAL-MW/KM2  LANDNEWTECH-KM2  %REGLAND  LANDALLTECH-KM2  %REGLAND
+# i.e. the 5th numeric field is the NEW-land percent of regional land area.
+_LAND_HEADER = "LANDNEWTECH-KM2 %REGLAND"
+_LAND_NUM_RE = re.compile(r"-?\d+\.\d+(?:[Ee][+-]?\d+)?")
+
+
+def parse_land_area(text: str) -> dict:
+    """Extract new-land percentages from the xx land-area table.
+
+    Returns (all in percent of regional land area, may be None if absent):
+      new_spacing_pct_regland   — ONSHORE WIND row (wind spacing area)
+      new_footprint_pct_regland — TOTAL ELEC+HEAT-FPRINT row (footprint area)
+      new_land_pct_regland      — their sum (total new spacing + footprint)
+
+    The ONSHORE WIND new-land value equals the %NEWSPACING and the total
+    footprint value equals the %NEWFPRIN reported on the regional-summary line.
+    """
+    out = {
+        "new_spacing_pct_regland":   None,
+        "new_footprint_pct_regland": None,
+        "new_land_pct_regland":      None,
+    }
+    idx = text.find(_LAND_HEADER)
+    if idx == -1:
+        return out
+
+    block = text[idx:idx + 6000]  # table is ~20 lines; stay well clear of later sections
+
+    def _row_val(prefix: str):
+        for line in block.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(prefix):
+                nums = _LAND_NUM_RE.findall(stripped)
+                if len(nums) >= 5:
+                    return float(nums[4])
+        return None
+
+    spacing   = _row_val("ONSHORE WIND")
+    footprint = _row_val("TOTAL ELEC+HEAT-FPRINT")
+    out["new_spacing_pct_regland"]   = spacing
+    out["new_footprint_pct_regland"] = footprint
+    if spacing is not None and footprint is not None:
+        out["new_land_pct_regland"] = round(spacing + footprint, 6)
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Core parsing
@@ -165,6 +211,9 @@ def parse_output(
         m.group(1).strip(): float(m.group(3))
         for m in _COST_LINE_RE.finditer(text)
     }
+
+    # ── New land area (percent of regional land: wind spacing + footprint) ────
+    summary.update(parse_land_area(text))
 
     # ── Convenience derived totals ────────────────────────────────────────────
     gen_keys = ["wind_twh", "solar_twh", "hydro_twh", "wave_twh",

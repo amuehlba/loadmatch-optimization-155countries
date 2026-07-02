@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.region_shortcodes import REGION_SHORTCODE
+from scripts.parse_fortran_output import parse_land_area
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_ROOT = REPO_ROOT / "data" / "results_verification"
@@ -35,20 +36,39 @@ RAW_DIR = REPO_ROOT / "data" / "raw"
 _ANNUAL_COST_RE = re.compile(
     r"ANNUAL TOT ENERGY COST.*?LO MN HI=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)")
 
+_LAND_KEYS = ("new_spacing_pct_regland", "new_footprint_pct_regland",
+              "new_land_pct_regland")
 
-def _pi_xx_cost(region: str, raw_dir: Path) -> Optional[float]:
-    """Mean annual cost parsed directly from the PI's pristine xx.<SHORTCODE> file
-    in raw_dir.  Used only as a fallback when our re-run baseline failed."""
+# Flag a region when its optimized total new-land share (wind spacing +
+# footprint, % of regional land) exceeds the baseline share by more than this
+# relative tolerance.  Override with --land-tolerance.
+DEFAULT_LAND_TOLERANCE = 0.10
+
+
+def _pi_xx_text(region: str, raw_dir: Path) -> Optional[str]:
+    """Contents of the PI's pristine xx.<SHORTCODE> file in raw_dir, if present.
+    Used only as a fallback when our re-run baseline failed."""
     shortcode = REGION_SHORTCODE.get(region)
     if not shortcode:
         return None
     xx = raw_dir / "xx.{}".format(shortcode)
     if not xx.exists():
         return None
-    m = _ANNUAL_COST_RE.search(xx.read_text(encoding="ascii", errors="replace"))
-    return float(m.group(2)) if m else None
+    return xx.read_text(encoding="ascii", errors="replace")
 
-# Column order for CSV + console table: (dict key, header, format spec)
+
+def _land_stats(summary: Optional[dict], rdir: Path, out_name: str) -> dict:
+    """Land percentages for one run: prefer fields already in the summary JSON
+    (present for runs made after the land parser was added); otherwise parse the
+    retained raw Fortran output file."""
+    if summary and summary.get("new_land_pct_regland") is not None:
+        return {k: summary.get(k) for k in _LAND_KEYS}
+    out_file = rdir / out_name
+    if out_file.exists():
+        return parse_land_area(out_file.read_text(encoding="ascii", errors="replace"))
+    return {k: None for k in _LAND_KEYS}
+
+# Column order for the console table: (dict key, header, format spec)
 COLUMNS = [
     ("region",                    "Region",            "s"),
     ("baseline_cost_bil_per_yr",  "Baseline $B/yr",    ".2f"),
@@ -59,7 +79,22 @@ COLUMNS = [
     ("total_seconds",             "Total s",           ".0f"),
     ("n_evaluations",             "Evals",             ".0f"),
     ("ga_feasible",               "Feasible",          "s"),
+    ("bl_newland_pct_regland",    "BL land %",         ".3f"),
+    ("ga_newland_pct_regland",    "GA land %",         ".3f"),
+    ("land_ok",                   "Land OK",           "s"),
     ("baseline_source",           "Baseline src",      "s"),
+]
+
+# CSV gets the full land breakdown as well (spacing / footprint / total / delta).
+CSV_FIELDS = [
+    "region",
+    "baseline_cost_bil_per_yr", "ga_cost_bil_per_yr",
+    "abs_savings_bil_per_yr", "pct_savings",
+    "optimize_seconds", "total_seconds", "n_evaluations", "ga_feasible",
+    "bl_spacing_pct_regland", "bl_footprint_pct_regland", "bl_newland_pct_regland",
+    "ga_spacing_pct_regland", "ga_footprint_pct_regland", "ga_newland_pct_regland",
+    "land_delta_pp", "land_ok",
+    "baseline_source",
 ]
 
 
@@ -75,13 +110,19 @@ def _cost(data: Optional[dict]) -> Optional[float]:
 
 
 def collect(results_root: Path, regions: Optional[List[str]] = None,
-            raw_dir: Path = RAW_DIR) -> List[Dict]:
+            raw_dir: Path = RAW_DIR,
+            land_tolerance: float = DEFAULT_LAND_TOLERANCE) -> List[Dict]:
     """One row per region that has an optimal_summary.json (i.e. was optimized).
 
     Baseline cost priority: use OUR re-run (baseline_summary.json) when it is
     feasible with a cost — this demonstrates we reproduce the PI's results.  Only
     when the re-run failed (infeasible / no cost) do we fall back to the PI's
     pristine xx.<SHORTCODE> result in raw_dir.
+
+    Land: new-land shares (% of regional land) are collected for baseline and
+    optimized runs — wind spacing (ONSHORE WIND row) + footprint (TOTAL
+    ELEC+HEAT-FPRINT row) from the xx land-area table.  The optimized total is
+    checked against the baseline total (land_ok: within +land_tolerance).
     """
     rows: List[Dict] = []
     if not results_root.exists():
@@ -101,18 +142,34 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         base_feasible = bl.get("feasible") if bl else None
         if base_feasible and isinstance(base_cost, (int, float)):
             baseline_source = "rerun"
+            bl_land = _land_stats(bl, rdir, "fortran_baseline_run.out")
         else:
-            xx_cost = _pi_xx_cost(region, raw_dir)
-            if xx_cost is not None:
-                base_cost, baseline_source = xx_cost, "PI xx (fallback)"
+            xx_text = _pi_xx_text(region, raw_dir)
+            if xx_text is not None:
+                m = _ANNUAL_COST_RE.search(xx_text)
+                base_cost = float(m.group(2)) if m else None
+                baseline_source = "PI xx (fallback)"
+                bl_land = parse_land_area(xx_text)
             else:
                 base_cost = None
                 baseline_source = "rerun infeasible; no xx" if bl is not None else "missing"
+                bl_land = {k: None for k in _LAND_KEYS}
 
         ga_cost = _cost(opt)
+        ga_land = _land_stats(opt, rdir, "fortran_optimal_run.out")
         timing = opt.get("timing") or {}
         abs_sav = (base_cost - ga_cost) if (base_cost is not None and ga_cost is not None) else None
         pct_sav = (100.0 * abs_sav / base_cost) if (abs_sav is not None and base_cost) else None
+
+        bl_total = bl_land.get("new_land_pct_regland")
+        ga_total = ga_land.get("new_land_pct_regland")
+        if isinstance(bl_total, (int, float)) and isinstance(ga_total, (int, float)):
+            land_delta_pp = ga_total - bl_total
+            land_ok = ga_total <= bl_total * (1.0 + land_tolerance) + 1e-9
+        else:
+            land_delta_pp = None
+            land_ok = None
+
         rows.append({
             "region":                   region,
             "baseline_cost_bil_per_yr": base_cost,
@@ -124,6 +181,14 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             "total_seconds":            timing.get("total_seconds"),
             "n_evaluations":            timing.get("n_evaluations"),
             "ga_feasible":              opt.get("feasible"),
+            "bl_spacing_pct_regland":   bl_land.get("new_spacing_pct_regland"),
+            "bl_footprint_pct_regland": bl_land.get("new_footprint_pct_regland"),
+            "bl_newland_pct_regland":   bl_total,
+            "ga_spacing_pct_regland":   ga_land.get("new_spacing_pct_regland"),
+            "ga_footprint_pct_regland": ga_land.get("new_footprint_pct_regland"),
+            "ga_newland_pct_regland":   ga_total,
+            "land_delta_pp":            land_delta_pp,
+            "land_ok":                  land_ok,
         })
     return rows
 
@@ -156,6 +221,12 @@ def total_row(rows: List[Dict]) -> Dict:
         "total_seconds":            _sum("total_seconds", rows),
         "n_evaluations":            _sum("n_evaluations", rows),
         "ga_feasible":              all(r.get("ga_feasible") for r in rows) if rows else None,
+        # Land percentages are shares of each region's own land area, so summing
+        # across regions is meaningless; report only the check outcome counts.
+        "land_ok":                  "ok:{} flagged:{} n/a:{}".format(
+            sum(1 for r in rows if r.get("land_ok") is True),
+            sum(1 for r in rows if r.get("land_ok") is False),
+            sum(1 for r in rows if r.get("land_ok") is None)),
         "baseline_source":          "rerun:{} fallback:{}".format(
             sum(1 for r in rows if r.get("baseline_source") == "rerun"),
             sum(1 for r in rows if str(r.get("baseline_source", "")).startswith("PI xx"))),
@@ -197,9 +268,37 @@ def print_table(rows: List[Dict], total: Dict) -> None:
             ts, ts / 3600.0, len(rows)))
 
 
+def print_land_check(rows: List[Dict], land_tolerance: float) -> None:
+    """Summary of the new-land check: optimized total new-land share (wind
+    spacing + footprint, % of regional land) vs baseline, flagging regions where
+    the optimized share exceeds baseline by more than the tolerance."""
+    checked = [r for r in rows if r.get("land_ok") is not None]
+    flagged = [r for r in rows if r.get("land_ok") is False]
+    missing = [r for r in rows if r.get("land_ok") is None]
+    print("\nLAND CHECK (optimized new spacing+footprint vs baseline, "
+          "tolerance +{:.0f}%):".format(100 * land_tolerance))
+    if not checked:
+        print("  no regions with land data on both sides — nothing checked.")
+    elif not flagged:
+        print("  all {} checked regions OK (optimized new-land share within "
+              "tolerance of baseline).".format(len(checked)))
+    else:
+        print("  {} of {} regions EXCEED tolerance:".format(len(flagged), len(checked)))
+        for r in flagged:
+            print("    {:<16s} baseline {:.4f}%  ->  optimized {:.4f}%  "
+                  "(+{:.4f} pp, {:+.1f}%)".format(
+                      r["region"], r["bl_newland_pct_regland"],
+                      r["ga_newland_pct_regland"], r["land_delta_pp"],
+                      100 * r["land_delta_pp"] / r["bl_newland_pct_regland"]
+                      if r["bl_newland_pct_regland"] else float("nan")))
+    if missing:
+        print("  no land data for: {}".format(
+            ", ".join(r["region"] for r in missing)))
+
+
 def write_csv(rows: List[Dict], total: Dict, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [k for k, _, _ in COLUMNS]
+    fieldnames = CSV_FIELDS
     with out_path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
@@ -222,15 +321,21 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--raw-dir", type=Path, default=RAW_DIR,
                         help="Folder holding the PI's pristine xx.<SHORTCODE> files, "
                              "used only as a baseline fallback (default: %(default)s).")
+    parser.add_argument("--land-tolerance", type=float, default=DEFAULT_LAND_TOLERANCE,
+                        help="Relative tolerance for the new-land check: flag a region "
+                             "when its optimized new-land share exceeds baseline by more "
+                             "than this fraction (default: %(default)s).")
     args = parser.parse_args(argv)
 
-    rows = collect(args.results_root, args.regions, args.raw_dir)
+    rows = collect(args.results_root, args.regions, args.raw_dir,
+                   land_tolerance=args.land_tolerance)
     if not rows:
         print("No optimized regions found under {} (need optimal_summary.json).".format(
             args.results_root))
         return
     total = total_row(rows)
     print_table(rows, total)
+    print_land_check(rows, args.land_tolerance)
     write_csv(rows, total, args.output)
 
 

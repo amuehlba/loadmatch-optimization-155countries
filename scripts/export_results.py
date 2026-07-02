@@ -67,8 +67,9 @@ _FIXED_KEYS = [k for k in PARAM_REGISTRY if k not in set(FACTOR_KEYS)]
 ALL_REGIONS = [
     "AFRICA-EAST",    "AFRICA-NORTH",   "AFRICA-SOUTH",  "AFRICA-WEST",
     "AUSTRALIA",      "CANADA",         "CENTRAL-AMERIC","CENTRAL-ASIA",
-    "CHINA",          "CUBA",           "EUROPE",        "HAITI",
-    "ICELAND",        "INDIA",          "ISRAEL",        "JAMAICA",
+    "CHINA",          "CUBA",           "EUROPE",        "GREENLAND",
+    "HAITI",          "ICELAND",        "INDIA",         "ISRAEL",
+    "JAMAICA",
     "JAPAN",          "MADAGASCAR",     "MAURITIUS",     "MIDEAST",
     "NEW-ZEALAND",    "PHILIPPINES",    "RUSSIA",        "SOUTHAM-NW",
     "SOUTHAM-SE",     "SOUTHEAST-ASIA", "SOUTH-KOREA",   "TAIWAN",
@@ -94,6 +95,14 @@ _COST_COLS = [
     ("Annual cost ($B/yr)",  "annual_cost_mn_bil_per_yr",     "Cost MN ($B/yr)",      "0.00"),
     ("Annual cost ($B/yr)",  "annual_cost_hi_bil_per_yr",     "Cost HI ($B/yr)",      "0.00"),
     ("Annual cost ($B/yr)",  "capital_cost_mn_tril_per_yr",   "Capital ($T/yr, MN)",  "0.000"),
+]
+
+# New land area as percent of regional land (from the xx LANDNEWTECH table):
+# wind spacing = ONSHORE WIND row, footprint = TOTAL ELEC+HEAT-FPRINT row.
+_LAND_COLS = [
+    ("New land (% of region)", "new_spacing_pct_regland",   "Wind spacing (new)",       "0.00000"),
+    ("New land (% of region)", "new_footprint_pct_regland", "Footprint (new)",          "0.00000"),
+    ("New land (% of region)", "new_land_pct_regland",      "Spacing+footprint (new)",  "0.00000"),
 ]
 
 # cost_per_kwh_by_category is a nested dict — handled dynamically
@@ -164,6 +173,7 @@ _NET_COLS = [
 _GROUP_FILL = {
     "Identification":               "FFF2CC",   # amber
     "Annual cost ($B/yr)":          "FCE4D6",   # light orange
+    "New land (% of region)":       "E8DFCC",   # light earth/tan
     _COST_CAT_GROUP:                "FDDDC4",   # peach
     "Generation (TWh/yr)":          "DDEEFF",   # light blue
     "End use & load (TWh/yr)":      "D9EAD3",   # light green
@@ -260,6 +270,34 @@ def _lp_eval_cost_from_log(rdir: Path) -> Optional[float]:
     return None
 
 
+# Raw Fortran output retained for each case — used to backfill the land-area
+# fields for summary JSONs written before the land parser existed.
+_LAND_RAW_FILES = {
+    "Baseline": "fortran_baseline_run.out",
+    "LP":       "fortran_lp_run.out",
+    "GA (bl)":  "fortran_optimal_run.out",
+    "GA (LP)":  "fortran_lp_ga_run.out",
+}
+
+
+def _with_land(label: str, data: Optional[dict], rdir: Path) -> Optional[dict]:
+    """Backfill new-land percentages from the case's raw output if absent."""
+    if data is None or data.get("new_land_pct_regland") is not None:
+        return data
+    fname = _LAND_RAW_FILES.get(label)
+    if not fname or not (rdir / fname).exists():
+        return data
+    try:
+        from scripts.parse_fortran_output import parse_land_area
+        land = parse_land_area(
+            (rdir / fname).read_text(encoding="ascii", errors="replace"))
+    except Exception:
+        return data
+    data = dict(data)   # don't mutate cached dict
+    data.update(land)
+    return data
+
+
 def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
     """Return list of (case_label, data_dict_or_None) for all five cases."""
     rdir = RESULTS_DIR / region
@@ -274,13 +312,14 @@ def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
             lp_data = dict(lp_data)   # don't mutate cached dict
             lp_data["annual_cost_mn_bil_per_yr"] = log_cost
 
-    return [
+    cases = [
         ("Baseline",       _load_json(rdir / "baseline_summary.json")),
         ("LP",             lp_data),
         ("First feasible", ff_data),
         ("GA (bl)",        _load_json(rdir / "optimal_summary.json")),
         ("GA (LP)",        _load_json(rdir / "lp_ga_summary.json")),
     ]
+    return [(label, _with_land(label, data, rdir)) for label, data in cases]
 
 
 def _get_value(data: dict, key: str) -> Any:
@@ -320,7 +359,7 @@ def _collect_cost_categories(regions: List[str]) -> List[str]:
 
 def _build_col_spec(cost_categories: List[str]) -> List[Tuple[str, str, str, str]]:
     """Return list of (group, key, display_name, number_format) for all columns."""
-    spec = list(_IDENT_COLS) + list(_COST_COLS)
+    spec = list(_IDENT_COLS) + list(_COST_COLS) + list(_LAND_COLS)
 
     for cat in cost_categories:
         spec.append((_COST_CAT_GROUP, f"cost_cat:{cat}", cat, "0.000"))

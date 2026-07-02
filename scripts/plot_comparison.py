@@ -1,11 +1,15 @@
 """Publication figures from comparison_summary.csv.
 
 Reads data/results_verification/comparison_summary.csv (written by
-export_comparison.py) and produces two figures:
+export_comparison.py) and produces three figures:
 
   fig_cost_comparison  — annual system cost by region, trial-and-error vs
                          GA-optimized (log axis so all 30 regions are legible;
                          annotated with the per-region cost reduction).
+  fig_land_comparison  — new land area for WWS (wind spacing + footprint, % of
+                         regional land) by region, trial-and-error vs
+                         GA-optimized; annotated with the relative change and
+                         flagging regions that exceed the baseline share.
   fig_solve_time       — GA solve time by region (hours), with the total.
 
 Standalone (only needs pandas/matplotlib + the CSV), so it can be regenerated
@@ -43,9 +47,15 @@ plt.rcParams.update({
 def _load(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df = df[~df["region"].astype(str).str.startswith("TOTAL")].copy()
-    for c in ("baseline_cost_bil_per_yr", "ga_cost_bil_per_yr",
-              "pct_savings", "optimize_seconds", "total_seconds"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    numeric = ["baseline_cost_bil_per_yr", "ga_cost_bil_per_yr",
+               "pct_savings", "optimize_seconds", "total_seconds",
+               "bl_newland_pct_regland", "ga_newland_pct_regland",
+               "land_delta_pp"]
+    for c in numeric:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        else:
+            df[c] = float("nan")
     return df
 
 
@@ -94,6 +104,63 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path) -> None:
     print(f"  wrote fig_cost_comparison.pdf/.png  (total −{red_tot:.1f}% over {n} regions)")
 
 
+def fig_land_comparison(df: pd.DataFrame, outdir: Path,
+                        tolerance: float = 0.10) -> None:
+    """New land area for WWS (wind spacing + footprint, % of each region's own
+    land) by region, trial-and-error vs GA-optimized.  Same layout and colors
+    as the cost figure; annotations give the relative change, colored dark red
+    when the optimized share exceeds baseline by more than the tolerance."""
+    d = df.dropna(subset=["bl_newland_pct_regland", "ga_newland_pct_regland"]).copy()
+    if d.empty:
+        print("  [SKIP] fig_land_comparison: no land data in the CSV "
+              "(regenerate comparison_summary.csv with the land-aware exporter).")
+        return
+    d = d.sort_values("bl_newland_pct_regland", ascending=True)  # largest at top
+    n = len(d)
+    y = range(n)
+    h = 0.38
+
+    fig, ax = plt.subplots(figsize=(8.5, 0.42 * n + 1.2))
+    ax.barh([i + h / 2 for i in y], d["bl_newland_pct_regland"], height=h,
+            color=C_BASELINE, label=LABEL_BASELINE, zorder=3)
+    ax.barh([i - h / 2 for i in y], d["ga_newland_pct_regland"], height=h,
+            color=C_GA, label=LABEL_GA, zorder=3)
+
+    ax.set_xscale("log")
+    xmax = float(d[["bl_newland_pct_regland", "ga_newland_pct_regland"]].max().max())
+    ax.set_xlim(right=xmax * 3.2)
+
+    n_flagged = 0
+    for i, (_, r) in zip(y, d.iterrows()):
+        bl, ga = r["bl_newland_pct_regland"], r["ga_newland_pct_regland"]
+        rel = (ga - bl) / bl * 100 if bl else float("nan")
+        exceeded = bl > 0 and ga > bl * (1.0 + tolerance)
+        n_flagged += exceeded
+        xpos = max(bl, ga) * 1.15
+        ax.text(xpos, i, "{:+.1f}%".format(rel), va="center", ha="left",
+                fontsize=7, color="#a63603" if exceeded else "#08519c")
+
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(d["region"])
+    ax.set_xlabel("New land for WWS: wind spacing + footprint "
+                  "(% of regional land area, log scale)")
+    ax.legend(loc="lower right", frameon=False)
+
+    check = ("all {} regions within +{:.0f}% of baseline".format(n, 100 * tolerance)
+             if n_flagged == 0 else
+             "{} of {} regions exceed baseline by >{:.0f}% (red)".format(
+                 n_flagged, n, 100 * tolerance))
+    ax.set_title(
+        "New land area by region: trial-and-error vs GA-optimized\n"
+        "annotations = relative change in new-land share;  " + check,
+        fontsize=9)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_land_comparison.{ext}", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote fig_land_comparison.pdf/.png  ({check})")
+
+
 def fig_solve_time(df: pd.DataFrame, outdir: Path) -> None:
     d = df.dropna(subset=["optimize_seconds"]).copy()
     d["hours"] = d["optimize_seconds"] / 3600.0
@@ -122,6 +189,9 @@ def main(argv=None) -> None:
     ap.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     ap.add_argument("--outdir", type=Path,
                     default=REPO_ROOT / "data" / "results_verification")
+    ap.add_argument("--land-tolerance", type=float, default=0.10,
+                    help="Relative tolerance for flagging optimized new-land "
+                         "share above baseline (default: %(default)s).")
     args = ap.parse_args(argv)
     args.outdir.mkdir(parents=True, exist_ok=True)
     df = _load(args.csv)
@@ -129,6 +199,7 @@ def main(argv=None) -> None:
     if missing:
         print(f"  [WARN] regions missing a baseline cost (excluded from cost fig): {missing}")
     fig_cost_comparison(df, args.outdir)
+    fig_land_comparison(df, args.outdir, tolerance=args.land_tolerance)
     fig_solve_time(df, args.outdir)
 
 
