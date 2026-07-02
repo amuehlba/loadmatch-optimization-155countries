@@ -38,6 +38,11 @@ _IFDATCEN = 0
 from src.region_shortcodes import REGION_SHORTCODE
 
 
+# Deliverable xx files must match the PI's format exactly — strip our
+# READ_FACTOR_OVERRIDES stdout echo before writing them.
+from src.xx_tools import strip_override_echo as _strip_override_echo
+
+
 def _xx_deliverable_path(region):
     """Destination for a GA-optimal xx file (the PI's deliverable format/name).
 
@@ -1347,7 +1352,7 @@ def run_workflow(
         # of the seeded factors IS the result — save it as the optimal output + xx.
         paths["fortran_optimal_out"].write_text(stdout)
         _xx_out = _xx_deliverable_path(region)
-        _xx_out.write_text(stdout)
+        _xx_out.write_text(_strip_override_echo(stdout))
         opt_data = _parse_and_save(
             stdout, factors=base_factors, region=region,
             run_type="evaluate", out_path=paths["optimal_summary"],
@@ -1459,7 +1464,7 @@ def run_workflow(
     # the "xx" report to stdout, IOUT=6).  Save it under the PI's xx.<SHORTCODE>
     # naming, in a dedicated folder that never overwrites his pristine baselines.
     _xx_out = _xx_deliverable_path(region)
-    _xx_out.write_text(final_stdout)
+    _xx_out.write_text(_strip_override_echo(final_stdout))
 
     opt_data = _parse_and_save(
         final_stdout,
