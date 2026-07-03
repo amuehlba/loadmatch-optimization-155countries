@@ -67,6 +67,7 @@ python -m scripts.run_full_workflow \
     --ga-elite-frac    0.2 \
     --ga-mutation-cooling 0.995 \
     --baseline-start   scratch \
+    --max-land-pct     7 \
     --scratch-label    scratch2 \
     --no-plots
 

@@ -18,6 +18,7 @@ from scripts import run_python_model, export_fortran_factors
 from scripts.parse_fortran_output import (
     parse_and_save as _parse_and_save,
     save_summary as _save_summary,
+    parse_land_area as _parse_land_area,
     _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN,
 )
 # plot_results is imported lazily inside run_workflow() to avoid a circular
@@ -32,6 +33,32 @@ _DEFAULT_REGION = "UNITED-STATES"
 # centers, 2 = WWS-powered data centers.  Set once per workflow via run_workflow
 # (datacenter=...) and passed to the binary as command-line arg 3.
 _IFDATCEN = 0
+# Land-use cap (percent of regional land area for new wind spacing + footprint,
+# from the xx LANDNEWTECH table).  None = no cap.  Enforced as a graded cost
+# penalty rather than hard infeasibility: a hard cap would dead-end runs whose
+# STARTING point already violates it (e.g. a trial-and-error seed above the cap,
+# or the bootstrap's capacity inflation), whereas the penalty keeps a selection
+# gradient pointing back into compliance.  Each percentage point above the cap
+# multiplies the effective cost by (1 + _LAND_PENALTY_PER_PP), so no over-cap
+# candidate can outrank a compliant one unless no compliant solution exists.
+_MAX_LAND_PCT = None
+_LAND_PENALTY_PER_PP = 1.0
+
+
+def _apply_land_cap(cost, stdout):
+    """Effective (selection) cost after the land-use penalty.
+
+    The reported costs in all summaries stay the raw parsed values; this
+    penalty only steers the optimizer.  A compliant final solution therefore
+    has identical raw and effective cost."""
+    if _MAX_LAND_PCT is None or cost == float("inf"):
+        return cost
+    land = _parse_land_area(stdout).get("new_land_pct_regland")
+    if land is None or land <= _MAX_LAND_PCT:
+        return cost
+    return cost * (1.0 + _LAND_PENALTY_PER_PP * (land - _MAX_LAND_PCT))
+
+
 # Results-isolation suffix for the current run ("", "_scratch", "_dc1", ...).
 # Set by run_workflow; appended to the region results dir and the xx_optimized
 # deliverables dir so alternative runs never overwrite the base-case results.
@@ -782,7 +809,7 @@ def evaluate_factors(factors, label="candidate", region=_DEFAULT_REGION, paths=N
         write_factor_files(factors, paths)
         stdout = run_fortran(region=region, paths=paths)
     feasible = check_feasibility(stdout)
-    cost = parse_cost(stdout)
+    cost = _apply_land_cap(parse_cost(stdout), stdout)
     log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
     print("--- Fortran output tail ({}) ---".format(label))
     lines = stdout.strip().splitlines()
@@ -1252,7 +1279,7 @@ def evaluate_trials_parallel(specs, max_workers, region=_DEFAULT_REGION, paths=N
         for spec, future in zip(specs, futures):
             label, factors, output = future.result()
             feasible = check_feasibility(output)
-            cost = parse_cost(output)
+            cost = _apply_land_cap(parse_cost(output), output)
             log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
             lines = output.strip().splitlines()
             tail = "\n".join(lines[-20:]) if lines else ""
@@ -1475,9 +1502,14 @@ def run_workflow(
     datacenter=0,
     evaluate_only=False,
     scratch_label="scratch",
+    max_land_pct=None,
 ):
-    global _IFDATCEN, _RUN_SUFFIX
+    global _IFDATCEN, _RUN_SUFFIX, _MAX_LAND_PCT
     _IFDATCEN = int(datacenter)
+    _MAX_LAND_PCT = max_land_pct
+    if _MAX_LAND_PCT is not None:
+        print("Land-use cap active: new spacing+footprint <= {:.2f}% of regional "
+              "land (graded cost penalty).".format(_MAX_LAND_PCT))
     _t_workflow_start = time.perf_counter()
     # Alternative runs (scratch start, data-center scenarios) write to isolated
     # results dirs and xx_optimized folders so they never overwrite the
@@ -1600,7 +1632,7 @@ def run_workflow(
         return
 
     feasible_initial = check_feasibility(stdout)
-    initial_cost = parse_cost(stdout)
+    initial_cost = _apply_land_cap(parse_cost(stdout), stdout)
     log_candidate(base_factors, feasible_initial, initial_cost, label="LP",
                   history_file=paths["history_file"])
     if feasible_initial and baseline_start is None:
@@ -1718,6 +1750,7 @@ def run_workflow(
     opt_data["timing"] = {
         "datacenter_scenario":   _IFDATCEN,
         "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
+        "max_land_pct":          _MAX_LAND_PCT,
         "optimizer":             optimizer,
         "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
         "optimize_seconds":      round(_optimize_seconds, 3),
@@ -2052,6 +2085,15 @@ def parse_args():
              "they never overwrite the base-case results.",
     )
     parser.add_argument(
+        "--max-land-pct",
+        type=float,
+        default=None,
+        help="Cap on NEW land use (wind spacing + footprint) as percent of "
+             "regional land area, enforced during optimization as a graded cost "
+             "penalty: each percentage point above the cap doubles the effective "
+             "cost. Reported costs stay unpenalized. Default: no cap.",
+    )
+    parser.add_argument(
         "--scratch-label",
         type=str,
         default="scratch",
@@ -2201,6 +2243,7 @@ def main():
         datacenter=args.datacenter,
         evaluate_only=args.evaluate_only,
         scratch_label=args.scratch_label,
+        max_land_pct=args.max_land_pct,
     )
 
 

@@ -64,6 +64,7 @@ python -m scripts.run_full_workflow \
     --ga-elite-frac    0.2 \
     --ga-mutation-cooling 0.985 \
     --baseline-start   defaults \
+    --max-land-pct     7 \
     --no-plots
 
 echo "Done: $REGION   $(date)"
