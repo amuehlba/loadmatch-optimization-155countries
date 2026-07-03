@@ -954,6 +954,38 @@ def _scratch_storage_anchor(region: str) -> Dict[str, float]:
     return anchors
 
 
+def _scratch_seed_population(feasible_factors: Dict[str, float]) -> List[Dict[str, float]]:
+    """Deliberately spread starting individuals for the scratch GA.
+
+    A population made only of small mutations of one bootstrap point collapses
+    onto that point's storage/capacity levels (elitist truncation plus blend
+    crossover cannot create material that no individual carries).  These
+    variants scale the storage block down and the capacity factors up/down
+    around the bootstrap point.  Infeasible variants simply die in generation
+    one; feasible ones give the search genuine downward diversity.
+    """
+    storage_keys = [k for k in FACTOR_KEYS
+                    if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS]
+    capacity_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"]
+
+    def scaled(s_mult=1.0, f_mult=1.0):
+        v = feasible_factors.copy()
+        for k in storage_keys:
+            v[k] = _clamp(k, v[k] * s_mult)
+        for k in capacity_keys:
+            v[k] = _clamp(k, v[k] * f_mult)
+        return v
+
+    variants = []
+    for s in (0.25, 0.5, 0.75):
+        variants.append(scaled(s_mult=s))
+    for f in (0.7, 0.85, 1.15, 1.3):
+        variants.append(scaled(f_mult=f))
+    for s, f in ((0.5, 1.2), (0.25, 1.4), (0.75, 0.9), (0.5, 0.8)):
+        variants.append(scaled(s_mult=s, f_mult=f))
+    return variants
+
+
 def build_scratch_start() -> Dict[str, float]:
     """Spreadsheet starting point (per the PI): all capacity factors = 1.0 and
     all storage design variables = 0; the remaining design variable (heat-pump
@@ -969,6 +1001,38 @@ def build_scratch_start() -> Dict[str, float]:
     return factors
 
 
+def _bisect_between(infeasible_factors, feasible_factors, region=_DEFAULT_REGION,
+                    paths=None, attempts=4):
+    """Binary-search along the straight line between a known-INFEASIBLE and a
+    known-FEASIBLE factor dict for a leaner feasible point.
+
+    The bootstrap's geometric steps (storage ramp x1.5-2, capacity inflation
+    x1.5 growth) can overshoot the feasibility boundary by 50% or more; every
+    unit of overshoot is distance the GA must later claw back with small cooled
+    mutations.  A few interpolation evaluations recover most of that overshoot
+    up front.  Returns (factors, cost, stdout) of the leanest feasible point
+    found, or None if no interpolated point was feasible.
+    """
+    if paths is None:
+        paths = _region_paths(region)
+    best = None
+    lo_a, hi_a = 0.0, 1.0   # alpha=0 -> infeasible point, alpha=1 -> feasible point
+    for i in range(attempts):
+        mid = (lo_a + hi_a) / 2.0
+        cand = {
+            k: _clamp(k, infeasible_factors.get(k, v) + mid * (v - infeasible_factors.get(k, v)))
+            for k, v in feasible_factors.items()
+        }
+        feasible, cost, stdout = evaluate_factors(
+            cand, label="bootstrap-bisect{}".format(i + 1), region=region, paths=paths)
+        if feasible:
+            best = (cand, cost, stdout)
+            hi_a = mid
+        else:
+            lo_a = mid
+    return best
+
+
 def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
                       ramp=(0.25, 0.5, 1.0, 1.5, 2.0)):
     """Find a first feasible point from the spreadsheet scratch start.
@@ -979,15 +1043,18 @@ def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
     (see _scratch_storage_anchor — battery power ~ average regional load, H2
     power ~ 10% of it, technology-typical durations) with capacity factors held
     at 1.0; if storage alone does not reach feasibility, capacity factors are
-    inflated as usual on top of anchor-scale storage.  The anchors are derived
-    from input data only (countrystats.dat), keeping the scratch experiment
-    fully independent of the trial-and-error solution; the bootstrap merely
-    locates feasibility, and the GA searches freely from there.
+    inflated as usual on top of anchor-scale storage.  After the first feasible
+    point is found (on either path), a short bisection back toward the last
+    infeasible point trims the overshoot, so the GA starts as close to the
+    feasibility boundary as a handful of evaluations can get it.  The anchors
+    are derived from input data only (countrystats.dat), keeping the scratch
+    experiment fully independent of the trial-and-error solution.
     """
     if paths is None:
         paths = _region_paths(region)
     anchors = _scratch_storage_anchor(region)
     candidate = base_factors.copy()
+    prev = base_factors.copy()   # caller only invokes this when base is infeasible
     for frac in ramp:
         for key, anchor in anchors.items():
             candidate[key] = anchor * frac
@@ -995,12 +1062,19 @@ def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
         feasible, cost, stdout = evaluate_factors(candidate, label=label,
                                                   region=region, paths=paths)
         if feasible:
-            return candidate, cost, stdout
+            leaner = _bisect_between(prev, candidate, region=region, paths=paths)
+            return leaner if leaner else (candidate, cost, stdout)
+        prev = candidate.copy()
     # Storage ramp alone was not enough: keep storage at the top of the ramp
-    # and inflate capacity factors as in the standard bootstrap.
+    # and inflate capacity factors as in the standard bootstrap, then bisect
+    # back toward the pre-inflation point to trim the (often large) overshoot.
     for key, anchor in anchors.items():
         candidate[key] = anchor * ramp[-1]
-    return inflate_until_feasible(candidate, region=region, paths=paths)
+    pre_inflation = candidate.copy()
+    inflated, cost, stdout = inflate_until_feasible(candidate, region=region, paths=paths)
+    leaner = _bisect_between(pre_inflation, inflated, region=region, paths=paths,
+                             attempts=5)
+    return leaner if leaner else (inflated, cost, stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1348,7 @@ def genetic_search(
     magnitude_damping: float = 0.5,
     region: str = _DEFAULT_REGION,
     paths: dict = None,
+    seed_population: Sequence[Dict[str, float]] = None,
 ) -> Tuple[Dict[str, float], float]:
     if paths is None:
         paths = _region_paths(region)
@@ -1283,6 +1358,11 @@ def genetic_search(
     if factor_scales:
         merged_scales.update({k.lower(): v for k, v in factor_scales.items()})
     population: List[Dict[str, float]] = [feasible_factors.copy()]
+    # Optional deliberately-spread individuals (e.g. scratch-start diversity);
+    # the remainder of the population is filled with mutants of the seed.
+    for extra in (seed_population or []):
+        if len(population) < population_size:
+            population.append(extra.copy())
     while len(population) < population_size:
         population.append(
             mutate_factors(
@@ -1394,6 +1474,7 @@ def run_workflow(
     generate_plots=True,
     datacenter=0,
     evaluate_only=False,
+    scratch_label="scratch",
 ):
     global _IFDATCEN, _RUN_SUFFIX
     _IFDATCEN = int(datacenter)
@@ -1403,7 +1484,10 @@ def run_workflow(
     # base-case results.  The real region name is still passed to the Fortran
     # binary; only the output paths change.
     _scratch = (baseline_start == "scratch")
-    _RUN_SUFFIX = (("_scratch" if _scratch else "")
+    # scratch_label lets successive scratch campaigns coexist (e.g. "scratch" =
+    # first campaign at the base GA budget, "scratch2" = improved algorithm) —
+    # results dirs and xx folders are keyed on it, so nothing is overwritten.
+    _RUN_SUFFIX = (("_" + scratch_label if _scratch else "")
                    + ("_dc{}".format(_IFDATCEN) if _IFDATCEN else ""))
     results_label = region + _RUN_SUFFIX
     paths = _region_paths(results_label)
@@ -1557,9 +1641,14 @@ def run_workflow(
 
     _t_opt = time.perf_counter()
     if optimizer == "ga":
+        # Scratch runs seed part of the population with deliberately-spread
+        # variants of the bootstrap point (storage down / capacity up-down) so
+        # the search has downward genetic material from generation one.
+        _seed_pop = _scratch_seed_population(candidate) if _scratch else None
         best_factors, best_cost = genetic_search(
             candidate,
             cost,
+            seed_population=_seed_pop,
             population_size=ga_population,
             generations=ga_generations,
             mutation_rate=ga_mutation_rate,
@@ -1963,6 +2052,15 @@ def parse_args():
              "they never overwrite the base-case results.",
     )
     parser.add_argument(
+        "--scratch-label",
+        type=str,
+        default="scratch",
+        help="Isolation label for --baseline-start scratch runs: results go to "
+             "<REGION>_<LABEL>/ and xx_optimized_<LABEL>/. Use a distinct label "
+             "per campaign (e.g. scratch2) so earlier campaigns are preserved. "
+             "Default: %(default)s.",
+    )
+    parser.add_argument(
         "--evaluate-only",
         action="store_true",
         default=False,
@@ -2102,6 +2200,7 @@ def main():
         generate_plots=not args.no_plots,
         datacenter=args.datacenter,
         evaluate_only=args.evaluate_only,
+        scratch_label=args.scratch_label,
     )
 
 

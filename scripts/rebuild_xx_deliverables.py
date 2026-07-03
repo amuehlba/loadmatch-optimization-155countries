@@ -40,7 +40,7 @@ def rebuild(results_root: Path) -> None:
         # <REGION>[_scratch][_dc<N>] (isolated scratch / data-center results dirs
         # mirror their suffix in the xx_optimized folder name)
         label = rdir.name
-        m = re.match(r"(?P<region>.+?)(?P<suffix>(_scratch)?(_dc\d+)?)$", label)
+        m = re.match(r"(?P<region>.+?)(?P<suffix>(_scratch\w*?)?(_dc\d+)?)$", label)
         region = m.group("region")
         subdir = "xx_optimized" + m.group("suffix")
 

@@ -10,8 +10,8 @@ Layout
 • Two frozen header rows
     Row 1 – colour-coded group label (merged across the group's columns)
     Row 2 – individual column names
-• Data rows: four consecutive rows per region
-    (Baseline | GA (trial-error) | Scratch start | GA (scratch))
+• Data rows: five consecutive rows per region
+    (Baseline | GA (trial-error) | Scratch start | GA (scratch) | GA (scratch2))
   with alternating light-gray / white row-band shading so each region block
   is visually distinct.  The "region" column is always filled → fully
   machine-readable (no merged cells, no empty key columns).
@@ -293,13 +293,17 @@ def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
     """Return (case_label, data_dict_or_None) for the four reported cases.
 
     LP-based cases are intentionally not exported (the LP warm start is not used
-    in this project).  The scratch cases come from the isolated
-    <REGION>_scratch/ results produced by --baseline-start scratch:
-      Scratch start = the spreadsheet values (FAC*=1, storage=0) evaluated once,
-      GA (scratch)  = the GA optimum reached from that start.
+    in this project).  The scratch cases come from the isolated results of
+    --baseline-start scratch campaigns:
+      Scratch start  = the spreadsheet values (FAC*=1, storage=0) evaluated once,
+      GA (scratch)   = GA optimum from that start, first campaign (equal budget,
+                       <REGION>_scratch/),
+      GA (scratch2)  = GA optimum from the improved algorithm / extended budget
+                       campaign (<REGION>_scratch2/).
     """
     rdir = RESULTS_DIR / region
     sdir = RESULTS_DIR / (region + "_scratch")
+    s2dir = RESULTS_DIR / (region + "_scratch2")
     cases = [
         ("Baseline",           rdir, "fortran_baseline_run.out",
          _load_json(rdir / "baseline_summary.json")),
@@ -309,6 +313,8 @@ def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
          _load_json(sdir / "baseline_summary.json")),
         ("GA (scratch)",       sdir, "fortran_optimal_run.out",
          _load_json(sdir / "optimal_summary.json")),
+        ("GA (scratch2)",      s2dir, "fortran_optimal_run.out",
+         _load_json(s2dir / "optimal_summary.json")),
     ]
     return [(label, _with_land(data, case_dir, raw_name))
             for label, case_dir, raw_name, data in cases]
@@ -335,7 +341,8 @@ def _collect_cost_categories(regions: List[str]) -> List[str]:
     """Scan all JSON files to discover the union of cost category names."""
     cats: dict = {}   # preserve insertion order, de-duplicate
     for region in regions:
-        for rdir in (RESULTS_DIR / region, RESULTS_DIR / (region + "_scratch")):
+        for rdir in (RESULTS_DIR / region, RESULTS_DIR / (region + "_scratch"),
+                     RESULTS_DIR / (region + "_scratch2")):
             for fname in ("baseline_summary.json", "optimal_summary.json"):
                 data = _load_json(rdir / fname)
                 if data:

@@ -35,7 +35,9 @@ DEFAULT_CSV = REPO_ROOT / "data" / "results_verification" / "comparison_summary.
 # scratch orange.
 C_BASELINE = "#b0b7bf"     # grey
 C_GA = "#2c7fb8"           # blue
-C_GA_SCRATCH = "#e08214"   # orange
+C_GA_SCRATCH = "#f3b465"    # light orange (first scratch campaign, equal budget)
+C_GA_SCRATCH2 = "#e08214"   # orange (improved scratch campaign, extended budget)
+LABEL_GA_SCRATCH2 = "GA (from scratch, extended)"
 LABEL_BASELINE = "Trial-and-error"
 LABEL_GA = "GA (from trial-and-error)"
 LABEL_GA_SCRATCH = "GA (from scratch)"
@@ -55,6 +57,8 @@ def _load(csv_path: Path) -> pd.DataFrame:
                "pct_savings", "optimize_seconds", "total_seconds",
                "ga_scratch_cost_bil_per_yr", "scratch_vs_ga_pct",
                "scratch_optimize_seconds",
+               "ga_scratch2_cost_bil_per_yr", "scratch2_vs_ga_pct",
+               "scratch2_optimize_seconds",
                "bl_newland_pct_regland", "ga_newland_pct_regland",
                "land_delta_pp"]
     for c in numeric:
@@ -70,24 +74,25 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path) -> None:
     d = d.sort_values("baseline_cost_bil_per_yr", ascending=True)  # largest at top
     n = len(d)
     y = range(n)
-    has_scratch = d["ga_scratch_cost_bil_per_yr"].notna().any()
-
-    if has_scratch:
-        h = 0.27
-        row_h = 0.52
-    else:
-        h = 0.38
-        row_h = 0.42
+    # Series drawn per region, top to bottom within each group.  Scratch
+    # campaigns appear only when their columns carry data, so the figure works
+    # for any subset (base only, one campaign, or both).
+    series = [("baseline_cost_bil_per_yr", C_BASELINE, LABEL_BASELINE),
+              ("ga_cost_bil_per_yr", C_GA, LABEL_GA)]
+    if d["ga_scratch_cost_bil_per_yr"].notna().any():
+        series.append(("ga_scratch_cost_bil_per_yr", C_GA_SCRATCH,
+                       LABEL_GA_SCRATCH + " (equal budget)"))
+    if d["ga_scratch2_cost_bil_per_yr"].notna().any():
+        series.append(("ga_scratch2_cost_bil_per_yr", C_GA_SCRATCH2,
+                       LABEL_GA_SCRATCH2))
+    ns = len(series)
+    h = 0.8 / ns
+    row_h = 0.42 + 0.05 * (ns - 2)
     fig, ax = plt.subplots(figsize=(8.5, row_h * n + 1.2))
-    ax.barh([i + (h if has_scratch else h / 2) for i in y],
-            d["baseline_cost_bil_per_yr"], height=h,
-            color=C_BASELINE, label=LABEL_BASELINE, zorder=3)
-    ax.barh([i if has_scratch else i - h / 2 for i in y],
-            d["ga_cost_bil_per_yr"], height=h,
-            color=C_GA, label=LABEL_GA, zorder=3)
-    if has_scratch:
-        ax.barh([i - h for i in y], d["ga_scratch_cost_bil_per_yr"], height=h,
-                color=C_GA_SCRATCH, label=LABEL_GA_SCRATCH, zorder=3)
+    for si, (col, color, label) in enumerate(series):
+        offset = ((ns - 1) / 2.0 - si) * h
+        ax.barh([i + offset for i in y], d[col], height=h,
+                color=color, label=label, zorder=3)
 
     ax.set_xscale("log")
     xmax = float(d["baseline_cost_bil_per_yr"].max())
@@ -97,8 +102,7 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path) -> None:
     # annotated at the end of each group.
     for i, (_, r) in zip(y, d.iterrows()):
         red = r["pct_savings"]
-        vals = [r["baseline_cost_bil_per_yr"], r["ga_cost_bil_per_yr"],
-                r.get("ga_scratch_cost_bil_per_yr")]
+        vals = [r.get(col) for col, _, _ in series]
         xpos = max(v for v in vals if pd.notna(v)) * 1.15
         ax.text(xpos, i, "−{:.1f}%".format(red), va="center", ha="left",
                 fontsize=7, color="#08519c")
@@ -106,7 +110,7 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path) -> None:
     ax.set_yticks(list(y))
     ax.set_yticklabels(d["region"])
     ax.set_xlabel("Annual system cost (billion \\$/yr, log scale)")
-    ax.legend(loc="lower right", frameon=False)
+    ax.legend(loc="lower right", frameon=False, fontsize=8)
 
     tot_b = d["baseline_cost_bil_per_yr"].sum()
     tot_g = d["ga_cost_bil_per_yr"].sum()
@@ -115,21 +119,23 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path) -> None:
              "Total over {} regions: {:,.0f} → {:,.0f} billion \\$/yr "
              "(−{:.1f}%);  annotations = per-region cost reduction".format(
                  n, tot_b, tot_g, red_tot))
-    if has_scratch:
-        both = d.dropna(subset=["ga_scratch_cost_bil_per_yr"])
-        ts = both["ga_scratch_cost_bil_per_yr"].sum()
-        tg = both["ga_cost_bil_per_yr"].sum()
+    for col, extra_label in (("ga_scratch_cost_bil_per_yr", "equal budget"),
+                             ("ga_scratch2_cost_bil_per_yr", "extended")):
+        both = d.dropna(subset=[col])
+        if both.empty:
+            continue
+        ts, tg = both[col].sum(), both["ga_cost_bil_per_yr"].sum()
         gap = 100.0 * (ts - tg) / tg if tg else float("nan")
-        title += ("\nGA from scratch (FAC=1, storage=0 start): total {:,.0f} "
-                  "billion \\$/yr, {:+.1f}% vs GA from trial-and-error "
-                  "({} regions)".format(ts, gap, len(both)))
+        title += ("\nGA from scratch ({}): total {:,.0f} billion \\$/yr, "
+                  "{:+.1f}% vs GA from trial-and-error ({} regions)".format(
+                      extra_label, ts, gap, len(both)))
     ax.set_title(title, fontsize=9)
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_cost_comparison.{ext}", bbox_inches="tight")
     plt.close(fig)
-    print(f"  wrote fig_cost_comparison.pdf/.png  (total −{red_tot:.1f}% over {n} regions"
-          + (", incl. scratch series)" if has_scratch else ")"))
+    print(f"  wrote fig_cost_comparison.pdf/.png  (total −{red_tot:.1f}% over {n} regions, "
+          f"{ns} series)")
 
 
 def fig_land_comparison(df: pd.DataFrame, outdir: Path,
@@ -193,28 +199,30 @@ def fig_solve_time(df: pd.DataFrame, outdir: Path) -> None:
     d = df.dropna(subset=["optimize_seconds"]).copy()
     d["hours"] = d["optimize_seconds"] / 3600.0
     d["hours_scratch"] = d["scratch_optimize_seconds"] / 3600.0
+    d["hours_scratch2"] = d["scratch2_optimize_seconds"] / 3600.0
     d = d.sort_values("hours", ascending=True)
     n = len(d)
     y = range(n)
-    has_scratch = d["hours_scratch"].notna().any()
     total_h = d["hours"].sum()
 
-    fig, ax = plt.subplots(figsize=(8.0, (0.42 if has_scratch else 0.34) * n + 1.2))
-    if has_scratch:
-        h = 0.38
-        ax.barh([i + h / 2 for i in y], d["hours"], height=h,
-                color=C_GA, label=LABEL_GA, zorder=3)
-        ax.barh([i - h / 2 for i in y], d["hours_scratch"], height=h,
-                color=C_GA_SCRATCH, label=LABEL_GA_SCRATCH, zorder=3)
-        ax.legend(loc="lower right", frameon=False)
-        total_s = d["hours_scratch"].sum()
-        title = ("GA solve time by region  (totals: {:.0f} h from "
-                 "trial-and-error, {:.0f} h from scratch; {} regions)".format(
-                     total_h, total_s, n))
-    else:
-        ax.barh(list(y), d["hours"], color=C_GA, zorder=3)
-        title = "GA solve time by region  (total {:.0f} h over {} regions)".format(
-            total_h, n)
+    series = [("hours", C_GA, LABEL_GA)]
+    if d["hours_scratch"].notna().any():
+        series.append(("hours_scratch", C_GA_SCRATCH,
+                       LABEL_GA_SCRATCH + " (equal budget)"))
+    if d["hours_scratch2"].notna().any():
+        series.append(("hours_scratch2", C_GA_SCRATCH2, LABEL_GA_SCRATCH2))
+    ns = len(series)
+    h = 0.8 / ns
+    fig, ax = plt.subplots(figsize=(8.0, (0.34 + 0.06 * (ns - 1)) * n + 1.2))
+    for si, (col, color, label) in enumerate(series):
+        offset = ((ns - 1) / 2.0 - si) * h
+        ax.barh([i + offset for i in y], d[col], height=h,
+                color=color, label=label, zorder=3)
+    if ns > 1:
+        ax.legend(loc="lower right", frameon=False, fontsize=8)
+    totals = "; ".join("{:.0f} h {}".format(d[col].sum(), label)
+                       for col, _, label in series)
+    title = "GA solve time by region  ({}; {} regions)".format(totals, n)
     ax.set_yticks(list(y))
     ax.set_yticklabels(d["region"])
     ax.set_xlabel("GA solve time (hours)")

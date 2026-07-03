@@ -7,13 +7,20 @@
 # variables = 0) instead of the PI's trial-and-error solution.  Addresses the
 # question whether the optimizer needs the expert starting point at all.
 #
-# Identical GA budget to the base run (population 37 x 50 generations) so the
-# two starts are compared at equal search effort.  A few extra evaluations are
-# spent up front ramping storage to find a first feasible point.
+# EXTENDED search budget vs the base run: population 48 (fills 2 x 24-core
+# batches exactly, so it costs no extra wall-clock per generation vs 37),
+# 150 generations, and slower mutation cooling (0.995 vs 0.985) so the search
+# stays mobile long enough to traverse the larger distance from the scratch
+# start.  The bootstrap additionally bisects back toward the feasibility
+# boundary after the storage ramp / capacity inflation, and the initial
+# population is seeded with spread variants (storage down, capacity up/down).
+# The first scratch campaign at the equal budget (37 x 50) is preserved in
+# results_export.xlsx; disclose the budget difference when reporting.
 #
-# Results are fully isolated from the base case:
-#   data/results_verification/<REGION>_scratch/        summaries, logs, raw outs
-#   data/results_verification/xx_optimized_scratch/    xx.<SHORTCODE> deliverables
+# Results are fully isolated from the base case AND from the first scratch
+# campaign (which stays untouched in <REGION>_scratch/):
+#   data/results_verification/<REGION>_scratch2/       summaries, logs, raw outs
+#   data/results_verification/xx_optimized_scratch2/   xx.<SHORTCODE> deliverables
 #
 # Usage (from the repo root on a Sherlock login node):
 #   sbatch scripts/run_all_regions_scratch_slurm.sh
@@ -53,13 +60,14 @@ python -m scripts.run_full_workflow \
     --region          "$REGION" \
     --optimizer       ga \
     --parallel-evals  "${SLURM_CPUS_PER_TASK:-24}" \
-    --ga-population    37 \
-    --ga-generations   50 \
+    --ga-population    48 \
+    --ga-generations   150 \
     --ga-mutation-rate 0.15 \
     --ga-mutation-scale 0.2 \
     --ga-elite-frac    0.2 \
-    --ga-mutation-cooling 0.985 \
+    --ga-mutation-cooling 0.995 \
     --baseline-start   scratch \
+    --scratch-label    scratch2 \
     --no-plots
 
 echo "Done: $REGION (scratch)   $(date)"
