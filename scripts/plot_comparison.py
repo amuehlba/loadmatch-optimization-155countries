@@ -136,8 +136,9 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path,
                         tolerance: float = 0.10) -> None:
     """New land area for WWS (wind spacing + footprint, % of each region's own
     land) by region, trial-and-error vs GA-optimized.  Same layout and colors
-    as the cost figure; annotations give the relative change, colored dark red
-    when the optimized share exceeds baseline by more than the tolerance."""
+    as the cost figure but on a LINEAR axis (land shares are directly
+    comparable percentages); annotations give the relative change, colored dark
+    red when the optimized share exceeds baseline by more than the tolerance."""
     d = df.dropna(subset=["bl_newland_pct_regland", "ga_newland_pct_regland"]).copy()
     if d.empty:
         print("  [SKIP] fig_land_comparison: no land data in the CSV "
@@ -154,9 +155,8 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path,
     ax.barh([i - h / 2 for i in y], d["ga_newland_pct_regland"], height=h,
             color=C_GA, label=LABEL_GA, zorder=3)
 
-    ax.set_xscale("log")
     xmax = float(d[["bl_newland_pct_regland", "ga_newland_pct_regland"]].max().max())
-    ax.set_xlim(right=xmax * 3.2)
+    ax.set_xlim(0, xmax * 1.30)
 
     n_flagged = 0
     for i, (_, r) in zip(y, d.iterrows()):
@@ -164,14 +164,14 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path,
         rel = (ga - bl) / bl * 100 if bl else float("nan")
         exceeded = bl > 0 and ga > bl * (1.0 + tolerance)
         n_flagged += exceeded
-        xpos = max(bl, ga) * 1.15
+        xpos = max(bl, ga) + xmax * 0.02
         ax.text(xpos, i, "{:+.1f}%".format(rel), va="center", ha="left",
                 fontsize=7, color="#a63603" if exceeded else "#08519c")
 
     ax.set_yticks(list(y))
     ax.set_yticklabels(d["region"])
     ax.set_xlabel("New land for WWS: wind spacing + footprint "
-                  "(% of regional land area, log scale)")
+                  "(% of regional land area)")
     ax.legend(loc="lower right", frameon=False)
 
     check = ("all {} regions within +{:.0f}% of baseline".format(n, 100 * tolerance)
