@@ -19,7 +19,7 @@
        CHARACTER(14) COUNTRY, NAMEGRID, GRIDNAM,  NAMCOUNGR, GRIDUSE,
       1              NAMECOUN,DOMAIN,   NAMEREAD, DUMMY,     GRIDLOAD,
       1              GRIDCOUN,NAMHTREG, NH,       NAMEORIG,  NAMORIGGR,
-@@ -1132,10 +1136,10 @@
+@@ -1118,10 +1122,10 @@
  C PATHTEMP = DIRECTORY WHERE wwssupworld.dat READ FROM WHEN IFREWRITE=1,2
  C PATHLOAD = DIRECTORY WHERE HOURLY LOAD DATA ARE LOCATED
  C
@@ -34,12 +34,10 @@
  C
  C *****************************************************************************
  C                  PARAMETERS THAT MODEL USERS CHANGE 
-@@ -1232,7 +1236,14 @@
- C
+@@ -1221,6 +1225,13 @@
  C     IFDATCEN  = 1
  C     IFDATCEN  = 2 
--      IFDATCEN  = 0 
-+      IFDATCEN  = 0
+       IFDATCEN  = 0 
 +C     Override IFDATCEN from command-line argument 3 (data-center scenarios):
 +C     0 = base WWS, 1 = EGS-powered data centers, 2 = WWS-powered data centers.
 +C     If no argument is provided the default (0) is kept.
@@ -49,25 +47,24 @@
 +      IF (DCARG.EQ.'2') IFDATCEN = 2
  C
        IF (IFDATCEN.GE.1) THEN
- C      FDATCEN  = 0.02  
-@@ -1506,6 +1517,12 @@
+        FDATCEN  = 0.10 
+@@ -1492,6 +1503,12 @@
+       ELSE
         GRIDUSE = 'CONUS'
        ENDIF
- C
++C
 +C     Override GRIDUSE from command-line argument 1 (automated multi-region runs).
 +C     If no argument is provided, the default selected above is kept.
 +      GRIDARG = ' '
 +      CALL GET_COMMAND_ARGUMENT(1, GRIDARG)
 +      IF (GRIDARG.NE.' ') GRIDUSE = GRIDARG
-+C
+ C
        WRITE(IOUT,111) GRIDUSE
   111  FORMAT('DOMAIN: ',A14,' POWERWORLD.F LOADMATCH GRID INTEGRATION ',
-      1       'MODEL'/)
-@@ -1555,6 +1572,14 @@
- C      IFREWRITE = 2 
+@@ -1543,6 +1560,14 @@
         IFREWRITE = 3 
        ENDIF
-+C
+ C
 +C     Override IFREWRITE from command-line argument 2 (automated preprocessing).
 +C     Usage: powerworld [REGION] [1|2|3] -- if omitted, default above is kept.
 +      IFARG = ' '
@@ -75,10 +72,11 @@
 +      IF (IFARG.EQ.'1') IFREWRITE = 1
 +      IF (IFARG.EQ.'2') IFREWRITE = 2
 +      IF (IFARG.EQ.'3') IFREWRITE = 3
- C
++C
  C INITYEAR = INITIAL YEAR OF SIMULATIONS
  C
-@@ -5664,6 +5689,28 @@
+       IF (IFCAISO.EQ.1) THEN
+@@ -5651,6 +5676,28 @@
        ENDIF
  C     ENDIF GRIDUSE
  C
@@ -107,7 +105,7 @@
  C *****************************************************************************
  C                        FIND TIME ZONE IN MIDDLE OF DOMAIN
  C *****************************************************************************
-@@ -6624,7 +6671,7 @@
+@@ -6611,7 +6658,7 @@
  C INPUT SUPPLY DATA
  C
         IF (IFREWRITE.EQ.3) THEN
@@ -116,7 +114,7 @@
         ELSEIF (IFREWRITE.EQ.2) THEN
          OPEN(KWWS, FILE = PATHHOME//'wwssupreform.dat')
         ELSEIF (IFREWRITE.EQ.1.OR.IFREWRITE.EQ.0) THEN 
-@@ -11609,7 +11656,7 @@
+@@ -11596,7 +11643,7 @@
  C STORHOURS = AVG NUMBER OF HOURS OF STORAGE AMONG ALL NON-UTES, NON-H2 STORAGE
  C             EXCEPT, IT INCLUDES H2 STORAGE FOR GRID ELECTRICITY
  C
@@ -125,7 +123,7 @@
  C             
  C UTESTWH   = MAX STORAGE CAPACITY (TWH) UNDERGROUND SEAS HEAT STORAGE IN SOIL 
  C             REALLY TWH OF ELECTRICITY STORAGE THAT GIVES NECESSARY
-@@ -11626,7 +11673,7 @@
+@@ -11613,7 +11660,7 @@
  C FEXISTPHS = FRACTION OF PROPOSED PHS STORAGE THAT ALREADY EXISTS
  C TEXISTPHS = EXISTING PUMPED-HYDRO STORAGE (PHS) INSTALLED CAPACITY (TW)
  C
@@ -134,7 +132,7 @@
  C
  C FRACCSP   = FRAC OF KWH OF NON-UTES STORAGE IN PHASE-CHANGE MATERIAL FROM CSP
  C FRACPHS   = FRAC OF KWH OF NON-UTES STORAGE IN PUMPED-HYDRO STORAGE
-@@ -11668,14 +11715,14 @@
+@@ -11655,14 +11702,14 @@
  C             PRODUCE AND COMPRESS H2 = ENERGY EMBODIED IN H2 / H2CHAREFF
  C           = FCDISCH (TW) / (H2DCEFF * H2CHAREFF)
  C     
@@ -157,7 +155,7 @@
  C     
        SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
       1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
-@@ -21384,3 +21431,221 @@
+@@ -21371,3 +21418,221 @@
  C
        STOP
        END

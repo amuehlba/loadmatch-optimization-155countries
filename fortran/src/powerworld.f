@@ -750,6 +750,8 @@ C GEOTHERMAL: EGS+CONVENTIONAL FROM  https://atb.nrel.gov/electricity/2023/geoth
 C             CONVEN (HYDRO) BINARY: 2022:  $9,274/KW; 2035:  $7,188/KW; 2050:  $6,668/KW
 C             NEAR-FIELD EGS BINARY: 2022: $29,117/KW; 2035: $10,066/KW; 2050:  $9,337/KW 
 C             DEEP EGS BINARY:       2022: $41,652/KW; 2035: $13,069/KW; 2050: $12,122/KW 
+C             DEEP EGS BINARY:       2025:  $7,000/KW;                   2050: $ 3,000/KW 
+C             https://www.eenews.net/articles/a-6-5b-geothermal-company-industry-eyes-tipping-point/
 C FERVO SAYS $85/MWH BY 2028 --> SCALE NREL RESULTS TO GET $6,200/KW in 2028.
 C 2022 LOW, HIGH CAPITAL COST IN 2020 USD FROM 'Cost of delivered electricity' TAB
 C 145Countries.xlsx
@@ -759,18 +761,10 @@ C
 C FOR 150 COUNTRIES 2022
       DATA CAP2022LO
      1    /1.025,2.50, 2.23, 1.20, 0.775, 6.00, 3.50, 4.05,
-     1     2.40, 4.50, 4.50, 1.30, 4.05,  10.0/
-C LOW EGS
-C    1     2.40, 4.50, 4.50, 1.30, 4.05,  4.05/
-C HI EGS
-C    1     2.40, 4.50, 4.50, 1.30, 4.05,  16.0/
+     1     2.40, 4.50, 4.50, 1.30, 4.05,  5.00/
       DATA CAP2022HI
      1    /1.45, 4.00, 2.825,2.16, 1.060, 9.09, 4.00, 6.05,
-     1     3.20, 6.50, 8.00, 1.50, 6.05,  14.0/
-C LOW EGS
-C    1     3.20, 6.50, 8.00, 1.50, 6.05,  6.05/
-C HI EGS
-C    1     3.20, 6.50, 8.00, 1.50, 6.05,  22.0/
+     1     3.20, 6.50, 8.00, 1.50, 6.05,  9.00/
 C
 C 2050 LOW, HIGH CAPITAL COST IN 2020 USD FROM 'Cost of delivered electricity' TAB
 C 145Countries.xlsx
@@ -778,18 +772,10 @@ C
 C FOR 150 COUNTRIES 2050
       DATA CAP2050LO
      1    /0.648, 1.236, 0.897, 0.538, 0.383, 2.138, 1.247, 3.885,
-     1     2.332, 1.397, 1.190, 0.822, 3.885, 5.0/
-C LOW EGS
-C    1     2.332, 1.397, 1.190, 0.822, 3.885, 3.885/
-C HI EGS
-C    1     2.332, 1.397, 1.190, 0.822, 3.885, 6.2/
+     1     2.332, 1.397, 1.190, 0.822, 3.885, 2.5/
       DATA CAP2050HI
      1    /0.917, 1.609, 1.396, 1.167, 0.621, 4.075, 1.793, 4.573,
-     1     3.200, 2.316, 2.851, 1.086, 4.573, 7.0/
-C LOW EGS
-C    1     3.200, 2.316, 2.851, 1.086, 4.573, 4.573/
-C HI EGS
-C    1     3.200, 2.316, 2.851, 1.086, 4.573, 9.5/
+     1     3.200, 2.316, 2.851, 1.086, 4.573, 3.5/
 C
 C TDLOSLO  = LO TRANSMISSION & DISTRIBUTION LOSS (FRACTION) OF OUTPUT ELECTRICITY
 C            THIS WILL INCLUDE SHORT- AND LONG-DISTANCE TRANSMISSION LOSSES
@@ -1227,6 +1213,8 @@ C                WIND, SOLAR, BATTERIES, & H2 FUEL CELLS ONLY,
 C           = 0: DO NOT INCREASE DATA CENTER DEMAND OR SUPPLY AT ALL
 C FDATCEN   = FRACTION OF ANNUAL AVG ALL PURPOSE LOAD (TLFIN2050) ADDED ON
 C             TOP OF TLFIN2050 AS INFLEXIBLE LOAD FOR DATACENTERS  
+C           = 0.10 GIVES ~92.5 GW OF DEMAND IN THE U.S. IN 2050
+C                        ~896 GW OF DEMAND 155 COUNTRIES IN 2050
 C           = 0.12 GIVES ~111 GW OF DEMAND IN THE U.S. IN 2050
 C                        ~1075 GW OF DEMAND 155 COUNTRIES IN 2050
 C           = 0.02 GIVES ~18 GW OF DEMAND IN THE U.S. IN 2050
@@ -1236,7 +1224,7 @@ C DATCENTW  = TW CONSTANT INFLEXIBLE LOAD DUE TO DATA CENTERS IN 2050
 C
 C     IFDATCEN  = 1
 C     IFDATCEN  = 2 
-      IFDATCEN  = 0
+      IFDATCEN  = 0 
 C     Override IFDATCEN from command-line argument 3 (data-center scenarios):
 C     0 = base WWS, 1 = EGS-powered data centers, 2 = WWS-powered data centers.
 C     If no argument is provided the default (0) is kept.
@@ -1246,8 +1234,7 @@ C     If no argument is provided the default (0) is kept.
       IF (DCARG.EQ.'2') IFDATCEN = 2
 C
       IF (IFDATCEN.GE.1) THEN
-C      FDATCEN  = 0.02  
-       FDATCEN  = 0.12 
+       FDATCEN  = 0.10 
       ELSE
        FDATCEN  = 0
       ENDIF
@@ -1363,7 +1350,7 @@ C            29 GRID REGIONS IN 149- AND 150-COUNTRY ROADMAP PAPERS
 C *****************************************************************************
 C
       IF (IFCOUNTRY.EQ.1) THEN
-       GRIDUSE = 'AFRICA-EAST'
+C      GRIDUSE = 'AFRICA-EAST'
 C      GRIDUSE = 'AFRICA-NORTH'
 C      GRIDUSE = 'AFRICA-SOUTH'
 C      GRIDUSE = 'AFRICA-WEST'
@@ -1392,7 +1379,7 @@ C      GRIDUSE = 'SOUTHAM-SE'
 C      GRIDUSE = 'SOUTHEAST-ASIA'
 C      GRIDUSE = 'SOUTH-KOREA'
 C      GRIDUSE = 'TAIWAN'
-C      GRIDUSE = 'UNITED-STATES'
+       GRIDUSE = 'UNITED-STATES'
 C
 C *****************************************************************************
 C THESE GRIDS ARE FOR TESTING EFFECT OF COMBINING COUNTRIES ON GRID STABILITY 
