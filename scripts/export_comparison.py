@@ -142,7 +142,7 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         # Isolated alternative runs (<REGION>_scratch, <REGION>_dc<N>) are not
         # rows of their own: scratch results are joined onto the base-region row
         # below; data-center scenarios get their own dedicated comparison.
-        if re.search(r"(_scratch\w*|_dc\d+)$", region):
+        if re.search(r"(_scratch\w*|_dc\d+\w*)$", region):
             continue
         if regions and region not in regions:
             continue

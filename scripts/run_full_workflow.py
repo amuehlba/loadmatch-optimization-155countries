@@ -823,10 +823,13 @@ def evaluate_factors(factors, label="candidate", region=_DEFAULT_REGION, paths=N
 # Feasibility inflation  (only touches the original capacity factors)
 # ---------------------------------------------------------------------------
 
-def inflate_factors(factors, step):
+def inflate_factors(factors, step, locked=()):
     """Inflate only the capacity-scaling factors; leave others untouched."""
+    locked_lower = {k.lower() for k in locked}
     inflated = factors.copy()
     for key in CAPACITY_FACTOR_KEYS:
+        if key.lower() in locked_lower:
+            continue
         value = inflated.get(key, 1.0)
         if value > 0:
             inflated[key] = max(MIN_FACTOR, value * (1.0 + step))
@@ -835,11 +838,14 @@ def inflate_factors(factors, step):
     return inflated
 
 
-def raise_subunity_factors(factors, step):
+def raise_subunity_factors(factors, step, locked=()):
     """Raise sub-unity capacity factors toward 1.0; leave others untouched."""
+    locked_lower = {k.lower() for k in locked}
     updated = factors.copy()
     changed = False
     for key in CAPACITY_FACTOR_KEYS:
+        if key.lower() in locked_lower:
+            continue
         value = updated.get(key, 1.0)
         if value <= 0:
             updated[key] = max(step, MIN_FACTOR)
@@ -851,15 +857,17 @@ def raise_subunity_factors(factors, step):
 
 
 def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25,
-                           region=_DEFAULT_REGION, paths=None):
+                           region=_DEFAULT_REGION, paths=None, locked=()):
     if paths is None:
         paths = _region_paths(region)
+    locked = tuple(locked or ())
+    locked_lower = {k.lower() for k in locked}
     candidate = base_factors.copy()
     step = initial_step
 
     # Phase 1: raise sub-unity capacity factors toward 1.0
     for attempt in range(1, max_attempts + 1):
-        candidate, changed = raise_subunity_factors(candidate, step)
+        candidate, changed = raise_subunity_factors(candidate, step, locked)
         label = "inflate-subunity{}".format(attempt)
         feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
@@ -869,6 +877,8 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
 
     # Ensure all capacity factors are at least 1.0 before scaling
     for key in CAPACITY_FACTOR_KEYS:
+        if key.lower() in locked_lower:
+            continue
         candidate[key] = max(1.0, candidate.get(key, 1.0))
 
     # Phase 2A: scale only electric generation factors (wind/PV/CSP).
@@ -879,6 +889,8 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     step_elec = initial_step
     for attempt in range(1, half + 1):
         for key in ELECTRIC_CAPACITY_FACTOR_KEYS:
+            if key.lower() in locked_lower:
+                continue
             val = candidate.get(key, 1.0)
             candidate[key] = max(MIN_FACTOR, val * (1.0 + step_elec))
         label = "inflate-electric{}".format(attempt)
@@ -892,7 +904,7 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     # sector shortfall (requiring FACSHT inflation) never runs out of attempts.
     step_all = initial_step
     for attempt in range(1, max_attempts + 1):
-        candidate = inflate_factors(candidate, step_all)
+        candidate = inflate_factors(candidate, step_all, locked)
         label = "inflate-all{}".format(attempt)
         feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
@@ -1502,6 +1514,7 @@ def run_workflow(
     datacenter=0,
     evaluate_only=False,
     scratch_label="scratch",
+    dc_label="",
     max_land_pct=None,
 ):
     global _IFDATCEN, _RUN_SUFFIX, _MAX_LAND_PCT
@@ -1519,8 +1532,11 @@ def run_workflow(
     # scratch_label lets successive scratch campaigns coexist (e.g. "scratch" =
     # first campaign at the base GA budget, "scratch2" = improved algorithm) —
     # results dirs and xx folders are keyed on it, so nothing is overwritten.
+    # dc_label distinguishes data-center cases that share the same IFDATCEN but
+    # differ in which design variables may change (e.g. _dc2 = utility build-out,
+    # _dc2rc = rooftop build-out, _dc2bat / _dc2h2 = storage sensitivities).
     _RUN_SUFFIX = (("_" + scratch_label if _scratch else "")
-                   + ("_dc{}".format(_IFDATCEN) if _IFDATCEN else ""))
+                   + ("_dc{}{}".format(_IFDATCEN, dc_label) if _IFDATCEN else ""))
     results_label = region + _RUN_SUFFIX
     paths = _region_paths(results_label)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
@@ -1663,7 +1679,8 @@ def run_workflow(
         candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths)
     else:
         print("Starting point infeasible; inflating capacity factors.")
-        candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths)
+        candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths,
+                                                    locked=hj_locked_factors or ())
 
     print(
         "{} starting from feasible point (cost {:.3f}).".format(
@@ -2085,6 +2102,14 @@ def parse_args():
              "they never overwrite the base-case results.",
     )
     parser.add_argument(
+        "--dc-label",
+        type=str,
+        default="",
+        help="Extra isolation label for data-center runs sharing an IFDATCEN "
+             "value: results go to <REGION>_dc<N><LABEL>/ (e.g. --datacenter 2 "
+             "--dc-label rc -> _dc2rc). Default: empty.",
+    )
+    parser.add_argument(
         "--max-land-pct",
         type=float,
         default=None,
@@ -2243,6 +2268,7 @@ def main():
         datacenter=args.datacenter,
         evaluate_only=args.evaluate_only,
         scratch_label=args.scratch_label,
+        dc_label=args.dc_label,
         max_land_pct=args.max_land_pct,
     )
 
