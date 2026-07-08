@@ -613,6 +613,21 @@ def load_baseline_start(path: Path) -> Dict[str, float]:
 # Fortran I/O helpers
 # ---------------------------------------------------------------------------
 
+def run_single_isolated(label, factors, region, paths):
+    """One Fortran evaluation through an isolated workspace: no global lock, so
+    concurrent jobs (other regions, cases, sweeps) do not serialize on it.
+    Replicates _run_fortran_raw's log side effects from the captured output.
+    Requires explicit factors (cannot express the 'defaults' no-factor-file
+    mode) and assumes supply preprocessing is complete for the region."""
+    preprocess_region(region)
+    _, _, output = run_fortran_worker(label, factors, region)
+    paths["results_dir"].mkdir(parents=True, exist_ok=True)
+    paths["fortran_log"].write_text(output)
+    paths["fortran_err"].write_text("")
+    paths["fortran_out"].write_text(output)
+    return output
+
+
 def _run_fortran_raw(cmd, paths):
     """Run a Fortran subprocess, capture stdout/stderr, write logs, return stdout."""
     result = subprocess.run(
@@ -856,9 +871,79 @@ def raise_subunity_factors(factors, step, locked=()):
     return updated, changed
 
 
+def _inflation_candidates(base_factors, initial_step, growth, max_attempts,
+                          locked, extra_keys):
+    """The (deterministic) candidate sequence of the sequential inflation phases.
+
+    The step schedule does not depend on evaluation outcomes, only the stopping
+    point does — so the whole sequence can be precomputed and evaluated in
+    parallel batches, taking the earliest feasible candidate."""
+    locked_lower = {k.lower() for k in locked}
+
+    def _scale_extra(cand, step_val):
+        for key in extra_keys:
+            val = cand.get(key, PARAM_REGISTRY[key][0])
+            if val > 0:
+                cand[key] = _clamp(key, val * (1.0 + step_val))
+            else:
+                cand[key] = _clamp(key, PARAM_REGISTRY[key][0] * step_val)
+
+    cands = []
+    # Phase 1: raise sub-unity capacity factors toward 1.0
+    c = base_factors.copy()
+    for i in range(max_attempts):
+        c, changed = raise_subunity_factors(c, initial_step, locked)
+        if not changed:
+            break
+        cands.append(("inflate-subunity{}".format(i + 1), c.copy()))
+    # Snap unlocked capacity factors to >= 1.0 before scaling
+    c = c.copy()
+    for key in CAPACITY_FACTOR_KEYS:
+        if key.lower() not in locked_lower:
+            c[key] = max(1.0, c.get(key, 1.0))
+    # Phase 2A: electric generation factors (+ free storage)
+    step = initial_step
+    for i in range(max(max_attempts // 2, 4)):
+        for key in ELECTRIC_CAPACITY_FACTOR_KEYS:
+            if key.lower() not in locked_lower:
+                c[key] = max(MIN_FACTOR, c.get(key, 1.0) * (1.0 + step))
+        _scale_extra(c, step)
+        cands.append(("inflate-electric{}".format(i + 1), c.copy()))
+        step *= growth
+    # Phase 2B: all capacity factors (+ free storage)
+    step = initial_step
+    for i in range(max_attempts):
+        c = inflate_factors(c, step, locked)
+        _scale_extra(c, step)
+        cands.append(("inflate-all{}".format(i + 1), c.copy()))
+        step *= growth
+    return cands
+
+
+def _inflate_until_feasible_parallel(base_factors, initial_step, growth, max_attempts,
+                                     region, paths, locked, extra_keys, parallel_evals):
+    """Batched inflation: evaluate the deterministic candidate schedule in
+    chunks of parallel_evals, stop at the earliest feasible candidate, then
+    refine back toward its (infeasible) predecessor in one more batch."""
+    cands = _inflation_candidates(base_factors, initial_step, growth, max_attempts,
+                                  locked, extra_keys)
+    for start in range(0, len(cands), parallel_evals):
+        chunk = cands[start:start + parallel_evals]
+        specs = [{"label": lbl, "factors": fac} for lbl, fac in chunk]
+        results = _eval_batch(specs, parallel_evals, region, paths)
+        for j, res in enumerate(results):
+            if res["feasible"]:
+                idx = start + j
+                winner = cands[idx][1]
+                lo = base_factors if idx == 0 else cands[idx - 1][1]
+                leaner = _refine_between(lo, winner, region, paths, parallel_evals)
+                return leaner if leaner else (winner, res["cost"], None)
+    raise RuntimeError("Unable to inflate factors to achieve feasibility.")
+
+
 def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25,
                            region=_DEFAULT_REGION, paths=None, locked=(),
-                           scale_extra_keys=()):
+                           scale_extra_keys=(), parallel_evals=1):
     """Raise capacity factors (and optionally *scale_extra_keys*, e.g. the free
     storage variables of a data-center case) until the model is feasible.
 
@@ -872,6 +957,13 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     locked_lower = {k.lower() for k in locked}
     extra_keys = [k for k in (scale_extra_keys or ())
                   if k.lower() not in locked_lower]
+
+    if parallel_evals and parallel_evals > 1:
+        # Batched evaluation of the same candidate schedule in isolated
+        # workspaces: no global lock, chunk-parallel within the region.
+        return _inflate_until_feasible_parallel(
+            base_factors, initial_step, growth, max_attempts,
+            region, paths, locked, extra_keys, parallel_evals)
 
     def _scale_extra(cand, step_val):
         for key in extra_keys:
@@ -1063,6 +1155,38 @@ def build_scratch_start() -> Dict[str, float]:
     return factors
 
 
+def _eval_batch(specs, parallel_evals, region, paths):
+    """Evaluate a list of candidate specs, in parallel isolated workspaces when
+    parallel_evals > 1 (no global Fortran lock), sequentially otherwise.
+    Returns [{feasible, cost}, ...] in specs order."""
+    if parallel_evals and parallel_evals > 1 and len(specs) > 1:
+        return evaluate_trials_parallel(specs, min(parallel_evals, len(specs)),
+                                        region=region, paths=paths)
+    return evaluate_trials_sequential(specs, region=region, paths=paths)
+
+
+def _refine_between(infeasible_factors, feasible_factors, region, paths,
+                    parallel_evals, points=8):
+    """Parallel counterpart of _bisect_between: evaluate an evenly spaced grid
+    of interpolation points between a known-infeasible and a known-feasible
+    factor dict in ONE batch, and return the leanest feasible point found
+    (None if no interpolated point is feasible)."""
+    n = max(3, min(points, parallel_evals if parallel_evals > 1 else points))
+    alphas = [(i + 1) / (n + 1) for i in range(n)]
+    specs = []
+    for i, a in enumerate(alphas):
+        cand = {
+            k: _clamp(k, infeasible_factors.get(k, v) + a * (v - infeasible_factors.get(k, v)))
+            for k, v in feasible_factors.items()
+        }
+        specs.append({"label": "bootstrap-refine{}".format(i + 1), "factors": cand})
+    results = _eval_batch(specs, parallel_evals, region, paths)
+    for spec, res in zip(specs, results):
+        if res["feasible"]:
+            return spec["factors"], res["cost"], None
+    return None
+
+
 def _bisect_between(infeasible_factors, feasible_factors, region=_DEFAULT_REGION,
                     paths=None, attempts=4):
     """Binary-search along the straight line between a known-INFEASIBLE and a
@@ -1096,7 +1220,7 @@ def _bisect_between(infeasible_factors, feasible_factors, region=_DEFAULT_REGION
 
 
 def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
-                      ramp=(0.25, 0.5, 1.0, 1.5, 2.0)):
+                      ramp=(0.25, 0.5, 1.0, 1.5, 2.0), parallel_evals=1):
     """Find a first feasible point from the spreadsheet scratch start.
 
     Mirrors the PI's manual procedure ("that set of assumptions fails
@@ -1115,6 +1239,33 @@ def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
     if paths is None:
         paths = _region_paths(region)
     anchors = _scratch_storage_anchor(region)
+
+    if parallel_evals and parallel_evals > 1:
+        # All ramp steps are predetermined: evaluate them in ONE parallel batch,
+        # take the leanest feasible, refine toward its predecessor, and only
+        # fall back to (batched) inflation if the whole ramp is infeasible.
+        ramp_cands = []
+        specs = []
+        for frac in ramp:
+            cand = base_factors.copy()
+            for key, anchor in anchors.items():
+                cand[key] = anchor * frac
+            ramp_cands.append(cand)
+            specs.append({"label": "scratch-storage-ramp{:g}".format(frac),
+                          "factors": cand})
+        results = _eval_batch(specs, parallel_evals, region, paths)
+        for i, res in enumerate(results):
+            if res["feasible"]:
+                lo = base_factors if i == 0 else ramp_cands[i - 1]
+                leaner = _refine_between(lo, ramp_cands[i], region, paths, parallel_evals)
+                return leaner if leaner else (ramp_cands[i], res["cost"], None)
+        candidate = base_factors.copy()
+        for key, anchor in anchors.items():
+            candidate[key] = anchor * ramp[-1]
+        # Parallel inflation refines internally, so no extra bisection needed.
+        return inflate_until_feasible(candidate, region=region, paths=paths,
+                                      parallel_evals=parallel_evals)
+
     candidate = base_factors.copy()
     prev = base_factors.copy()   # caller only invokes this when base is infeasible
     for frac in ramp:
@@ -1611,20 +1762,28 @@ def run_workflow(
         base_factors = _build_full_factors(lp_factors)
     baseline_paths = dict(paths)
     baseline_paths["fortran_out"] = paths["fortran_baseline_out"]
-    with _fortran_global_lock():
-        if baseline_start == "defaults":
-            # Let Fortran use its hardcoded regional values — delete any stale factor
-            # file so READ_FACTOR_OVERRIDES exits early and nothing is overridden.
-            for _fp in [paths["factor_dest"], paths["factor_pathhome"]]:
-                if _fp.exists():
-                    _fp.unlink()
-        else:
-            write_factor_files(base_factors, paths)
-        # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
-        # so that fortran_last_run.out is reserved for the final optimal evaluation.
-        _t_bl = time.perf_counter()
-        stdout = run_fortran(region=region, paths=baseline_paths)
+    _t_bl = time.perf_counter()
+    if parallel_evals > 1 and baseline_start not in (None, "defaults"):
+        # Explicit-factor baselines (file seeds, scratch) run in an isolated
+        # workspace: no global lock, so concurrent array tasks don't serialize.
+        # The "defaults" mode must stay on the direct path — it relies on the
+        # ABSENCE of a factor file so the Fortran hardcoded values rule.
+        stdout = run_single_isolated("baseline", base_factors, region, baseline_paths)
         _baseline_eval_seconds = time.perf_counter() - _t_bl
+    else:
+        with _fortran_global_lock():
+            if baseline_start == "defaults":
+                # Let Fortran use its hardcoded regional values — delete any stale factor
+                # file so READ_FACTOR_OVERRIDES exits early and nothing is overridden.
+                for _fp in [paths["factor_dest"], paths["factor_pathhome"]]:
+                    if _fp.exists():
+                        _fp.unlink()
+            else:
+                write_factor_files(base_factors, paths)
+            # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
+            # so that fortran_last_run.out is reserved for the final optimal evaluation.
+            stdout = run_fortran(region=region, paths=baseline_paths)
+            _baseline_eval_seconds = time.perf_counter() - _t_bl
     print("Baseline Fortran output written to {}".format(paths["fortran_baseline_out"]))
 
     # Parse and save the baseline summary for all warm-start modes.
@@ -1699,7 +1858,8 @@ def run_workflow(
         # every time step.  Ramp storage first (the PI's manual procedure),
         # then inflate capacity factors only if still needed.
         print("Scratch start infeasible (expected); ramping storage toward feasibility.")
-        candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths)
+        candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths,
+                                               parallel_evals=parallel_evals)
     else:
         # For data-center runs the added load is constant (day and night), so
         # the free storage variables must be allowed to grow with the capacity
@@ -1717,10 +1877,13 @@ def run_workflow(
             print("Starting point infeasible; inflating capacity factors.")
         candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths,
                                                     locked=hj_locked_factors or (),
-                                                    scale_extra_keys=_extra_scale)
-        if _IFDATCEN:
+                                                    scale_extra_keys=_extra_scale,
+                                                    parallel_evals=parallel_evals)
+        if _IFDATCEN and parallel_evals <= 1:
             # Trim the geometric-step overshoot back toward the feasibility
-            # boundary (base_factors is the known-infeasible seed).
+            # boundary (base_factors is the known-infeasible seed).  The
+            # parallel inflation path refines internally, so this only applies
+            # to sequential runs.
             leaner = _bisect_between(base_factors, candidate, region=region, paths=paths)
             if leaner:
                 candidate, cost, _ = leaner
@@ -1782,9 +1945,12 @@ def run_workflow(
     # The raw .out file and JSON are both saved; nothing is deleted.
     print("Running final Fortran evaluation with optimal factors...")
     _t_fin = time.perf_counter()
-    with _fortran_global_lock():
-        write_factor_files(best_factors, paths)
-        final_stdout = run_fortran(region=region, paths=paths)
+    if parallel_evals > 1:
+        final_stdout = run_single_isolated("final-optimal", best_factors, region, paths)
+    else:
+        with _fortran_global_lock():
+            write_factor_files(best_factors, paths)
+            final_stdout = run_fortran(region=region, paths=paths)
     _final_eval_seconds = time.perf_counter() - _t_fin
     paths["fortran_optimal_out"].write_text(final_stdout)
 
