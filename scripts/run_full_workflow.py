@@ -857,11 +857,32 @@ def raise_subunity_factors(factors, step, locked=()):
 
 
 def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25,
-                           region=_DEFAULT_REGION, paths=None, locked=()):
+                           region=_DEFAULT_REGION, paths=None, locked=(),
+                           scale_extra_keys=()):
+    """Raise capacity factors (and optionally *scale_extra_keys*, e.g. the free
+    storage variables of a data-center case) until the model is feasible.
+
+    scale_extra_keys matters when the infeasibility is a nighttime storage-POWER
+    shortfall: constant added load (data centers) cannot be served by more PV or
+    wind alone once the seed's battery/H2 discharge rate is saturated, so those
+    keys must grow with the capacity factors or inflation dead-ends."""
     if paths is None:
         paths = _region_paths(region)
     locked = tuple(locked or ())
     locked_lower = {k.lower() for k in locked}
+    extra_keys = [k for k in (scale_extra_keys or ())
+                  if k.lower() not in locked_lower]
+
+    def _scale_extra(cand, step_val):
+        for key in extra_keys:
+            val = cand.get(key, PARAM_REGISTRY[key][0])
+            if val > 0:
+                cand[key] = _clamp(key, val * (1.0 + step_val))
+            else:
+                # A zero seed (e.g. FCDISCH=0 at the no-dc optimum) can never
+                # grow multiplicatively; start it from a fraction of its default.
+                cand[key] = _clamp(key, PARAM_REGISTRY[key][0] * step_val)
+
     candidate = base_factors.copy()
     step = initial_step
 
@@ -893,6 +914,7 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
                 continue
             val = candidate.get(key, 1.0)
             candidate[key] = max(MIN_FACTOR, val * (1.0 + step_elec))
+        _scale_extra(candidate, step_elec)
         label = "inflate-electric{}".format(attempt)
         feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
@@ -905,6 +927,7 @@ def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attem
     step_all = initial_step
     for attempt in range(1, max_attempts + 1):
         candidate = inflate_factors(candidate, step_all, locked)
+        _scale_extra(candidate, step_all)
         label = "inflate-all{}".format(attempt)
         feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
         if feasible:
@@ -1678,9 +1701,29 @@ def run_workflow(
         print("Scratch start infeasible (expected); ramping storage toward feasibility.")
         candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths)
     else:
-        print("Starting point infeasible; inflating capacity factors.")
+        # For data-center runs the added load is constant (day and night), so
+        # the free storage variables must be allowed to grow with the capacity
+        # factors: once the seed's battery/H2 discharge power saturates, more
+        # PV/wind alone can never reach feasibility.
+        _extra_scale = ()
+        if _IFDATCEN:
+            _locked_lower = {f.lower() for f in (hj_locked_factors or ())}
+            _extra_scale = [k for k in FACTOR_KEYS
+                            if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS
+                            and k.lower() not in _locked_lower]
+            print("Starting point infeasible; inflating capacity factors and "
+                  "free storage variables: {}".format(" ".join(_extra_scale)))
+        else:
+            print("Starting point infeasible; inflating capacity factors.")
         candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths,
-                                                    locked=hj_locked_factors or ())
+                                                    locked=hj_locked_factors or (),
+                                                    scale_extra_keys=_extra_scale)
+        if _IFDATCEN:
+            # Trim the geometric-step overshoot back toward the feasibility
+            # boundary (base_factors is the known-infeasible seed).
+            leaner = _bisect_between(base_factors, candidate, region=region, paths=paths)
+            if leaner:
+                candidate, cost, _ = leaner
 
     print(
         "{} starting from feasible point (cost {:.3f}).".format(
