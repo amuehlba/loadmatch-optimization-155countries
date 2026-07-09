@@ -459,7 +459,13 @@ DEFAULT_FACTOR_SCALES: Dict[str, float] = {
 
 # Bounds: (min, max) for each category.  None = no bound.
 _CATEGORY_BOUNDS = {
-    "capacity":  (MIN_FACTOR, None),
+    # Capacity factors may reach exactly 0 (technology excluded): the PI's own
+    # trial-and-error solutions use exact zeros (e.g. FACSHT=0.), and the old
+    # MIN_FACTOR floor both biased the search (FACSHT pinned at ~0.05 in 18/30
+    # regions) and was incoherent (seed/crossover values below the floor passed
+    # through unclamped).  MIN_FACTOR is still used as the bootstrap inflation
+    # floor, where building capacity UP is the whole point.
+    "capacity":  (0.0, None),
     "ratio":     (0.0,        None),
     "factor":    (0.0,        None),
     "hours":     (0.0,        None),
@@ -1187,6 +1193,52 @@ def _refine_between(infeasible_factors, feasible_factors, region, paths,
     return None
 
 
+# Vestigial-capacity groups: parameters the search can leave at small nonzero
+# values even when the corresponding technology is unused, so that capital is
+# paid for idle hardware (PI finding, 2026-07-08).  FCCHARG/FCDISCH are zeroed
+# as a pair (an electrolyzer without fuel cells, or vice versa, is never
+# useful); FACSHT cannot even reach 0 through the GA because capacity factors
+# have a 0.05 lower bound.
+_POLISH_GROUPS = [
+    ("h2fc",   ("FCCHARG", "FCDISCH")),
+    ("soltherm", ("FACSHT",)),
+]
+
+
+def polish_optimum(best_factors, best_cost, region, paths, parallel_evals):
+    """Zero-out test for vestigial capacity: evaluate the optimum with the
+    H2 pair, the solar-thermal factor, and both set to exactly 0 (one parallel
+    batch), and return the cheapest FEASIBLE candidate.
+
+    Safe by construction: a region that genuinely uses hydrogen or solar
+    thermal becomes infeasible or costlier when they are zeroed, so the
+    original optimum is kept there.  Returns (factors, cost, adopted_label)
+    with adopted_label None when the original stands.
+    """
+    combos = []
+    active = [(name, keys) for name, keys in _POLISH_GROUPS
+              if any(best_factors.get(k, 0.0) > 0.0 for k in keys)]
+    combos.extend(active)
+    if len(active) > 1:
+        combos.append(("all", tuple(k for _, keys in active for k in keys)))
+    if not combos:
+        return best_factors, best_cost, None
+
+    specs = []
+    for name, keys in combos:
+        variant = best_factors.copy()
+        for k in keys:
+            variant[k] = 0.0
+        specs.append({"label": "polish-zero-{}".format(name), "factors": variant})
+    results = _eval_batch(specs, parallel_evals, region, paths)
+
+    factors, cost, adopted = best_factors, best_cost, None
+    for spec, res in zip(specs, results):
+        if res["feasible"] and res["cost"] < cost:
+            factors, cost, adopted = spec["factors"], res["cost"], spec["label"]
+    return factors, cost, adopted
+
+
 def _bisect_between(infeasible_factors, feasible_factors, region=_DEFAULT_REGION,
                     paths=None, attempts=4):
     """Binary-search along the straight line between a known-INFEASIBLE and a
@@ -1895,6 +1947,7 @@ def run_workflow(
     )
 
     _t_opt = time.perf_counter()
+    _polish_label = None
     if optimizer == "ga":
         # Scratch runs seed part of the population with deliberately-spread
         # variants of the bootstrap point (storage down / capacity up-down) so
@@ -1919,6 +1972,12 @@ def run_workflow(
             paths=paths,
         )
         print("GA produced best feasible solution (cost {:.3f}).".format(best_cost))
+        # Vestigial-capacity polish: zero out unused H2 / solar-thermal capacity
+        # if that is feasible and cheaper (one extra parallel batch).
+        best_factors, best_cost, _polish_label = polish_optimum(
+            best_factors, best_cost, region, paths, parallel_evals)
+        if _polish_label:
+            print("Polish adopted {} (cost {:.3f}).".format(_polish_label, best_cost))
         write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
     else:
         best_factors, best_cost = hooke_jeeves_search(
@@ -1977,6 +2036,7 @@ def run_workflow(
         "datacenter_scenario":   _IFDATCEN,
         "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
         "max_land_pct":          _MAX_LAND_PCT,
+        "polish":                _polish_label if optimizer == "ga" else None,
         "optimizer":             optimizer,
         "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
         "optimize_seconds":      round(_optimize_seconds, 3),
