@@ -5,12 +5,11 @@ export_dc_comparison.py) and produces:
 
   fig_dc_cost_by_region   dot plot: cost increase of powering the data centers
                           vs the no-data-center optimum, per region and supply
-                          strategy (log axis; the +10% added-load share is
+                          strategy (linear axis; the +10% added-load share is
                           marked as the "proportional cost" reference).
   fig_dc_strategy_summary two panels: per-strategy distribution of the cost
                           increase (median highlighted), and the total added
-                          cost over all regions (non-viable region/strategy
-                          combinations excluded and noted).
+                          cost over all 30 regions.
 
 Strategy identity is encoded redundantly (color + marker shape), so the
 figures survive grayscale printing and color-vision deficiency.
@@ -73,7 +72,6 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
         ax.scatter(vals, list(y), s=42, color=color, marker=marker,
                    label=label, zorder=3, edgecolors="white", linewidths=0.8)
 
-    ax.set_xscale("log")
     ax.axvline(10.0, color="#666666", lw=1.0, ls="--", zorder=2)
     ax.text(10.0, n - 0.2, " +10% = added load share\n (proportional cost)",
             fontsize=7, color="#666666", va="top", ha="left")
@@ -82,7 +80,7 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
     ax.set_yticklabels(df["region"])
     ax.set_ylim(-0.6, n - 0.4)
     ax.set_xlabel("Cost of powering data centers: increase in annual system cost "
-                  "vs no-data-center optimum (%, log scale)")
+                  "vs no-data-center optimum (%)")
     ax.legend(loc="upper right", frameon=True, framealpha=0.95, fontsize=8)
     ax.set_title(
         "Cost of powering data centers (+10% constant load) by supply strategy",
@@ -110,11 +108,10 @@ def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
                  color="#222222", lw=2.2, zorder=4)
         axL.text(med, ny - 1 - i + 0.38, f"{med:.1f}%", ha="center",
                  fontsize=7.5, color="#222222")
-    axL.set_xscale("log")
     axL.axvline(10.0, color="#666666", lw=1.0, ls="--")
     axL.set_yticks(range(ny))
     axL.set_yticklabels([s[1] for s in reversed(STRATEGIES)], fontsize=8)
-    axL.set_xlabel("Cost increase per region (%, log scale; median marked)")
+    axL.set_xlabel("Cost increase per region (%; median marked)")
     axL.set_title("Distribution across regions", fontsize=9)
 
     # Right: total added cost over ALL regions (non-viable combos included:

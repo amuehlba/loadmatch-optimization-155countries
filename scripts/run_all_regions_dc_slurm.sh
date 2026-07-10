@@ -56,6 +56,13 @@ REGION="${REGIONS[$SLURM_ARRAY_TASK_ID]}"
 
 DC_CASE="${DC_CASE:-case1}"
 
+# Rooftop PV (case3) is not meaningful at high latitude (rooftop nameplate
+# bases of 0.08-0.5 MW, polar-night winters) — skip per PI decision.
+if [ "$DC_CASE" = "case3" ] && { [ "$REGION" = "GREENLAND" ] || [ "$REGION" = "ICELAND" ]; }; then
+  echo "Skipping case3 for $REGION (rooftop strategy not applicable; PI decision)."
+  exit 0
+fi
+
 # Always-locked registry defaults + per-case lock sets.  Free variables:
 #   case2:    FACONWIN FACOFFWIN FACUTILPV BATDISCH STORHBAT FCDISCH FCCHARG DAYH2STOR
 #   case3:    FACRESPV FACCOMPV BATDISCH STORHBAT FCDISCH FCCHARG DAYH2STOR

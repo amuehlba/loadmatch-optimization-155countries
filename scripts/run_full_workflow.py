@@ -1212,6 +1212,50 @@ def _refine_between(infeasible_factors, feasible_factors, region, paths,
     return None
 
 
+# Data-center feasibility probes: generation-first, wind-first (PI insight:
+# the added data-center load is constant, which wind output matches far better
+# than solar, and hand-tuned wind-only solutions exist at ~10-20% added cost).
+# The generic inflation bootstrap raises ALL free variables together, which
+# never visits the wind-only direction and strands the GA in an overbuilt basin.
+_DC_PROBE_STEPS = (1.15, 1.3, 1.5, 1.75, 2.0, 2.5, 3.0)
+_WIND_KEYS = ("FACONWIN", "FACOFFWIN")
+
+
+def _dc_directional_bootstrap(base_factors, locked, region, paths, parallel_evals):
+    """Generation-only feasibility search for data-center runs.
+
+    Stage 1 scales ONLY the free wind factors of the seed through
+    _DC_PROBE_STEPS (one parallel batch); stage 2 scales all free electric
+    generation factors jointly, storage untouched.  The first feasible
+    candidate is grid-refined back toward its predecessor.  Returns
+    (factors, cost, stdout_or_None), or None when no generation-only candidate
+    is feasible (caller falls back to the generic inflation bootstrap)."""
+    locked_lower = {k.lower() for k in (locked or ())}
+    stages = [
+        ("wind", [k for k in _WIND_KEYS if k.lower() not in locked_lower]),
+        ("gen",  [k for k in ELECTRIC_CAPACITY_FACTOR_KEYS
+                  if k.lower() not in locked_lower]),
+    ]
+    for name, keys in stages:
+        if not keys:
+            continue
+        cands = []
+        for f in _DC_PROBE_STEPS:
+            cand = base_factors.copy()
+            for k in keys:
+                cand[k] = _clamp(k, cand.get(k, PARAM_REGISTRY[k][0]) * f)
+            cands.append(cand)
+        specs = [{"label": "dc-probe-{}{:g}".format(name, f), "factors": c}
+                 for f, c in zip(_DC_PROBE_STEPS, cands)]
+        results = _eval_batch(specs, parallel_evals, region, paths)
+        for i, res in enumerate(results):
+            if res["feasible"]:
+                lo = base_factors if i == 0 else cands[i - 1]
+                leaner = _refine_between(lo, cands[i], region, paths, parallel_evals)
+                return leaner if leaner else (cands[i], res["cost"], None)
+    return None
+
+
 # Vestigial-capacity groups: parameters the search can leave at small nonzero
 # values even when the corresponding technology is unused, so that capital is
 # paid for idle hardware (PI finding, 2026-07-08).  FCCHARG/FCDISCH are zeroed
@@ -1224,15 +1268,19 @@ _POLISH_GROUPS = [
 ]
 
 
-def polish_optimum(best_factors, best_cost, region, paths, parallel_evals):
-    """Zero-out test for vestigial capacity: evaluate the optimum with the
-    H2 pair, the solar-thermal factor, and both set to exactly 0 (one parallel
-    batch), and return the cheapest FEASIBLE candidate.
+def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
+                   seed_factors=None):
+    """Cheap improvement tests on the found optimum, one parallel batch.
 
-    Safe by construction: a region that genuinely uses hydrogen or solar
-    thermal becomes infeasible or costlier when they are zeroed, so the
-    original optimum is kept there.  Returns (factors, cost, adopted_label)
-    with adopted_label None when the original stands.
+    Always: zero-out variants for vestigial capacity (H2 pair, solar-thermal
+    factor, both).  When *seed_factors* is given (data-center runs, where the
+    seed is the no-dc optimum): revert-to-seed variants that undo the storage
+    increase, the non-wind generation increase, and both — testing the PI's
+    observation that a wind-only increase often suffices for the added load.
+
+    Safe by construction: variants are adopted only when feasible AND cheaper,
+    so genuinely needed capacity always survives.  Returns (factors, cost,
+    adopted_label) with adopted_label None when the original stands.
     """
     combos = []
     active = [(name, keys) for name, keys in _POLISH_GROUPS
@@ -1240,8 +1288,6 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals):
     combos.extend(active)
     if len(active) > 1:
         combos.append(("all", tuple(k for _, keys in active for k in keys)))
-    if not combos:
-        return best_factors, best_cost, None
 
     specs = []
     for name, keys in combos:
@@ -1249,6 +1295,29 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals):
         for k in keys:
             variant[k] = 0.0
         specs.append({"label": "polish-zero-{}".format(name), "factors": variant})
+
+    if seed_factors:
+        def _changed(cats, exclude=()):
+            return [k for k in FACTOR_KEYS
+                    if PARAM_REGISTRY[k][1] in cats and k not in exclude
+                    and abs(best_factors.get(k, 0.0) - seed_factors.get(k, 0.0)) > 1e-12]
+        storage_keys = _changed(_SCRATCH_STORAGE_CATS)
+        nonwind_keys = _changed(("capacity",), exclude=_WIND_KEYS)
+        revert_groups = []
+        if storage_keys:
+            revert_groups.append(("storage", storage_keys))
+        if nonwind_keys:
+            revert_groups.append(("nonwind", nonwind_keys))
+        if len(revert_groups) > 1:
+            revert_groups.append(("both", storage_keys + nonwind_keys))
+        for name, keys in revert_groups:
+            variant = best_factors.copy()
+            for k in keys:
+                variant[k] = seed_factors[k]
+            specs.append({"label": "polish-revert-{}".format(name), "factors": variant})
+
+    if not specs:
+        return best_factors, best_cost, None
     results = _eval_batch(specs, parallel_evals, region, paths)
 
     factors, cost, adopted = best_factors, best_cost, None
@@ -1942,29 +2011,43 @@ def run_workflow(
         candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths,
                                                parallel_evals=parallel_evals)
     else:
-        # For data-center runs the added load is constant (day and night), so
-        # the free storage variables must be allowed to grow with the capacity
-        # factors: once the seed's battery/H2 discharge power saturates, more
-        # PV/wind alone can never reach feasibility.
-        _extra_scale = ()
+        # Data-center runs: try generation-first directions before the generic
+        # bootstrap.  Wind output matches the constant added load far better
+        # than solar, and wind-only feasible points at ~10-20% added cost exist
+        # (PI hand solutions) that the joint inflation below never visits.
+        _probe = None
         if _IFDATCEN:
-            _locked_lower = {f.lower() for f in (hj_locked_factors or ())}
-            _extra_scale = [k for k in FACTOR_KEYS
-                            if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS
-                            and k.lower() not in _locked_lower]
-            print("Starting point infeasible; inflating capacity factors and "
-                  "free storage variables: {}".format(" ".join(_extra_scale)))
+            print("Starting point infeasible; probing generation-first "
+                  "(wind, then all free generation) before joint inflation.")
+            _probe = _dc_directional_bootstrap(base_factors, hj_locked_factors or (),
+                                               region, paths, parallel_evals)
+        if _probe:
+            candidate, cost, _ = _probe
+            print("Generation-first bootstrap found feasibility (cost {:.3f}).".format(cost))
         else:
-            print("Starting point infeasible; inflating capacity factors.")
-        candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths,
-                                                    locked=hj_locked_factors or (),
-                                                    scale_extra_keys=_extra_scale,
-                                                    parallel_evals=parallel_evals)
-        if _IFDATCEN and parallel_evals <= 1:
+            # Joint inflation fallback.  For data-center runs the free storage
+            # variables must grow with the capacity factors: once the seed's
+            # battery/H2 discharge power saturates, more PV/wind alone can
+            # never reach feasibility.
+            _extra_scale = ()
+            if _IFDATCEN:
+                _locked_lower = {f.lower() for f in (hj_locked_factors or ())}
+                _extra_scale = [k for k in FACTOR_KEYS
+                                if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS
+                                and k.lower() not in _locked_lower]
+                print("Generation-only probes infeasible; inflating capacity factors "
+                      "and free storage variables: {}".format(" ".join(_extra_scale)))
+            else:
+                print("Starting point infeasible; inflating capacity factors.")
+            candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths,
+                                                        locked=hj_locked_factors or (),
+                                                        scale_extra_keys=_extra_scale,
+                                                        parallel_evals=parallel_evals)
+        if _probe is None and _IFDATCEN and parallel_evals <= 1:
             # Trim the geometric-step overshoot back toward the feasibility
             # boundary (base_factors is the known-infeasible seed).  The
-            # parallel inflation path refines internally, so this only applies
-            # to sequential runs.
+            # parallel inflation path and the directional probes refine
+            # internally, so this only applies to sequential inflation runs.
             leaner = _bisect_between(base_factors, candidate, region=region, paths=paths)
             if leaner:
                 candidate, cost, _ = leaner
@@ -1978,10 +2061,12 @@ def run_workflow(
     _t_opt = time.perf_counter()
     _polish_label = None
     if optimizer == "ga":
-        # Scratch runs seed part of the population with deliberately-spread
-        # variants of the bootstrap point (storage down / capacity up-down) so
-        # the search has downward genetic material from generation one.
-        _seed_pop = _scratch_seed_population(candidate) if _scratch else None
+        # Scratch and data-center runs seed part of the population with
+        # deliberately-spread variants of the bootstrap point (storage down /
+        # capacity up-down) so the search has genetic material in the cheap
+        # directions from generation one.
+        _seed_pop = (_scratch_seed_population(candidate)
+                     if (_scratch or _IFDATCEN) else None)
         best_factors, best_cost = genetic_search(
             candidate,
             cost,
@@ -2004,7 +2089,8 @@ def run_workflow(
         # Vestigial-capacity polish: zero out unused H2 / solar-thermal capacity
         # if that is feasible and cheaper (one extra parallel batch).
         best_factors, best_cost, _polish_label = polish_optimum(
-            best_factors, best_cost, region, paths, parallel_evals)
+            best_factors, best_cost, region, paths, parallel_evals,
+            seed_factors=base_factors if _IFDATCEN else None)
         if _polish_label:
             print("Polish adopted {} (cost {:.3f}).".format(_polish_label, best_cost))
         write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
