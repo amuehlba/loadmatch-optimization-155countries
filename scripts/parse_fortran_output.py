@@ -96,6 +96,12 @@ _ANNUAL_COST_RE = re.compile(
     r'ANNUAL TOT ENERGY COST.*?LO MN HI=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)'
 )
 
+# Non-grid H2 production capacity diagnostics (printed by powerworld.f versions
+# from 2026-07-09 on; absent in older xx files -> fields stay None).
+_H2PEAKLD_RE = re.compile(
+    r'HCDDADD,H2PEAKLD,EUSEFACMIN\s*=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)'
+)
+
 # Per-category costs:  COST <name> (C/KWH) LO MN HI= lo mn hi
 _COST_LINE_RE = re.compile(
     r'COST\s+(.+?)\s+\(C/KWH\)\s+LO MN HI=\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)'
@@ -214,6 +220,11 @@ def parse_output(
 
     # ── New land area (percent of regional land: wind spacing + footprint) ────
     summary.update(parse_land_area(text))
+
+    # ── Non-grid H2 production capacity (xx versions from 2026-07-09 on) ──────
+    m = _H2PEAKLD_RE.search(text)
+    summary["h2peakld_tw"] = float(m.group(2)) if m else None
+    summary["eusefacmin"] = float(m.group(3)) if m else None
 
     # ── Convenience derived totals ────────────────────────────────────────────
     gen_keys = ["wind_twh", "solar_twh", "hydro_twh", "wave_twh",

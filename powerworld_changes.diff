@@ -155,7 +155,7 @@
  C     
        SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
       1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
-@@ -21371,3 +21418,221 @@
+@@ -21397,3 +21444,221 @@
  C
        STOP
        END

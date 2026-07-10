@@ -1146,6 +1146,25 @@ def _scratch_seed_population(feasible_factors: Dict[str, float]) -> List[Dict[st
     return variants
 
 
+def _zero_mutation_refs(region: str) -> Dict[str, float]:
+    """Reference magnitudes for mutating a parameter away from exactly zero.
+
+    Storage-POWER (tw) keys scale with the region's average load instead of the
+    US-scale registry default: a first step of ~0.09 TW is reasonable for the
+    United States but is ~50x the entire load of Greenland, which is how the GA
+    once grew a 47x-load electrolyzer there.  Duration (hours/days) and
+    dimensionless capacity keys keep the registry default (region-independent).
+    Returns an empty dict when the region load cannot be derived."""
+    refs: Dict[str, float] = {}
+    avg_load_tw = _region_avg_load_tw(region)
+    if avg_load_tw:
+        for key in FACTOR_KEYS:
+            if PARAM_REGISTRY[key][1] == "tw":
+                coeff = _SCRATCH_TW_PER_AVG_LOAD.get(key, 0.5)
+                refs[key] = coeff * avg_load_tw
+    return refs
+
+
 def build_scratch_start() -> Dict[str, float]:
     """Spreadsheet starting point (per the PI): all capacity factors = 1.0 and
     all storage design variables = 0; the remaining design variable (heat-pump
@@ -1540,6 +1559,7 @@ def mutate_factors(
     locked: set,
     factor_scales: Dict[str, float],
     magnitude_damping: float,
+    zero_refs: Dict[str, float] = None,
 ) -> Dict[str, float]:
     mutated = base.copy()
     keys = [k for k in FACTOR_KEYS if k.lower() not in locked]
@@ -1553,8 +1573,10 @@ def mutate_factors(
             magnitude_scale = 1.0 / (max(1.0, abs(current)) ** magnitude_damping)
             # Use the parameter default as reference when current is near zero
             if abs(current) < 1e-12:
-                ref = abs(PARAM_REGISTRY.get(key, (1.0,))[0])
-                ref = max(ref, 0.01)
+                ref = (zero_refs or {}).get(key)
+                if ref is None:
+                    ref = max(abs(PARAM_REGISTRY.get(key, (1.0,))[0]), 0.01)
+                ref = max(ref, 1e-9)
                 delta = ref * mutation_scale * scale * magnitude_scale
             else:
                 delta = abs(current) * mutation_scale * scale * magnitude_scale
@@ -1576,8 +1598,10 @@ def mutate_factors(
             return mutated
         magnitude_scale = 1.0 / (max(1.0, abs(current)) ** magnitude_damping)
         if abs(current) < 1e-12:
-            ref = abs(PARAM_REGISTRY.get(key, (1.0,))[0])
-            ref = max(ref, 0.01)
+            ref = (zero_refs or {}).get(key)
+            if ref is None:
+                ref = max(abs(PARAM_REGISTRY.get(key, (1.0,))[0]), 0.01)
+            ref = max(ref, 1e-9)
             delta = ref * mutation_scale * scale * magnitude_scale
         else:
             delta = abs(current) * mutation_scale * scale * magnitude_scale
@@ -1622,6 +1646,9 @@ def genetic_search(
     merged_scales = DEFAULT_FACTOR_SCALES.copy()
     if factor_scales:
         merged_scales.update({k.lower(): v for k, v in factor_scales.items()})
+    # Region-scaled references for mutations away from exactly zero (storage
+    # power keys); prevents US-scale first steps in small regions.
+    zero_refs = _zero_mutation_refs(region)
     population: List[Dict[str, float]] = [feasible_factors.copy()]
     # Optional deliberately-spread individuals (e.g. scratch-start diversity);
     # the remainder of the population is filled with mutants of the seed.
@@ -1638,6 +1665,7 @@ def genetic_search(
                 locked,
                 merged_scales,
                 magnitude_damping,
+                zero_refs=zero_refs,
             )
         )
 
@@ -1694,6 +1722,7 @@ def genetic_search(
                 locked,
                 merged_scales,
                 magnitude_damping,
+                zero_refs=zero_refs,
             )
             new_population.append(child)
         population = new_population
