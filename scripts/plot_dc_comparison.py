@@ -40,6 +40,11 @@ STRATEGIES = [
     ("dc2h2",  "Case 2, storage:\nhydrogen only",              "#c51b8a", "v"),
 ]
 
+# Per-region points whose cost increase exceeds this are drawn off-scale in the
+# per-region figure (kept in an annotation) so the linear axis resolves the
+# rest.  Only the high-latitude rooftop-PV cases exceed it.
+OUTLIER_PCT = 100.0
+
 plt.rcParams.update({
     "font.size": 9,
     "axes.spines.top": False,
@@ -67,9 +72,18 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
         if i % 2 == 0:
             ax.axhspan(i - 0.5, i + 0.5, color="#f2f2f2", zorder=0)
 
+    # Points above OUTLIER_PCT (a handful of high-latitude rooftop-PV cases,
+    # which are feasibility statements rather than meaningful costs) are kept
+    # off the axis so the linear scale resolves the rest; each is instead
+    # flagged in place with an arrow at the right edge of its own row.
+    excluded = []  # (row index, marker color)
     for case, label, color, marker in STRATEGIES:
-        vals = df[f"{case}_delta_pct"]
-        ax.scatter(vals, list(y), s=42, color=color, marker=marker,
+        vals = df[f"{case}_delta_pct"].astype(float).copy()
+        for yi, v in enumerate(vals):
+            if pd.notna(v) and v > OUTLIER_PCT:
+                excluded.append((yi, color))
+        plotted = vals.where(vals <= OUTLIER_PCT)
+        ax.scatter(plotted, list(y), s=42, color=color, marker=marker,
                    label=label, zorder=3, edgecolors="white", linewidths=0.8)
 
     ax.axvline(10.0, color="#666666", lw=1.0, ls="--", zorder=2)
@@ -79,9 +93,24 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
     ax.set_yticks(list(y))
     ax.set_yticklabels(df["region"])
     ax.set_ylim(-0.6, n - 0.4)
+    ax.set_xlim(left=0)
     ax.set_xlabel("Cost of powering data centers: increase in annual system cost "
                   "vs no-data-center optimum (%)")
     ax.legend(loc="upper right", frameon=True, framealpha=0.95, fontsize=8)
+
+    # Flag each off-scale case in place: an arrow at the right edge of its own
+    # region row, labelled "rooftop solution excluded".  (Only the very high
+    # latitude rooftop-PV cases land here.)
+    if excluded:
+        xmax = ax.get_xlim()[1]
+        for yi, color in excluded:
+            ax.annotate("rooftop solution excluded ",
+                        xy=(xmax, yi), xycoords="data",
+                        xytext=(-26, 0), textcoords="offset points",
+                        ha="right", va="center", fontsize=7, color=color,
+                        arrowprops=dict(arrowstyle="->", color=color, lw=1.1,
+                                        shrinkA=1.5, shrinkB=0))
+
     ax.set_title(
         "Cost of powering data centers (+10% constant load) by supply strategy",
         fontsize=9)
@@ -89,7 +118,8 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}", bbox_inches="tight")
     plt.close(fig)
-    print("  wrote fig_dc_cost_by_region.pdf/.png")
+    print("  wrote fig_dc_cost_by_region.pdf/.png ({} point(s) off-scale)".format(
+        len(excluded)))
 
 
 def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:

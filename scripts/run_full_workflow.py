@@ -2547,6 +2547,16 @@ def parse_args():
              "Requires completed '--run-lp-only' output. "
              "Used by the Snakemake run_ga_from_lp rule.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=12345,
+        help="Random seed for the GA (mutation, crossover, selection, and the "
+             "spread of the initial population). Fixed by default so runs are "
+             "reproducible; the Fortran evaluations are already deterministic. "
+             "Pass a different integer to explore alternative GA trajectories. "
+             "Default: %(default)s.",
+    )
     return parser.parse_args()
 
 def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
@@ -2565,6 +2575,14 @@ def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
 
 def main():
     args = parse_args()
+
+    # Seed Python's RNG so the GA (mutation/crossover/selection and the initial
+    # population spread) is reproducible run-to-run.  Fortran evaluations are
+    # already deterministic, so this makes an entire optimization repeatable.
+    # Child eval processes are spawned and do no RNG work, so seeding the parent
+    # once here is sufficient.
+    random.seed(args.seed)
+    print(f"[ga] random seed = {args.seed}")
 
     # ── Early-exit modes used by Snakemake rules ──────────────────────────────
 
