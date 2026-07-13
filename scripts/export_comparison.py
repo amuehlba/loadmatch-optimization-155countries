@@ -102,6 +102,9 @@ CSV_FIELDS = [
     "bl_spacing_pct_regland", "bl_footprint_pct_regland", "bl_newland_pct_regland",
     "ga_spacing_pct_regland", "ga_footprint_pct_regland", "ga_newland_pct_regland",
     "land_delta_pp", "land_ok",
+    "ga_scratch2_spacing_pct_regland", "ga_scratch2_footprint_pct_regland",
+    "ga_scratch2_newland_pct_regland",
+    "scratch2_land_delta_pp", "scratch2_land_ok",
     "baseline_source",
 ]
 
@@ -183,8 +186,10 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         s_timing = (s_opt.get("timing") or {}) if s_opt else {}
 
         # Second scratch campaign (improved algorithm), isolated under _scratch2.
-        s2_opt = _load(results_root / (region + "_scratch2") / "optimal_summary.json")
+        s2dir = results_root / (region + "_scratch2")
+        s2_opt = _load(s2dir / "optimal_summary.json")
         ga_scratch2_cost = _cost(s2_opt)
+        s2_land = _land_stats(s2_opt, s2dir, "fortran_optimal_run.out")
         s2_timing = (s2_opt.get("timing") or {}) if s2_opt else {}
         if isinstance(ga_scratch2_cost, (int, float)) and isinstance(ga_cost, (int, float)) and ga_cost:
             scratch2_vs_ga_pct = 100.0 * (ga_scratch2_cost - ga_cost) / ga_cost
@@ -197,12 +202,19 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
 
         bl_total = bl_land.get("new_land_pct_regland")
         ga_total = ga_land.get("new_land_pct_regland")
+        s2_total = s2_land.get("new_land_pct_regland")
         if isinstance(bl_total, (int, float)) and isinstance(ga_total, (int, float)):
             land_delta_pp = ga_total - bl_total
             land_ok = ga_total <= bl_total * (1.0 + land_tolerance) + 1e-9
         else:
             land_delta_pp = None
             land_ok = None
+        if isinstance(bl_total, (int, float)) and isinstance(s2_total, (int, float)):
+            scratch2_land_delta_pp = s2_total - bl_total
+            scratch2_land_ok = s2_total <= bl_total * (1.0 + land_tolerance) + 1e-9
+        else:
+            scratch2_land_delta_pp = None
+            scratch2_land_ok = None
 
         rows.append({
             "region":                   region,
@@ -232,6 +244,11 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             "ga_newland_pct_regland":   ga_total,
             "land_delta_pp":            land_delta_pp,
             "land_ok":                  land_ok,
+            "ga_scratch2_spacing_pct_regland":   s2_land.get("new_spacing_pct_regland"),
+            "ga_scratch2_footprint_pct_regland": s2_land.get("new_footprint_pct_regland"),
+            "ga_scratch2_newland_pct_regland":   s2_total,
+            "scratch2_land_delta_pp":            scratch2_land_delta_pp,
+            "scratch2_land_ok":                  scratch2_land_ok,
         })
     return rows
 
@@ -291,6 +308,10 @@ def total_row(rows: List[Dict]) -> Dict:
             sum(1 for r in rows if r.get("land_ok") is True),
             sum(1 for r in rows if r.get("land_ok") is False),
             sum(1 for r in rows if r.get("land_ok") is None)),
+        "scratch2_land_ok":         "ok:{} flagged:{} n/a:{}".format(
+            sum(1 for r in rows if r.get("scratch2_land_ok") is True),
+            sum(1 for r in rows if r.get("scratch2_land_ok") is False),
+            sum(1 for r in rows if r.get("scratch2_land_ok") is None)),
         "baseline_source":          "rerun:{} fallback:{}".format(
             sum(1 for r in rows if r.get("baseline_source") == "rerun"),
             sum(1 for r in rows if str(r.get("baseline_source", "")).startswith("PI xx"))),

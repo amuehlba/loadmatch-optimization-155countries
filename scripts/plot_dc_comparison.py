@@ -1,18 +1,24 @@
 """Publication figures for the data-center cases.
 
 Reads data/results_verification/dc_comparison_summary.csv (written by
-export_dc_comparison.py) and produces:
+export_dc_comparison.py) and produces two landscape, journal-style figures:
 
-  fig_dc_cost_by_region   dot plot: cost increase of powering the data centers
+  fig_dc_cost_by_region   dodged dot plot, regions on the x-axis (largest system
+                          cost first): cost increase of powering the data centers
                           vs the no-data-center optimum, per region and supply
-                          strategy (linear axis; the +10% added-load share is
-                          marked as the "proportional cost" reference).
+                          strategy.  The +10% added-load share is drawn as the
+                          "proportional cost" reference.  A handful of very-high-
+                          latitude rooftop-PV cases run to several thousand %
+                          (feasibility statements, not meaningful costs); they are
+                          drawn off the top with an up-arrow so the linear axis
+                          resolves the rest.
   fig_dc_strategy_summary two panels: per-strategy distribution of the cost
-                          increase (median highlighted), and the total added
-                          cost over all 30 regions.
+                          increase across regions (median marked), and the total
+                          added cost over all 30 regions.
 
-Strategy identity is encoded redundantly (color + marker shape), so the
-figures survive grayscale printing and color-vision deficiency.
+Strategy identity is encoded redundantly (colour + marker shape), so the figures
+survive greyscale printing and colour-vision deficiency.  No titles or on-figure
+statistics (journal style): caption numbers are printed to stdout.
 
 Usage:
     python -m scripts.plot_dc_comparison
@@ -23,34 +29,25 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import pandas as pd
+
+from scripts.plot_style import (
+    apply_style, style_region_axis, add_region_bands, DC_STRATEGIES,
+    GRID, MUTED, INK, INK_SECONDARY,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = REPO_ROOT / "data" / "results_verification" / "dc_comparison_summary.csv"
 
-# Strategy -> (CSV prefix, label, color, marker).  Colors are five distinct
-# hues with varied lightness; markers give a second identity channel.
-STRATEGIES = [
-    ("dc1",    "EGS (case 1)",                              "#2e8b57", "o"),
-    ("dc2",    "Utility PV + wind\n+ batteries + H2 (case 2)", "#2c7fb8", "s"),
-    ("dc2rc",  "Rooftop PV\n+ batteries + H2 (case 3)",        "#7a5195", "^"),
-    ("dc2bat", "Case 2, storage:\nbatteries only",             "#e6a117", "D"),
-    ("dc2h2",  "Case 2, storage:\nhydrogen only",              "#c51b8a", "v"),
-]
+apply_style()
 
-# Per-region points whose cost increase exceeds this are drawn off-scale in the
-# per-region figure (kept in an annotation) so the linear axis resolves the
-# rest.  Only the high-latitude rooftop-PV cases exceed it.
+# Per-region points whose cost increase exceeds this are drawn off the top of the
+# per-region axis (kept as an up-arrow) so the linear scale resolves the rest.
 OUTLIER_PCT = 100.0
-
-plt.rcParams.update({
-    "font.size": 9,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "savefig.dpi": 300,
-})
+# Left summary panel: distribution x-axis clip (a few extreme tails go off-scale).
+DIST_XMAX = 42.0
 
 
 def _load(csv_path: Path) -> pd.DataFrame:
@@ -59,113 +56,113 @@ def _load(csv_path: Path) -> pd.DataFrame:
     for c in df.columns:
         if c != "region" and not c.endswith("_feasible"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.sort_values("base_cost_bil_per_yr", ascending=True)
+    return df.sort_values("base_cost_bil_per_yr", ascending=False)
 
 
 def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
-    n = len(df)
-    y = range(n)
-    fig, ax = plt.subplots(figsize=(8.5, 0.34 * n + 1.6))
+    order = list(df["region"])
+    n = len(order)
+    xs = np.arange(n)
+    offsets = np.linspace(-0.32, 0.32, len(DC_STRATEGIES))
 
-    # Light row banding for readability across 5 dots per row
-    for i in y:
-        if i % 2 == 0:
-            ax.axhspan(i - 0.5, i + 0.5, color="#f2f2f2", zorder=0)
+    fig, ax = plt.subplots(figsize=(16.0, 6.8))
 
-    # Points above OUTLIER_PCT (a handful of high-latitude rooftop-PV cases,
-    # which are feasibility statements rather than meaningful costs) are kept
-    # off the axis so the linear scale resolves the rest; each is instead
-    # flagged in place with an arrow at the right edge of its own row.
-    excluded = []  # (row index, marker color)
-    for case, label, color, marker in STRATEGIES:
-        vals = df[f"{case}_delta_pct"].astype(float).copy()
-        for yi, v in enumerate(vals):
-            if pd.notna(v) and v > OUTLIER_PCT:
-                excluded.append((yi, color))
-        plotted = vals.where(vals <= OUTLIER_PCT)
-        ax.scatter(plotted, list(y), s=42, color=color, marker=marker,
-                   label=label, zorder=3, edgecolors="white", linewidths=0.8)
+    # Alternating vertical banding groups the five markers belonging to a region.
+    add_region_bands(ax, n)
 
-    ax.axvline(10.0, color="#666666", lw=1.0, ls="--", zorder=2)
-    ax.text(10.0, n - 0.2, " +10% = added load share\n (proportional cost)",
-            fontsize=7, color="#666666", va="top", ha="left")
+    ax.axhline(10.0, color=MUTED, lw=1.1, ls=(0, (5, 3)), zorder=1)
+    ax.text(0.015, 0.965, "– – –  +10% = added-load share (proportional-cost reference)",
+            transform=ax.transAxes, fontsize=10.5, color=INK_SECONDARY,
+            va="top", ha="left")
 
-    ax.set_yticks(list(y))
-    ax.set_yticklabels(df["region"])
-    ax.set_ylim(-0.6, n - 0.4)
-    ax.set_xlim(left=0)
-    ax.set_xlabel("Cost of powering data centers: increase in annual system cost "
-                  "vs no-data-center optimum (%)")
-    ax.legend(loc="upper right", frameon=True, framealpha=0.95, fontsize=8)
+    offscale = []  # (region, strategy label, value)
+    for (case, label, color, marker), dx in zip(DC_STRATEGIES, offsets):
+        vals = df[f"{case}_delta_pct"].to_numpy(dtype=float)
+        x = xs + dx
+        onscale = np.where(vals <= OUTLIER_PCT, vals, np.nan)
+        ax.scatter(x, onscale, s=46, color=color, marker=marker, label=label,
+                   edgecolors="white", linewidths=0.7, zorder=4)
+        for xi, v, reg in zip(x, vals, order):
+            if np.isfinite(v) and v > OUTLIER_PCT:
+                offscale.append((reg, label, v))
+                ax.annotate("", xy=(xi, OUTLIER_PCT * 0.62), xytext=(xi, OUTLIER_PCT * 0.42),
+                            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.6))
 
-    # Flag each off-scale case in place: an arrow at the right edge of its own
-    # region row, labelled "rooftop solution excluded".  (Only the very high
-    # latitude rooftop-PV cases land here.)
-    if excluded:
-        xmax = ax.get_xlim()[1]
-        for yi, color in excluded:
-            ax.annotate("rooftop solution excluded ",
-                        xy=(xmax, yi), xycoords="data",
-                        xytext=(-26, 0), textcoords="offset points",
-                        ha="right", va="center", fontsize=7, color=color,
-                        arrowprops=dict(arrowstyle="->", color=color, lw=1.1,
-                                        shrinkA=1.5, shrinkB=0))
+    ymax = float(np.nanmax(np.where(
+        df[[f"{c}_delta_pct" for c, *_ in DC_STRATEGIES]].to_numpy() <= OUTLIER_PCT,
+        df[[f"{c}_delta_pct" for c, *_ in DC_STRATEGIES]].to_numpy(), np.nan)))
+    ax.set_ylim(0, ymax * 1.08)
+    ax.set_ylabel("Cost of powering data centers: increase in\n"
+                  "annual system cost vs no-data-center optimum (%)")
+    ax.legend(loc="upper left", ncols=len(DC_STRATEGIES), handletextpad=0.2,
+              columnspacing=1.0, borderaxespad=0.3, bbox_to_anchor=(0.0, 1.10))
+    style_region_axis(ax, order)
 
-    ax.set_title(
-        "Cost of powering data centers (+10% constant load) by supply strategy",
-        fontsize=9)
-    fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}", bbox_inches="tight")
+        fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}")
     plt.close(fig)
-    print("  wrote fig_dc_cost_by_region.pdf/.png ({} point(s) off-scale)".format(
-        len(excluded)))
+    print("  wrote fig_dc_cost_by_region.pdf/.png")
+    if offscale:
+        note = "; ".join(f"{r} {lab.split('(')[0].strip()} {v:,.0f}%" for r, lab, v in offscale)
+        print(f"    off-scale (>{OUTLIER_PCT:.0f}%, drawn as up-arrows): {note}")
 
 
 def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
+    ny = len(DC_STRATEGIES)
     fig, (axL, axR) = plt.subplots(
-        1, 2, figsize=(10.5, 3.4), gridspec_kw={"width_ratios": [1.15, 1]})
+        1, 2, figsize=(14.5, 4.6), gridspec_kw={"width_ratios": [1.25, 1.0],
+                                                "wspace": 0.08})
 
-    ny = len(STRATEGIES)
-    # Left: distribution of the per-region cost increase per strategy
-    for i, (case, label, color, marker) in enumerate(STRATEGIES):
+    # Left: distribution of the per-region cost increase per strategy (strip +
+    # median). Extreme tails beyond DIST_XMAX are annotated rather than plotted so
+    # the axis resolves the bulk of the distribution.
+    axL.grid(axis="x", color=GRID, lw=0.7, zorder=0)
+    rng = np.random.default_rng(0)  # deterministic vertical jitter to declutter
+    for i, (case, label, color, marker) in enumerate(DC_STRATEGIES):
+        y = ny - 1 - i
         vals = df[f"{case}_delta_pct"].dropna()
-        yy = [ny - 1 - i] * len(vals)
-        axL.scatter(vals, yy, s=26, color=color, marker=marker, alpha=0.75,
-                    edgecolors="white", linewidths=0.6, zorder=3)
+        shown = vals[vals <= DIST_XMAX]
+        jitter = rng.uniform(-0.22, 0.22, size=len(shown))
+        axL.scatter(shown, y + jitter, s=34, color=color, marker=marker,
+                    alpha=0.8, edgecolors="white", linewidths=0.6, zorder=3)
         med = vals.median()
-        axL.plot([med, med], [ny - 1 - i - 0.32, ny - 1 - i + 0.32],
-                 color="#222222", lw=2.2, zorder=4)
-        axL.text(med, ny - 1 - i + 0.38, f"{med:.1f}%", ha="center",
-                 fontsize=7.5, color="#222222")
-    axL.axvline(10.0, color="#666666", lw=1.0, ls="--")
+        if med <= DIST_XMAX:
+            axL.plot([med, med], [y - 0.34, y + 0.34], color=INK, lw=2.4, zorder=4)
+            axL.text(med, y + 0.42, f"{med:.1f}%", ha="center", fontsize=10, color=INK)
+        n_off = int((vals > DIST_XMAX).sum())
+        if n_off:
+            axL.annotate(f"+{n_off} >{DIST_XMAX:.0f}%  ", xy=(DIST_XMAX, y),
+                         ha="right", va="center", fontsize=9, color=color,
+                         fontstyle="italic")
+    axL.axvline(10.0, color=MUTED, lw=1.1, ls=(0, (5, 3)), zorder=1)
+    axL.set_xlim(0, DIST_XMAX)
     axL.set_yticks(range(ny))
-    axL.set_yticklabels([s[1] for s in reversed(STRATEGIES)], fontsize=8)
+    axL.set_yticklabels([s[1] for s in reversed(DC_STRATEGIES)])
+    axL.set_ylim(-0.6, ny - 0.4)
     axL.set_xlabel("Cost increase per region (%; median marked)")
-    axL.set_title("Distribution across regions", fontsize=9)
+    axL.tick_params(axis="y", length=0)
 
-    # Right: total added cost over ALL regions (non-viable combos included:
-    # their absolute deltas are moderate compared with the global totals)
-    totals = []
-    for case, label, color, marker in STRATEGIES:
-        totals.append(df[f"{case}_delta_bil_per_yr"].dropna().sum())
-    yy = list(range(ny))[::-1]
-    axR.barh(yy, totals, height=0.62,
-             color=[s[2] for s in STRATEGIES], zorder=3)
-    for ypos, tot in zip(yy, totals):
-        axR.text(tot, ypos, f" {tot:,.0f}", va="center", fontsize=7.5)
+    # Right: total added cost over all regions (bars).
+    axR.grid(axis="x", color=GRID, lw=0.7, zorder=0)
+    totals = [df[f"{case}_delta_bil_per_yr"].dropna().sum() for case, *_ in DC_STRATEGIES]
+    ypos = list(range(ny))[::-1]
+    axR.barh(ypos, totals, height=0.66, color=[s[2] for s in DC_STRATEGIES], zorder=3)
+    for y, tot in zip(ypos, totals):
+        axR.text(tot, y, f" {tot:,.0f}", va="center", fontsize=10, color=INK_SECONDARY)
     axR.set_yticks(range(ny))
     axR.set_yticklabels([])
-    axR.set_xlim(0, max(totals) * 1.25)
-    axR.set_xlabel("Total added cost, all regions (billion \\$/yr)")
-    axR.set_title("Aggregate over all 30 regions", fontsize=9)
+    axR.set_ylim(-0.6, ny - 0.4)
+    axR.set_xlim(0, max(totals) * 1.22)
+    axR.set_xlabel("Total added cost, all regions (billion USD yr$^{-1}$)")
+    axR.tick_params(axis="y", length=0)
 
-    fig.suptitle("Powering data centers: supply-strategy comparison", fontsize=10)
-    fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"fig_dc_strategy_summary.{ext}", bbox_inches="tight")
+        fig.savefig(outdir / f"fig_dc_strategy_summary.{ext}")
     plt.close(fig)
     print("  wrote fig_dc_strategy_summary.pdf/.png")
+    meds = "; ".join(f"{lab.split('(')[0].strip()} {df[f'{c}_delta_pct'].median():.1f}%"
+                     for c, lab, *_ in DC_STRATEGIES)
+    print(f"    caption stats: median cost increase - {meds}.")
 
 
 def main(argv=None) -> None:
