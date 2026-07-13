@@ -44,6 +44,22 @@ DC_STRATEGIES = [
 ]
 
 
+# --- diverging scale (polarity: below / above a no-change baseline) -----------
+# blue (negative) <-> neutral <-> red (positive): the data-viz diverging rule
+# (two hues + a neutral midpoint; blue and red read as opposite, the midpoint
+# reads as "nothing").  Reused wherever a signed change is shown on a heatmap.
+C_DIV_NEG = C_GA            # blue
+C_DIV_POS = "#e34948"       # red (palette slot 6)
+C_DIV_MID = "#f2f2f0"       # near-neutral surface
+
+
+def diverging_cmap():
+    """Blue->neutral->red colormap for signed-change heatmaps."""
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list(
+        "ga_diverge", [C_DIV_NEG, C_DIV_MID, C_DIV_POS])
+
+
 def apply_style() -> None:
     """Apply the shared rcParams.  Call once at import time in each figure script."""
     mpl.rcParams.update({
