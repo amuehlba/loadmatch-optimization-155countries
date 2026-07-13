@@ -38,11 +38,16 @@ _IFDATCEN = 0
 # penalty rather than hard infeasibility: a hard cap would dead-end runs whose
 # STARTING point already violates it (e.g. a trial-and-error seed above the cap,
 # or the bootstrap's capacity inflation), whereas the penalty keeps a selection
-# gradient pointing back into compliance.  Each percentage point above the cap
-# multiplies the effective cost by (1 + _LAND_PENALTY_PER_PP), so no over-cap
-# candidate can outrank a compliant one unless no compliant solution exists.
+# gradient pointing back into compliance.  The effective (selection) cost is
+# multiplied by (1 + _LAND_PENALTY_PER_PP * excess_pp), where excess_pp is the
+# percentage points above the cap, so over-cap candidates are strongly
+# disfavoured among feasible ones (at the default 5.0, e.g. +8 pp over -> 41x).
+# NOTE this is SOFT: if the search finds no feasible compliant solution at all
+# (e.g. a dense, land-tight region optimised from scratch), it still returns the
+# least-penalised feasible one, which can exceed the cap.  Tune with
+# --land-penalty-per-pp.
 _MAX_LAND_PCT = None
-_LAND_PENALTY_PER_PP = 1.0
+_LAND_PENALTY_PER_PP = 5.0
 
 
 def _apply_land_cap(cost, stdout):
@@ -1840,13 +1845,17 @@ def run_workflow(
     scratch_label="scratch",
     dc_label="",
     max_land_pct=None,
+    land_penalty_per_pp=None,
 ):
-    global _IFDATCEN, _RUN_SUFFIX, _MAX_LAND_PCT
+    global _IFDATCEN, _RUN_SUFFIX, _MAX_LAND_PCT, _LAND_PENALTY_PER_PP
     _IFDATCEN = int(datacenter)
     _MAX_LAND_PCT = max_land_pct
+    if land_penalty_per_pp is not None:
+        _LAND_PENALTY_PER_PP = land_penalty_per_pp
     if _MAX_LAND_PCT is not None:
         print("Land-use cap active: new spacing+footprint <= {:.2f}% of regional "
-              "land (graded cost penalty).".format(_MAX_LAND_PCT))
+              "land (graded cost penalty, slope {:.1f}x/pp).".format(
+                  _MAX_LAND_PCT, _LAND_PENALTY_PER_PP))
     _t_workflow_start = time.perf_counter()
     # Alternative runs (scratch start, data-center scenarios) write to isolated
     # results dirs and xx_optimized folders so they never overwrite the
@@ -1911,7 +1920,12 @@ def run_workflow(
         lp_factors = read_dat(str(paths["factor_result"]))
         base_factors = _build_full_factors(lp_factors)
     baseline_paths = dict(paths)
-    baseline_paths["fortran_out"] = paths["fortran_baseline_out"]
+    # In evaluate-only mode the seeded factors ARE the result: write the run to
+    # the OPTIMAL output and never touch the baseline files.  This stops a seeded
+    # re-evaluation (e.g. confirm_base_reeval_slurm.sh, which seeds each region's
+    # genetic_factors.dat) from overwriting the PI trial-and-error baseline.
+    baseline_paths["fortran_out"] = (paths["fortran_optimal_out"] if evaluate_only
+                                     else paths["fortran_baseline_out"])
     _t_bl = time.perf_counter()
     if parallel_evals > 1 and baseline_start not in (None, "defaults"):
         # Explicit-factor baselines (file seeds, scratch) run in an isolated
@@ -1934,21 +1948,24 @@ def run_workflow(
             # so that fortran_last_run.out is reserved for the final optimal evaluation.
             stdout = run_fortran(region=region, paths=baseline_paths)
             _baseline_eval_seconds = time.perf_counter() - _t_bl
-    print("Baseline Fortran output written to {}".format(paths["fortran_baseline_out"]))
+    print("Fortran output written to {}".format(baseline_paths["fortran_out"]))
 
-    # Parse and save the baseline summary for all warm-start modes.
-    _parse_and_save(
-        stdout,
-        factors=base_factors,
-        region=region,
-        run_type="baseline",
-        out_path=paths["baseline_summary"],
-    )
-    print(
-        "Compare {} against data/raw/xx.{} to verify correctness.".format(
-            paths["fortran_baseline_out"], REGION_SHORTCODE.get(region, region)
+    if not evaluate_only:
+        # Parse and save the baseline summary for all warm-start modes.  Skipped
+        # in evaluate-only mode so a seeded re-evaluation never overwrites the
+        # trial-and-error baseline_summary.json / fortran_baseline_run.out.
+        _parse_and_save(
+            stdout,
+            factors=base_factors,
+            region=region,
+            run_type="baseline",
+            out_path=paths["baseline_summary"],
         )
-    )
+        print(
+            "Compare {} against data/raw/xx.{} to verify correctness.".format(
+                paths["fortran_baseline_out"], REGION_SHORTCODE.get(region, region)
+            )
+        )
 
     if evaluate_only:
         # Evaluate-only mode (e.g. IFDATCEN=1: EGS covers the constant data-center
@@ -2151,6 +2168,7 @@ def run_workflow(
         "datacenter_scenario":   _IFDATCEN,
         "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
         "max_land_pct":          _MAX_LAND_PCT,
+        "land_penalty_per_pp":   _LAND_PENALTY_PER_PP if _MAX_LAND_PCT is not None else None,
         "polish":                _polish_label if optimizer == "ga" else None,
         "optimizer":             optimizer,
         "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
@@ -2499,8 +2517,18 @@ def parse_args():
         default=None,
         help="Cap on NEW land use (wind spacing + footprint) as percent of "
              "regional land area, enforced during optimization as a graded cost "
-             "penalty: each percentage point above the cap doubles the effective "
-             "cost. Reported costs stay unpenalized. Default: no cap.",
+             "penalty: the effective (selection) cost is multiplied by "
+             "(1 + land-penalty-per-pp * excess_pp). Reported costs stay "
+             "unpenalized. Default: no cap.",
+    )
+    parser.add_argument(
+        "--land-penalty-per-pp",
+        type=float,
+        default=None,
+        help="Slope of the land-use penalty: each percentage point above "
+             "--max-land-pct multiplies the effective cost by this much "
+             "(default {}). Raise it to more strongly deter over-cap solutions."
+             .format(_LAND_PENALTY_PER_PP),
     )
     parser.add_argument(
         "--scratch-label",
@@ -2672,6 +2700,7 @@ def main():
         scratch_label=args.scratch_label,
         dc_label=args.dc_label,
         max_land_pct=args.max_land_pct,
+        land_penalty_per_pp=args.land_penalty_per_pp,
     )
 
 

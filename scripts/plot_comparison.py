@@ -175,8 +175,10 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
     order_l = list(d["region"])
     n = len(d)
     xs = list(range(n))
-    d["land_rel_change"] = ((d["ga_newland_pct_regland"] - d["bl_newland_pct_regland"])
-                            / d["bl_newland_pct_regland"] * 100)
+    # Panel (b) is the difference in new-land share vs trial-and-error, in
+    # percentage points (the shares are already % of regional land, so a pp
+    # difference is the directly meaningful quantity).
+    d["land_pp_change"] = d["ga_newland_pct_regland"] - d["bl_newland_pct_regland"]
     # The from-scratch run's land is added to both panels automatically once the
     # CSV carries the column (ga_scratch2_newland_pct_regland); the current export
     # only has trial-and-error and GA-from-trial-and-error land.
@@ -184,8 +186,7 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
                    and d["ga_scratch2_newland_pct_regland"].notna().any())
     if has_sc_land:
         sc_land = pd.to_numeric(d["ga_scratch2_newland_pct_regland"], errors="coerce")
-        d["land_rel_change_scratch"] = ((sc_land - d["bl_newland_pct_regland"])
-                                        / d["bl_newland_pct_regland"] * 100)
+        d["land_pp_change_scratch"] = sc_land - d["bl_newland_pct_regland"]
 
     fig, (axA, axB) = plt.subplots(
         2, 1, figsize=(13.5, 7.6), sharex=True,
@@ -210,16 +211,17 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
     axA.text(0.0, 1.02, "a", transform=axA.transAxes, fontweight="bold",
              fontsize=14, va="bottom")
 
-    # (b) relative change in new-land use vs trial-and-error (signed: up = uses
-    # more land, down = less), for GA and (when present) the from-scratch run.
+    # (b) difference in new-land use vs trial-and-error, percentage points
+    # (signed: up = uses more land, down = less), for GA and (when present) the
+    # from-scratch run.
     add_region_bands(axB, n)
     axB.grid(axis="y", color=GRID, lw=0.7, zorder=0.5)
     axB.axhline(0, color=MUTED, lw=0.9, zorder=1)
-    bars = [(d["land_rel_change"], C_GA)]
+    bars = [(d["land_pp_change"], C_GA)]
     if has_sc_land:
-        bars.append((d["land_rel_change_scratch"], C_SCRATCH))
+        bars.append((d["land_pp_change_scratch"], C_SCRATCH))
     _paired_bars(axB, xs, bars)
-    axB.set_ylabel("Change in new-land use\nvs trial-and-error (%)")
+    axB.set_ylabel("Difference in new-land use vs\ntrial-and-error (percentage points)")
     axB.text(0.0, 1.02, "b", transform=axB.transAxes, fontweight="bold",
              fontsize=14, va="bottom")
 
@@ -230,14 +232,14 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
         fig.savefig(outdir / f"fig_land_comparison.{ext}")
     plt.close(fig)
 
-    rel = d["land_rel_change"]
+    pp = d["land_pp_change"]
     flagged = d["region"][(d["bl_newland_pct_regland"] > 0) &
                           (d["ga_newland_pct_regland"] > d["bl_newland_pct_regland"] * (1 + tolerance))].tolist()
     check = (f"all {n} regions within +{100*tolerance:.0f}% of baseline"
              if not flagged else
              f"{len(flagged)} of {n} exceed baseline by >{100*tolerance:.0f}%: {flagged}")
     print(f"  wrote fig_land_comparison.pdf/.png")
-    print(f"    caption stats: relative change {rel.min():+.1f}% to {rel.max():+.1f}%; {check}.")
+    print(f"    caption stats: GA land difference {pp.min():+.2f} to {pp.max():+.2f} pp; {check}.")
 
 
 def fig_solve_time(df: pd.DataFrame, outdir: Path, order) -> None:
