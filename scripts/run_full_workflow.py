@@ -174,7 +174,12 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "FACUTILPV":   (1.0,          "capacity",  "Utility-scale PV capacity scaling"),
     "FACRESPV":    (1.0,          "capacity",  "Residential rooftop PV scaling"),
     "FACCOMPV":    (1.0,          "capacity",  "Commercial rooftop PV scaling"),
-    "CSPTURBFAC":  (1.0,          "capacity",  "CSP turbine capacity ratio"),
+    # CSPTURBFAC is FIXED, not a design variable: the PI expects concentrated
+    # solar power (CSP) to see little further real-world growth, so its turbine
+    # capacity is held at the model's baseline (not scaled by the GA).  Like
+    # other fixed params it is omitted from the factor file, so Fortran uses its
+    # own region-specific value.
+    "CSPTURBFAC":  (1.0,          "fixed",     "CSP turbine capacity ratio [PI: CSP not a growth tech; held fixed]"),
     "FACSHT":      (1.0,          "capacity",  "Solar thermal heat scaling"),
     # --- CSP / storage configuration ---
     "CSPSTORGAT":  (2.61244594,   "fixed",     "CSP storage charge/discharge ratio"),
@@ -206,7 +211,16 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "FRSTORINIT":  (0.5,          "fixed",     "Initial storage fill fraction"),
     "FDISTHEAT":   (0.2,          "fixed",     "District heating fraction"),
     # --- Heat pump and health ---
-    "CPERFORM":    (4.0,          "cop",       "Heat pump COP (kWh-th/kWh-el)"),
+    # CPERFORM (heat-pump COP) is a FIXED physical constant, NOT a design
+    # variable.  powerworld.f reads it BEFORE optimization and it feeds the
+    # heat/electricity demand split (FISHEAT = FHTBUILD/CPERFORM -> FHTHPUMP ->
+    # FRCLOWHT), i.e. it reshapes the exogenous load.  If the GA is allowed to
+    # move it, every run gets a different demand structure and the optimizer can
+    # cut "cost" by editing the technology assumption instead of the supply
+    # system.  The PI holds it at 4.0 in every simulation, so it is kept "fixed"
+    # (and, like other fixed params, omitted from the factor file) so Fortran
+    # always uses its own 4.0 and FRCLOWHT is identical across all runs.
+    "CPERFORM":    (4.0,          "fixed",     "Heat pump COP (kWh-th/kWh-el) [physical constant; feeds demand split, held fixed]"),
     "HCDDADD":     (1.0,          "fixed",     "HDD/CDD daily minimum (numerical safeguard)"),
     "FMORTBAU":    (0.9,          "fixed",     "BAU air-pollution mortality fraction"),
     # --- Hot-water, H2, heat battery ---
@@ -431,10 +445,12 @@ def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
     return result
 
 
-# The original 7 capacity-scaling factors (used to decide what inflate_until_feasible touches)
+# The capacity-scaling factors (used to decide what inflate_until_feasible touches).
+# CSPTURBFAC is excluded: it is now "fixed" (CSP not a growth tech per the PI), so
+# the bootstrap must not scale it either.
 CAPACITY_FACTOR_KEYS = [
     "FACONWIN", "FACOFFWIN", "FACUTILPV", "FACRESPV",
-    "FACCOMPV", "CSPTURBFAC", "FACSHT",
+    "FACCOMPV", "FACSHT",
 ]
 # Electric-only subset: scale these first during infeasibility expansion since
 # electric-sector shortfalls are far more common than heat-sector shortfalls.

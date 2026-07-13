@@ -33,6 +33,7 @@ python -m scripts.rebuild_xx_deliverables
 echo "=== 5/6  Publication figures ==="
 python -m scripts.plot_comparison
 python -m scripts.plot_dc_comparison
+python -m scripts.plot_structure                    # what changed vs trial-and-error
 python -m scripts.plot_results --all-regions || echo "  (overview figures skipped)"
 
 echo "=== 6/6  Data-integrity check ==="

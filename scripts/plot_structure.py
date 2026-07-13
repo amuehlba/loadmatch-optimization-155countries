@@ -40,8 +40,8 @@ import openpyxl
 import pandas as pd
 
 from scripts.plot_style import (
-    apply_style, region_order, style_region_axis, diverging_cmap,
-    GRID, MUTED, INK, INK_SECONDARY, C_GA,
+    apply_style, region_order, diverging_cmap,
+    GRID, MUTED, INK, C_GA,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -99,7 +99,13 @@ def _heatmap(values, row_labels, regions, cbar_label, outname, outdir,
     signed change centred on zero (no change)."""
     m = np.asarray(values, dtype=float)
     nrows = m.shape[0]
-    fig, ax = plt.subplots(figsize=(14.0, fig_h_per_row * nrows + base_h))
+    if nrows == 0:
+        print(f"  [SKIP] {outname}: no features changed (nothing to plot).")
+        return
+    # Floor the height so the (vertical) colorbar label never runs off the figure
+    # even when few rows are shown.
+    fig_h = max(fig_h_per_row * nrows + base_h, 4.8)
+    fig, ax = plt.subplots(figsize=(14.0, fig_h))
     norm = CenteredNorm(vcenter=0.0)
     im = ax.imshow(m, aspect="auto", cmap=diverging_cmap(), norm=norm)
     ax.set_yticks(range(nrows))
@@ -114,7 +120,7 @@ def _heatmap(values, row_labels, regions, cbar_label, outname, outdir,
     for s in ax.spines.values():
         s.set_visible(False)
     cb = fig.colorbar(im, ax=ax, pad=0.012, fraction=0.025)
-    cb.set_label(cbar_label)
+    cb.set_label(cbar_label, fontsize=11, labelpad=4)
     cb.outline.set_visible(False)
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"{outname}.{ext}")
@@ -174,16 +180,20 @@ def fig_cost_change_by_category(df, outdir, regions, opt_case):
     opt = _case_matrix(df, cols, opt_case, regions)
     delta = (opt - base)
     keep = [c for c in cols if np.nanmax(np.abs(delta[c].to_numpy())) > 1e-4]
+    if not keep:
+        print("  [SKIP] fig_cost_change_by_category: no cost category changed "
+              "(baseline == optimised here).")
+        return
     delta = delta[keep]
     order = sorted(keep, key=lambda c: -np.nanmax(np.abs(delta[c].to_numpy())))
     m = delta[order].to_numpy().T  # rows=category, cols=region
     _heatmap(m, [_short(c) for c in order], regions,
-             f"Change in cost (c/kWh): {opt_case} - trial-and-error",
+             "Cost change (c/kWh)",
              "fig_cost_change_by_category", outdir)
     tot = np.nansum(m)
     print("  wrote fig_cost_change_by_category.pdf/.png")
-    print(f"    caption stats: {len(order)} categories with change; net "
-          f"{tot:+.2f} c/kWh summed over cells (blue = cheaper).")
+    print(f"    caption stats: {opt_case} vs trial-and-error; {len(order)} "
+          f"categories change; net {tot:+.2f} c/kWh over cells (blue = cheaper).")
 
 
 def fig_generation_mix_change(df, outdir, regions, opt_case):
@@ -194,14 +204,17 @@ def fig_generation_mix_change(df, outdir, regions, opt_case):
     opt_share = opt.div(opt.sum(axis=1), axis=0) * 100.0
     delta = (opt_share - base_share)
     keep = [c for c in cols if np.nanmax(np.abs(delta[c].to_numpy())) > 1e-3]
+    if not keep:
+        print("  [SKIP] fig_generation_mix_change: no generation share changed.")
+        return
     order = sorted(keep, key=lambda c: -np.nanmax(np.abs(delta[c].to_numpy())))
     m = delta[order].to_numpy().T
     _heatmap(m, [_short(c) for c in order], regions,
-             f"Change in generation share (pp): {opt_case} - trial-and-error",
+             "Generation-share change (pp)",
              "fig_generation_mix_change", outdir)
     print("  wrote fig_generation_mix_change.pdf/.png")
-    print(f"    caption stats: {len(order)} sources shift share; max |Δ| "
-          f"{np.nanmax(np.abs(m)):.1f} pp.")
+    print(f"    caption stats: {opt_case} vs trial-and-error; {len(order)} "
+          f"sources shift share; max |Δ| {np.nanmax(np.abs(m)):.1f} pp.")
 
 
 def main(argv=None):
