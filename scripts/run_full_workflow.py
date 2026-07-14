@@ -1624,7 +1624,25 @@ def evaluate_trials_parallel(specs, max_workers, region=_DEFAULT_REGION, paths=N
             for spec in specs
         ]
         for spec, future in zip(specs, futures):
-            label, factors, output = future.result()
+            try:
+                label, factors, output = future.result()
+            except Exception as exc:
+                # One worker failed — most often a transient shared-filesystem
+                # error while preparing its isolated workspace (EACCES/ESTALE/
+                # ENOENT on data/tmp_workspaces under heavy concurrent load),
+                # occasionally a Fortran crash on a single candidate.  Treat this
+                # candidate as infeasible so ONE failed evaluation cannot abort
+                # the entire (multi-hour) GA: the search keeps its elites and
+                # moves on.  Previously this exception propagated out of
+                # future.result() and killed the whole region's run.
+                label = spec["label"]
+                print("WARNING: evaluation '{}' failed: {}: {} -- treating as "
+                      "infeasible (run continues).".format(
+                          label, type(exc).__name__, exc))
+                log_candidate(spec["factors"], False, float("inf"), label,
+                              history_file=paths["history_file"])
+                results.append({"feasible": False, "cost": float("inf")})
+                continue
             feasible = check_feasibility(output)
             cost = _apply_land_cap(parse_cost(output), output)
             log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
