@@ -8585,7 +8585,11 @@ C
       TGWCOMPV   = TGWCOMPV   * FACCOMPV
       TGWUTILPV  = TGWUTILPV  * FACUTILPV
 C
-      IF (TGWSHEAT.GT.0.) THEN
+C PI-approved 2026-07-15: test .GT.SMAL30 (not .GT.0.).  TGWSHEAT is floored to
+C SMAL30 (=1e-30) by the divide-by-zero guard above, so .GT.0. can never fail
+C and the ELSE (FACSHT=0) was dead code.  With .GT.SMAL30 the ELSE fires for
+C regions with no installed solar thermal (TGWSHEAT==SMAL30), zeroing FACSHT.
+      IF (TGWSHEAT.GT.SMAL30) THEN
        FACSHT     = MAX(EGWSHEAT / TGWSHEAT, FACSHT)
        TGWSHEAT   = TGWSHEAT * FACSHT
       ELSE
