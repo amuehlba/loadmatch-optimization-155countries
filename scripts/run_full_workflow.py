@@ -1892,6 +1892,7 @@ def run_workflow(
     evaluate_only=False,
     scratch_label="scratch",
     dc_label="",
+    out_suffix="",
     max_land_pct=None,
     land_penalty_per_pp=None,
 ):
@@ -1916,8 +1917,16 @@ def run_workflow(
     # dc_label distinguishes data-center cases that share the same IFDATCEN but
     # differ in which design variables may change (e.g. _dc2 = utility build-out,
     # _dc2rc = rooftop build-out, _dc2bat / _dc2h2 = storage sensitivities).
-    _RUN_SUFFIX = (("_" + scratch_label if _scratch else "")
-                   + ("_dc{}{}".format(_IFDATCEN, dc_label) if _IFDATCEN else ""))
+    if out_suffix:
+        # Explicit override of the output suffix.  Used to re-evaluate a saved
+        # optimum in evaluate-only mode into its own dir when the normal suffix
+        # logic wouldn't apply — e.g. re-costing a scratch2 optimum from its
+        # genetic_factors.dat (baseline_start is a file, not "scratch", so the
+        # scratch label would otherwise be dropped and it would clobber base).
+        _RUN_SUFFIX = "_" + out_suffix
+    else:
+        _RUN_SUFFIX = (("_" + scratch_label if _scratch else "")
+                       + ("_dc{}{}".format(_IFDATCEN, dc_label) if _IFDATCEN else ""))
     results_label = region + _RUN_SUFFIX
     paths = _region_paths(results_label)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
@@ -2588,6 +2597,16 @@ def parse_args():
              "Default: %(default)s.",
     )
     parser.add_argument(
+        "--out-suffix",
+        type=str,
+        default="",
+        help="Force the output suffix directly: results go to <REGION>_<SUFFIX>/ "
+             "and xx_optimized_<SUFFIX>/, overriding the scratch/dc suffix logic. "
+             "Use when re-evaluating a saved optimum in --evaluate-only mode into "
+             "its own dir (e.g. --out-suffix scratch2 to re-cost a scratch2 "
+             "optimum without clobbering the base results). Default: none.",
+    )
+    parser.add_argument(
         "--evaluate-only",
         action="store_true",
         default=False,
@@ -2747,6 +2766,7 @@ def main():
         evaluate_only=args.evaluate_only,
         scratch_label=args.scratch_label,
         dc_label=args.dc_label,
+        out_suffix=args.out_suffix,
         max_land_pct=args.max_land_pct,
         land_penalty_per_pp=args.land_penalty_per_pp,
     )
