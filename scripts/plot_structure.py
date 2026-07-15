@@ -170,14 +170,15 @@ def fig_factor_changes(df, outdir, regions, case_a, case_b, linthresh=20.0):
     scratch GA).  Symlog x; medians in the right margin."""
     cols = [c for c in _cols_in_group(df, G_FACTORS) if _short(c) not in FACTOR_EXCLUDE]
     base = _case_matrix(df, cols, BASELINE_CASE, regions)
+    optA = _case_matrix(df, cols, case_a, regions)
+    optB = _case_matrix(df, cols, case_b, regions)
 
-    def rel_of(case):
-        opt = _case_matrix(df, cols, case, regions)
+    def _rel(opt):
         with np.errstate(divide="ignore", invalid="ignore"):
             r = (opt - base) / base.abs() * 100.0
-        return r.replace([np.inf, -np.inf], np.nan)
+        return r.replace([np.inf, -np.inf], np.nan)  # base==0 -> undefined ratio
 
-    relA, relB = rel_of(case_a), rel_of(case_b)
+    relA, relB = _rel(optA), _rel(optB)
 
     def _mv(c):  # larger of the two cases' median |change|, for ordering
         return max(np.nan_to_num(np.nanmedian(np.abs(relA[c].to_numpy()))),
@@ -201,21 +202,35 @@ def fig_factor_changes(df, outdir, regions, case_a, case_b, linthresh=20.0):
     ax.grid(axis="x", color=GRID, lw=0.7, zorder=0)
     ax.axvline(0, color=MUTED, lw=1.0, zorder=1)
     rng = np.random.default_rng(0)
+    eps = 1e-9
+    ytr = ax.get_yaxis_transform()   # x in axes fraction, y in data
     for i, c in enumerate(order):
         y = ny - 1 - i
-        for rel, color, lo, hi, ytxt in (
-                (relA, C_GA, 0.04, 0.36, 0.20),
-                (relB, C_SCRATCH, -0.36, -0.04, -0.20)):
+        b = base[c]
+        for rel, opt, color, lo, hi, ytxt in (
+                (relA, optA, C_GA, 0.04, 0.36, 0.20),
+                (relB, optB, C_SCRATCH, -0.36, -0.04, -0.20)):
             vals = rel[c].dropna().to_numpy()
+            med = None
             if len(vals):
                 ax.scatter(vals, y + rng.uniform(lo, hi, size=len(vals)), s=22,
                            color=color, alpha=0.8, edgecolors="white",
                            linewidths=0.4, zorder=3)
                 med = float(np.median(vals))
                 ax.plot([med, med], [y + lo, y + hi], color=color, lw=2.4, zorder=4)
-                ax.text(pos * 1.6, y + ytxt, f"{med:+.0f}%", va="center", ha="right",
-                        fontsize=8.5, color=color)
-    ax.set_xlim(left, pos * 1.75)
+            # regions the relative metric can't place from a zero baseline: a
+            # factor newly turned ON (0 -> +); switch-offs (+ -> 0) sit at -100%.
+            o = opt[c]
+            n_on = int(((b.abs() <= eps) & (o > eps)).sum())
+            n_off = int(((b > eps) & (o.abs() <= eps)).sum())
+            lbl = f"{med:+.0f}%" if med is not None else "n/a"
+            if n_on:
+                lbl += f"  +{n_on} on"
+            if n_off:
+                lbl += f"  -{n_off} off"
+            ax.text(1.008, y + ytxt, lbl, transform=ytr, va="center", ha="left",
+                    fontsize=8.5, color=color)
+    ax.set_xlim(left, pos * 1.15)
     ax.set_yticks(range(ny))
     ax.set_yticklabels([_short(c) for c in reversed(order)])
     ax.set_ylim(-0.6, ny - 0.4)
@@ -223,7 +238,6 @@ def fig_factor_changes(df, outdir, regions, case_a, case_b, linthresh=20.0):
     # group the rows: generation capacity on top, storage & dispatch below
     if 0 < n_gen < ny:
         ax.axhline(ny - n_gen - 0.5, color=INK, lw=1.3, zorder=5)
-    ytr = ax.get_yaxis_transform()  # x in axes fraction, y in data
     if n_gen:
         ax.text(-0.16, ny - (n_gen + 1) / 2, "Generation capacity", transform=ytr,
                 rotation=90, ha="center", va="center", fontsize=11,
@@ -233,7 +247,7 @@ def fig_factor_changes(df, outdir, regions, case_a, case_b, linthresh=20.0):
                 rotation=90, ha="center", va="center", fontsize=11,
                 fontweight="bold", color=INK)
     ax.set_xlabel("Change in optimised factor vs trial-and-error "
-                  "(%, symlog; median at right)")
+                  "(%, symlog; right column: median, +newly-on / -off counts)")
     handles = [plt.Line2D([], [], marker="o", ls="", color=C_GA, label=LABEL_GA),
                plt.Line2D([], [], marker="o", ls="", color=C_SCRATCH, label=LABEL_SCRATCH)]
     ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.005),
