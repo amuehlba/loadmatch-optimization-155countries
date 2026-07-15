@@ -1,32 +1,39 @@
-"""Structural-difference figures: what the GA actually changed vs trial-and-error.
+"""Structural-difference figures: what the optimisers actually changed.
 
 Companion to plot_comparison.py.  Where those figures show the OUTCOME (cost,
 land, solve time), these show the STRUCTURE behind it - which design levers moved
-and how the system was rebuilt to reach the optimum.  All data comes from the two
-already-exported artefacts:
+and how the system was rebuilt.  Both optimised cases are compared against the
+PI trial-and-error baseline:
+
+    GA (from trial-and-error)   - blue
+    GA (from scratch, extended) - orange
+
+Data comes from the two already-exported artefacts:
 
   data/results_verification/comparison_summary.csv   (region order = system cost)
   data/results_verification/results_export.xlsx      (per region x case detail)
 
-Figures (default comparison: GA-from-trial-and-error vs trial-and-error):
+Figures:
 
   fig_factor_changes            per optimised factor, the distribution across
-                                regions of its relative change (median marked) -
-                                which levers the GA turns, and by how much.
+                                regions of its relative change vs trial-and-error
+                                (both cases overlaid; median marked).
   fig_cost_change_by_category   diverging heatmap, regions x cost category, of the
-                                change in cost (c/kWh): where the savings come from
-                                (blue) and where cost is added back (red).
-  fig_generation_mix_change     diverging heatmap, regions x generation source, of
-                                the change in each source's share of total
-                                generation (percentage points): how supply is
-                                restructured.
+                                change in cost (c/kWh).  Each cell is split on the
+                                anti-diagonal: upper-left triangle = GA-from-trial-
+                                and-error, lower-right = GA-from-scratch.
+  fig_generation_mix_change     same split-cell heatmap for the change in each
+                                source's share of TOTAL generation (percentage
+                                points = optimised share minus baseline share).
 
-Same formatting as the other figures (landscape, regions on the x-axis, larger
+A cell (or point) is grey / absent where the baseline run is infeasible, so no
+change can be defined (e.g. a region whose trial-and-error re-run did not
+converge).  Same formatting as the other figures (landscape, regions on x, larger
 fonts, colour-blind-safe palette, no on-figure titles; caption numbers to stdout).
 
 Usage:
     python -m scripts.plot_structure
-    python -m scripts.plot_structure --opt-case "GA (scratch2)"   # vs baseline
+    python -m scripts.plot_structure --case-a "GA (trial-error)" --case-b "GA (scratch2)"
 """
 import argparse
 from pathlib import Path
@@ -35,13 +42,16 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import CenteredNorm
+from matplotlib.colors import Normalize
+from matplotlib.collections import PolyCollection
+from matplotlib.cm import ScalarMappable
 import openpyxl
 import pandas as pd
 
 from scripts.plot_style import (
     apply_style, region_order, diverging_cmap,
-    GRID, MUTED, INK, C_GA,
+    GRID, MUTED, INK, INK_SECONDARY, C_GA, C_SCRATCH,
+    LABEL_GA, LABEL_SCRATCH,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,12 +60,23 @@ DEFAULT_CSV = RESULTS_DIR / "comparison_summary.csv"
 DEFAULT_XLSX = RESULTS_DIR / "results_export.xlsx"
 
 BASELINE_CASE = "Baseline"
-DEFAULT_OPT_CASE = "GA (trial-error)"
+DEFAULT_CASE_A = "GA (trial-error)"
+DEFAULT_CASE_B = "GA (scratch2)"
+NAN_GREY = "#d9d9d6"        # cells with no (feasible) baseline
 
 G_FACTORS = "Optimised factors"
 G_COST = "Cost by category (c/kWh, MN)"
 G_GEN = "Generation (TWh/yr)"
 GEN_EXCLUDE = {"Total supply", "Total gen (sum)"}
+
+# Optimised factors that scale GENERATION capacity (wind / PV / solar-thermal /
+# CSP turbine); everything else is storage duration/power + dispatch.  Used to
+# group the rows of fig_factor_changes (generation on top).
+GEN_FACTORS = {"FACONWIN", "FACOFFWIN", "FACUTILPV", "FACRESPV", "FACCOMPV",
+               "FACSHT", "CSPTURBFAC"}
+# Factors that are held fixed (not GA design variables) and so are not shown as a
+# structural "change": CPERFORM (heat-pump COP) is a physical constant.
+FACTOR_EXCLUDE = {"CPERFORM"}
 
 apply_style()
 
@@ -76,16 +97,14 @@ def load_structure(xlsx_path: Path) -> pd.DataFrame:
     return df[df["Identification :: Region"].notna()].copy()
 
 
-def _cols_in_group(df: pd.DataFrame, group: str, exclude=()):
+def _cols_in_group(df, group, exclude=()):
     return [c for c in df.columns
             if c.startswith(group + " :: ") and c.split(" :: ", 1)[1] not in exclude]
 
 
 def _case_matrix(df, cols, case, regions):
-    """regions x cols numeric matrix for one case, ordered by `regions`."""
     sub = (df[df["Identification :: Case"] == case]
-           .set_index("Identification :: Region")
-           .reindex(regions))
+           .set_index("Identification :: Region").reindex(regions))
     return sub[cols].apply(pd.to_numeric, errors="coerce")
 
 
@@ -93,128 +112,183 @@ def _short(col):
     return col.split(" :: ", 1)[1]
 
 
-def _heatmap(values, row_labels, regions, cbar_label, outname, outdir,
-             fig_h_per_row=0.34, base_h=2.4):
-    """Diverging heatmap: regions on the x-axis, features on the y-axis, colour =
-    signed change centred on zero (no change)."""
-    m = np.asarray(values, dtype=float)
-    nrows = m.shape[0]
+# --------------------------------------------------------------------------- #
+# Split-cell diverging heatmap: two cases per cell (anti-diagonal split)
+# --------------------------------------------------------------------------- #
+def _diag_heatmap(mA, mB, row_labels, regions, cbar_label, outname, outdir):
+    mA, mB = np.asarray(mA, float), np.asarray(mB, float)
+    nrows, ncols = mA.shape
     if nrows == 0:
         print(f"  [SKIP] {outname}: no features changed (nothing to plot).")
         return
-    # Floor the height so the (vertical) colorbar label never runs off the figure
-    # even when few rows are shown.
-    fig_h = max(fig_h_per_row * nrows + base_h, 4.8)
+    fig_h = max(0.42 * nrows + 2.9, 5.0)
     fig, ax = plt.subplots(figsize=(14.0, fig_h))
-    norm = CenteredNorm(vcenter=0.0)
-    im = ax.imshow(m, aspect="auto", cmap=diverging_cmap(), norm=norm)
+    cmap = diverging_cmap()
+    finite = np.concatenate([mA[np.isfinite(mA)].ravel(), mB[np.isfinite(mB)].ravel()])
+    hr = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+    norm = Normalize(-hr, hr)
+
+    polys, colors = [], []
+    for i in range(nrows):
+        for j in range(ncols):
+            ul = [(j - 0.5, i - 0.5), (j + 0.5, i - 0.5), (j - 0.5, i + 0.5)]  # upper-left
+            lr = [(j + 0.5, i - 0.5), (j + 0.5, i + 0.5), (j - 0.5, i + 0.5)]  # lower-right
+            for tri, val in ((ul, mA[i, j]), (lr, mB[i, j])):
+                polys.append(tri)
+                colors.append(cmap(norm(val)) if np.isfinite(val) else NAN_GREY)
+    ax.add_collection(PolyCollection(polys, facecolors=colors,
+                                     edgecolors="white", linewidths=0.5))
+    # thicker white separators between regions so columns read at a glance
+    ax.vlines(np.arange(0.5, ncols - 0.5), -0.5, nrows - 0.5,
+              color="white", lw=2.8, zorder=3)
+    ax.set_xlim(-0.5, ncols - 0.5)
+    ax.set_ylim(nrows - 0.5, -0.5)
+    ax.set_xticks(range(ncols))
+    ax.set_xticklabels(regions, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_yticks(range(nrows))
     ax.set_yticklabels(row_labels)
-    ax.set_xticks(range(len(regions)))
-    ax.set_xticklabels(regions, rotation=45, ha="right", rotation_mode="anchor")
     ax.tick_params(length=0)
-    # thin white cell separators
-    ax.set_xticks(np.arange(-0.5, len(regions), 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, nrows, 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=1.0)
     for s in ax.spines.values():
         s.set_visible(False)
-    cb = fig.colorbar(im, ax=ax, pad=0.012, fraction=0.025)
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cb = fig.colorbar(sm, ax=ax, pad=0.012, fraction=0.025)
     cb.set_label(cbar_label, fontsize=11, labelpad=4)
     cb.outline.set_visible(False)
+    ax.text(0.0, 1.015,
+            f"each cell split diagonally:  upper-left = {LABEL_GA}"
+            f"      lower-right = {LABEL_SCRATCH}",
+            transform=ax.transAxes, fontsize=10, va="bottom", color=INK_SECONDARY)
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"{outname}.{ext}")
     plt.close(fig)
 
 
-def fig_factor_changes(df, outdir, regions, opt_case, linthresh=20.0):
-    """Distribution across regions of each optimised factor's relative change
-    (opt vs trial-and-error).  Strip + median on a symlog axis (linear within
-    +/-linthresh %, compressed beyond) so both modest and large moves are legible
-    without clipping; the median value is printed in a right-margin column."""
-    cols = _cols_in_group(df, G_FACTORS)
+def fig_factor_changes(df, outdir, regions, case_a, case_b, linthresh=20.0):
+    """Overlaid distribution across regions of each optimised factor's relative
+    change vs trial-and-error, for both cases (blue = trial-and-error GA, orange =
+    scratch GA).  Symlog x; medians in the right margin."""
+    cols = [c for c in _cols_in_group(df, G_FACTORS) if _short(c) not in FACTOR_EXCLUDE]
     base = _case_matrix(df, cols, BASELINE_CASE, regions)
-    opt = _case_matrix(df, cols, opt_case, regions)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rel = (opt - base) / base.abs() * 100.0
-    rel = rel.replace([np.inf, -np.inf], np.nan)  # base==0 -> undefined ratio
-    order = sorted(cols, key=lambda c: -np.nanmedian(np.abs(rel[c].to_numpy())))
-    ny = len(order)
-    allvals = rel.to_numpy().ravel()
-    lim = float(np.nanmax(np.abs(allvals))) if np.isfinite(allvals).any() else linthresh
-    lim = max(lim, linthresh * 2)
 
-    fig, ax = plt.subplots(figsize=(12.5, 0.42 * ny + 1.4))
+    def rel_of(case):
+        opt = _case_matrix(df, cols, case, regions)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = (opt - base) / base.abs() * 100.0
+        return r.replace([np.inf, -np.inf], np.nan)
+
+    relA, relB = rel_of(case_a), rel_of(case_b)
+
+    def _mv(c):  # larger of the two cases' median |change|, for ordering
+        return max(np.nan_to_num(np.nanmedian(np.abs(relA[c].to_numpy()))),
+                   np.nan_to_num(np.nanmedian(np.abs(relB[c].to_numpy()))))
+
+    gen = sorted([c for c in cols if _short(c) in GEN_FACTORS], key=lambda c: -_mv(c))
+    sto = sorted([c for c in cols if _short(c) not in GEN_FACTORS], key=lambda c: -_mv(c))
+    order = gen + sto          # generation group on top, storage below
+    n_gen = len(gen)
+    ny = len(order)
+    # A relative change bottoms out at -100% (a factor scaled to zero); nothing
+    # goes lower, so fix the left limit there and size the right to the (large)
+    # positive moves.
+    allv = np.concatenate([relA.to_numpy().ravel(), relB.to_numpy().ravel()])
+    pos = float(np.nanmax(allv)) if np.isfinite(allv).any() else linthresh
+    pos = max(pos, linthresh * 2)
+    left = -100.0 * 1.15   # small margin so -100% markers are not clipped
+
+    fig, ax = plt.subplots(figsize=(12.8, 0.5 * ny + 1.6))
     ax.set_xscale("symlog", linthresh=linthresh)
     ax.grid(axis="x", color=GRID, lw=0.7, zorder=0)
     ax.axvline(0, color=MUTED, lw=1.0, zorder=1)
     rng = np.random.default_rng(0)
     for i, c in enumerate(order):
         y = ny - 1 - i
-        vals = rel[c].dropna().to_numpy()
-        ax.scatter(vals, y + rng.uniform(-0.22, 0.22, size=len(vals)), s=30,
-                   color=C_GA, alpha=0.8, edgecolors="white", linewidths=0.5, zorder=3)
-        if len(vals):
-            med = float(np.median(vals))
-            ax.plot([med, med], [y - 0.34, y + 0.34], color=INK, lw=2.4, zorder=4)
-            ax.text(lim * 1.6, y, f"{med:+.0f}%", va="center", ha="right",
-                    fontsize=9.5, color=INK)
-    ax.set_xlim(-lim * 1.15, lim * 1.7)
+        for rel, color, lo, hi, ytxt in (
+                (relA, C_GA, 0.04, 0.36, 0.20),
+                (relB, C_SCRATCH, -0.36, -0.04, -0.20)):
+            vals = rel[c].dropna().to_numpy()
+            if len(vals):
+                ax.scatter(vals, y + rng.uniform(lo, hi, size=len(vals)), s=22,
+                           color=color, alpha=0.8, edgecolors="white",
+                           linewidths=0.4, zorder=3)
+                med = float(np.median(vals))
+                ax.plot([med, med], [y + lo, y + hi], color=color, lw=2.4, zorder=4)
+                ax.text(pos * 1.6, y + ytxt, f"{med:+.0f}%", va="center", ha="right",
+                        fontsize=8.5, color=color)
+    ax.set_xlim(left, pos * 1.75)
     ax.set_yticks(range(ny))
     ax.set_yticklabels([_short(c) for c in reversed(order)])
     ax.set_ylim(-0.6, ny - 0.4)
     ax.tick_params(axis="y", length=0)
-    ax.set_xlabel(f"Change in optimised factor vs trial-and-error "
-                  f"(%, symlog; median at right); {opt_case}")
+    # group the rows: generation capacity on top, storage & dispatch below
+    if 0 < n_gen < ny:
+        ax.axhline(ny - n_gen - 0.5, color=INK, lw=1.3, zorder=5)
+    ytr = ax.get_yaxis_transform()  # x in axes fraction, y in data
+    if n_gen:
+        ax.text(-0.16, ny - (n_gen + 1) / 2, "Generation capacity", transform=ytr,
+                rotation=90, ha="center", va="center", fontsize=11,
+                fontweight="bold", color=INK)
+    if n_gen < ny:
+        ax.text(-0.16, (ny - 1 - n_gen) / 2, "Storage & dispatch", transform=ytr,
+                rotation=90, ha="center", va="center", fontsize=11,
+                fontweight="bold", color=INK)
+    ax.set_xlabel("Change in optimised factor vs trial-and-error "
+                  "(%, symlog; median at right)")
+    handles = [plt.Line2D([], [], marker="o", ls="", color=C_GA, label=LABEL_GA),
+               plt.Line2D([], [], marker="o", ls="", color=C_SCRATCH, label=LABEL_SCRATCH)]
+    ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.005),
+              ncols=2, borderaxespad=0.0)
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_factor_changes.{ext}")
     plt.close(fig)
-    movers = ", ".join(f"{_short(c)} {np.nanmedian(rel[c]):+.0f}%" for c in order[:4])
+    mv = ", ".join(f"{_short(c)} {np.nanmedian(relA[c]):+.0f}%/{np.nanmedian(relB[c]):+.0f}%"
+                   for c in order[:4])
     print("  wrote fig_factor_changes.pdf/.png")
-    print(f"    caption stats: largest median movers - {movers}.")
+    print(f"    caption stats (GA-trial/GA-scratch median): largest movers - {mv}.")
 
 
-def fig_cost_change_by_category(df, outdir, regions, opt_case):
+def fig_cost_change_by_category(df, outdir, regions, case_a, case_b):
     cols = _cols_in_group(df, G_COST)
     base = _case_matrix(df, cols, BASELINE_CASE, regions)
-    opt = _case_matrix(df, cols, opt_case, regions)
-    delta = (opt - base)
-    keep = [c for c in cols if np.nanmax(np.abs(delta[c].to_numpy())) > 1e-4]
+    dA = _case_matrix(df, cols, case_a, regions) - base
+    dB = _case_matrix(df, cols, case_b, regions) - base
+    both = pd.concat([dA.abs(), dB.abs()])
+    keep = [c for c in cols if np.nanmax(both[c].to_numpy()) > 1e-4]
     if not keep:
-        print("  [SKIP] fig_cost_change_by_category: no cost category changed "
-              "(baseline == optimised here).")
+        print("  [SKIP] fig_cost_change_by_category: no cost category changed.")
         return
-    delta = delta[keep]
-    order = sorted(keep, key=lambda c: -np.nanmax(np.abs(delta[c].to_numpy())))
-    m = delta[order].to_numpy().T  # rows=category, cols=region
-    _heatmap(m, [_short(c) for c in order], regions,
-             "Cost change (c/kWh)",
-             "fig_cost_change_by_category", outdir)
-    tot = np.nansum(m)
+    order = sorted(keep, key=lambda c: -np.nanmax(both[c].to_numpy()))
+    _diag_heatmap(dA[order].to_numpy().T, dB[order].to_numpy().T,
+                  [_short(c) for c in order], regions,
+                  "Cost change (c/kWh)", "fig_cost_change_by_category", outdir)
     print("  wrote fig_cost_change_by_category.pdf/.png")
-    print(f"    caption stats: {opt_case} vs trial-and-error; {len(order)} "
-          f"categories change; net {tot:+.2f} c/kWh over cells (blue = cheaper).")
+    print(f"    caption stats: {len(order)} cost categories change (c/kWh); blue = "
+          f"cheaper than trial-and-error, red = more expensive.")
 
 
-def fig_generation_mix_change(df, outdir, regions, opt_case):
+def fig_generation_mix_change(df, outdir, regions, case_a, case_b):
     cols = _cols_in_group(df, G_GEN, exclude=GEN_EXCLUDE)
     base = _case_matrix(df, cols, BASELINE_CASE, regions)
-    opt = _case_matrix(df, cols, opt_case, regions)
-    base_share = base.div(base.sum(axis=1), axis=0) * 100.0
-    opt_share = opt.div(opt.sum(axis=1), axis=0) * 100.0
-    delta = (opt_share - base_share)
-    keep = [c for c in cols if np.nanmax(np.abs(delta[c].to_numpy())) > 1e-3]
+    base_sh = base.div(base.sum(axis=1), axis=0) * 100.0
+
+    def dshare(case):
+        opt = _case_matrix(df, cols, case, regions)
+        return opt.div(opt.sum(axis=1), axis=0) * 100.0 - base_sh
+
+    dA, dB = dshare(case_a), dshare(case_b)
+    both = pd.concat([dA.abs(), dB.abs()])
+    keep = [c for c in cols if np.nanmax(both[c].to_numpy()) > 1e-3]
     if not keep:
         print("  [SKIP] fig_generation_mix_change: no generation share changed.")
         return
-    order = sorted(keep, key=lambda c: -np.nanmax(np.abs(delta[c].to_numpy())))
-    m = delta[order].to_numpy().T
-    _heatmap(m, [_short(c) for c in order], regions,
-             "Generation-share change (pp)",
-             "fig_generation_mix_change", outdir)
+    order = sorted(keep, key=lambda c: -np.nanmax(both[c].to_numpy()))
+    _diag_heatmap(dA[order].to_numpy().T, dB[order].to_numpy().T,
+                  [_short(c) for c in order], regions,
+                  "Δ share of total generation (pp)",
+                  "fig_generation_mix_change", outdir)
     print("  wrote fig_generation_mix_change.pdf/.png")
-    print(f"    caption stats: {opt_case} vs trial-and-error; {len(order)} "
-          f"sources shift share; max |Δ| {np.nanmax(np.abs(m)):.1f} pp.")
+    print("    caption stats: change in each source's share of total generation "
+          "(optimised share minus baseline share, percentage points).")
 
 
 def main(argv=None):
@@ -223,26 +297,34 @@ def main(argv=None):
     ap.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     ap.add_argument("--xlsx", type=Path, default=DEFAULT_XLSX)
     ap.add_argument("--outdir", type=Path, default=RESULTS_DIR)
-    ap.add_argument("--opt-case", default=DEFAULT_OPT_CASE,
-                    help="Optimised case to compare against %(default)r "
-                         "(e.g. 'GA (scratch2)').")
+    ap.add_argument("--case-a", default=DEFAULT_CASE_A,
+                    help="Upper-left case, blue (default %(default)r).")
+    ap.add_argument("--case-b", default=DEFAULT_CASE_B,
+                    help="Lower-right case, orange (default %(default)r).")
     args = ap.parse_args(argv)
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     cmp_df = pd.read_csv(args.csv)
     df = load_structure(args.xlsx)
-    have = set(df["Identification :: Region"])
-    regions = [r for r in region_order(cmp_df) if r in have]
+    have_r = set(df["Identification :: Region"])
+    have_c = set(df["Identification :: Case"])
+    regions = [r for r in region_order(cmp_df) if r in have_r]
     if not regions:
         print("No regions found in both the CSV and the XLSX.")
         return
-    for case in (BASELINE_CASE, args.opt_case):
-        if case not in set(df["Identification :: Case"]):
-            print(f"  [WARN] case {case!r} not present in the XLSX; "
-                  f"cases available: {sorted(have and set(df['Identification :: Case']))}")
-    fig_factor_changes(df, args.outdir, regions, args.opt_case)
-    fig_cost_change_by_category(df, args.outdir, regions, args.opt_case)
-    fig_generation_mix_change(df, args.outdir, regions, args.opt_case)
+    for case in (args.case_a, args.case_b):
+        if case not in have_c:
+            print(f"  [WARN] case {case!r} not in the XLSX (available: {sorted(have_c)}).")
+    # flag regions with no feasible baseline (change is undefined -> grey cells)
+    bl = df[df["Identification :: Case"] == BASELINE_CASE].set_index("Identification :: Region")
+    cost = pd.to_numeric(bl["Annual cost ($B/yr) :: Cost MN ($B/yr)"], errors="coerce")
+    infeasible = [r for r in regions if r in cost.index and not np.isfinite(cost.get(r))]
+    if infeasible:
+        print(f"  [INFO] baseline infeasible (shown grey / dropped): {infeasible}")
+
+    fig_factor_changes(df, args.outdir, regions, args.case_a, args.case_b)
+    fig_cost_change_by_category(df, args.outdir, regions, args.case_a, args.case_b)
+    fig_generation_mix_change(df, args.outdir, regions, args.case_a, args.case_b)
 
 
 if __name__ == "__main__":

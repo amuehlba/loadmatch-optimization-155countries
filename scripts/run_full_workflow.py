@@ -28,6 +28,16 @@ MIN_FACTOR = 0.05
 FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
 WORKSPACE_BASE = Path("data/tmp_workspaces")
+
+# Wall-clock ceilings for Fortran subprocesses.  A single model evaluation on
+# the 30s/3yr data takes minutes; anything past FORTRAN_EVAL_TIMEOUT_S is a hung
+# process (I/O stall, non-convergence) and MUST be killed, otherwise it wedges
+# the whole GA for the full SLURM walltime (a hung worker makes future.result()
+# block forever — the try/except cannot help because no exception is raised).
+# Supply preprocessing (IFREWRITE=1,2) is legitimately far slower, so it gets a
+# much larger ceiling.
+FORTRAN_EVAL_TIMEOUT_S = 3600        # 1 h per model evaluation
+FORTRAN_PREP_TIMEOUT_S = 6 * 3600    # 6 h per preprocessing pass
 _DEFAULT_REGION = "UNITED-STATES"
 # Data-center scenario (Fortran IFDATCEN): 0 = base WWS, 1 = EGS-powered data
 # centers, 2 = WWS-powered data centers.  Set once per workflow via run_workflow
@@ -662,6 +672,7 @@ def _run_fortran_raw(cmd, paths):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
+        timeout=FORTRAN_EVAL_TIMEOUT_S,
     )
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
     paths["fortran_log"].write_text(result.stdout)
@@ -712,6 +723,7 @@ def preprocess_region(region):
         result = subprocess.run(
             [str(FORTRAN_EXE), region, "1"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+            timeout=FORTRAN_PREP_TIMEOUT_S,
         )
         if result.returncode != 0:
             raise RuntimeError("IFREWRITE=1 failed for {}:\n{}".format(region, result.stderr))
@@ -720,6 +732,7 @@ def preprocess_region(region):
         result = subprocess.run(
             [str(FORTRAN_EXE), region, "2"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+            timeout=FORTRAN_PREP_TIMEOUT_S,
         )
         if result.returncode != 0:
             raise RuntimeError("IFREWRITE=2 failed for {}:\n{}".format(region, result.stderr))
@@ -1496,6 +1509,7 @@ def run_fortran_worker(label, factors, region=_DEFAULT_REGION):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            timeout=FORTRAN_EVAL_TIMEOUT_S,
         )
         combined = result.stdout
         if result.stderr:

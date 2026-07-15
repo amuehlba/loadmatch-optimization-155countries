@@ -289,6 +289,31 @@ def _with_land(data: Optional[dict], rdir: Path, raw_name: str) -> Optional[dict
     return data
 
 
+def _baseline_case(rdir: Path) -> Optional[dict]:
+    """Baseline row data, with a PI-file fallback.
+
+    Prefer our own re-run (baseline_summary.json).  When that run is infeasible or
+    missing (so it has no cost / generation), fall back to the PI's pristine
+    result (canonical_baseline_summary.json, parsed from data/raw/xx.<code>) for
+    the physical metrics - cost, generation, cost-by-category, land - while
+    KEEPING the region's seed factor values and STILL flagging the row infeasible.
+    This lets the structural-difference plots use the PI baseline even where our
+    re-run did not converge (e.g. AFRICA-NORTH), the same PI source the cross-
+    region cost table already falls back to.
+    """
+    base = _load_json(rdir / "baseline_summary.json")
+    if base and base.get("feasible"):
+        return base
+    canon = _load_json(rdir / "canonical_baseline_summary.json")
+    if not canon:
+        return base
+    merged = dict(canon)                                 # PI physical metrics
+    merged["factors"] = (base or {}).get("factors")      # region-specific PI seed
+    merged["feasible"] = (base or {}).get("feasible", False)  # keep re-run's flag
+    merged["run_type"] = "baseline (PI-file backfill)"
+    return merged
+
+
 def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
     """Return (case_label, data_dict_or_None) for the four reported cases.
 
@@ -306,7 +331,7 @@ def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
     s2dir = RESULTS_DIR / (region + "_scratch2")
     cases = [
         ("Baseline",           rdir, "fortran_baseline_run.out",
-         _load_json(rdir / "baseline_summary.json")),
+         _baseline_case(rdir)),
         ("GA (trial-error)",   rdir, "fortran_optimal_run.out",
          _load_json(rdir / "optimal_summary.json")),
         ("Scratch start",      sdir, "fortran_baseline_run.out",
