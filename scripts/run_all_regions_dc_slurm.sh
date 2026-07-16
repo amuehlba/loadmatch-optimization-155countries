@@ -58,8 +58,10 @@ DC_CASE="${DC_CASE:-case1}"
 
 # Rooftop PV (case3) is not meaningful at high latitude (rooftop nameplate
 # bases of 0.08-0.5 MW, polar-night winters) — skip per PI decision.
-if [ "$DC_CASE" = "case3" ] && { [ "$REGION" = "GREENLAND" ] || [ "$REGION" = "ICELAND" ]; }; then
-  echo "Skipping case3 for $REGION (rooftop strategy not applicable; PI decision)."
+# Override with FORCE=1 to run it anyway (e.g. the PI needs the xx for his
+# postprocessing):  sbatch --export=ALL,DC_CASE=case3,FORCE=1 ...
+if [ "$DC_CASE" = "case3" ] && { [ "$REGION" = "GREENLAND" ] || [ "$REGION" = "ICELAND" ]; } && [ "${FORCE:-0}" != "1" ]; then
+  echo "Skipping case3 for $REGION (rooftop strategy not applicable; PI decision; set FORCE=1 to run)."
   exit 0
 fi
 

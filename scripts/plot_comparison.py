@@ -263,10 +263,11 @@ def fig_solve_time(df: pd.DataFrame, outdir: Path, order) -> None:
         offset = (si - (ns - 1) / 2.0) * w
         ax.bar([x + offset for x in xs], d[col], width=w * 0.92,
                color=color, label=label, zorder=3)
+    ymax = max(float(d[col].max()) for col, _, _ in series)
+    ax.set_ylim(0, ymax * 1.22)   # headroom so the upper-right legend clears the bars
     if ns > 1:
         ax.legend(loc="upper right", ncols=ns)
     ax.set_ylabel("GA solve time (hours)")
-    ax.set_ylim(bottom=0)
     style_region_axis(ax, order_s)
 
     for ext in ("pdf", "png"):

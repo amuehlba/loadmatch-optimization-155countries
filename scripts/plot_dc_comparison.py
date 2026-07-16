@@ -43,9 +43,9 @@ DEFAULT_CSV = REPO_ROOT / "data" / "results_verification" / "dc_comparison_summa
 
 apply_style()
 
-# Per-region points whose cost increase exceeds this are drawn off the top of the
-# per-region axis (kept as an up-arrow) so the linear scale resolves the rest.
-OUTLIER_PCT = 100.0
+# Per-region axis is capped here; points above it are drawn as an up-arrow at the
+# top with their value labelled, so the linear scale resolves the bulk (5-30%).
+OUTLIER_PCT = 30.0
 # Left summary panel: distribution x-axis clip (a few extreme tails go off-scale).
 DIST_XMAX = 42.0
 
@@ -71,29 +71,42 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
     add_region_bands(ax, n)
 
     ax.axhline(10.0, color=MUTED, lw=1.1, ls=(0, (5, 3)), zorder=1)
-    ax.text(0.015, 0.965, "– – –  +10% = added-load share (proportional-cost reference)",
+    # info notes sit in the empty top-right corner (off-scale arrows are on the
+    # left/centre) so no extra vertical space is used.
+    ax.text(0.985, 0.975, "– – –  +10% = added-load share (proportional-cost reference)",
             transform=ax.transAxes, fontsize=10.5, color=INK_SECONDARY,
-            va="top", ha="left")
+            va="top", ha="right")
 
+    cap = OUTLIER_PCT
     offscale = []  # (region, strategy label, value)
+    excluded = []  # (region, strategy label)
     for (case, label, color, marker), dx in zip(DC_STRATEGIES, offsets):
         vals = df[f"{case}_delta_pct"].to_numpy(dtype=float)
         x = xs + dx
-        onscale = np.where(vals <= OUTLIER_PCT, vals, np.nan)
+        onscale = np.where(vals <= cap, vals, np.nan)
         ax.scatter(x, onscale, s=46, color=color, marker=marker, label=label,
                    edgecolors="white", linewidths=0.7, zorder=4)
         for xi, v, reg in zip(x, vals, order):
-            if np.isfinite(v) and v > OUTLIER_PCT:
+            if not np.isfinite(v):
+                # infeasible / excluded scenario (e.g. rooftop PV at high latitude)
+                excluded.append((reg, label))
+                ax.scatter([xi], [1.4], s=48, color=color, marker="x",
+                           linewidths=1.8, zorder=5)
+            elif v > cap:
                 offscale.append((reg, label, v))
-                ax.annotate("", xy=(xi, OUTLIER_PCT * 0.62), xytext=(xi, OUTLIER_PCT * 0.42),
-                            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.6))
+                ax.annotate("", xy=(xi, cap * 0.95), xytext=(xi, cap * 0.80),
+                            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.6),
+                            zorder=5)
+                ax.text(xi, cap * 0.77, f"{v:.0f}%", ha="center", va="top",
+                        fontsize=7.5, color=color, zorder=5)
 
-    ymax = float(np.nanmax(np.where(
-        df[[f"{c}_delta_pct" for c, *_ in DC_STRATEGIES]].to_numpy() <= OUTLIER_PCT,
-        df[[f"{c}_delta_pct" for c, *_ in DC_STRATEGIES]].to_numpy(), np.nan)))
-    ax.set_ylim(0, ymax * 1.08)
+    ax.set_ylim(0, cap)
     ax.set_ylabel("Cost of powering data centers: increase in\n"
                   "annual system cost vs no-data-center optimum (%)")
+    if excluded:
+        ax.text(0.985, 0.915, "×  excluded",
+                transform=ax.transAxes, fontsize=10, color=INK_SECONDARY,
+                va="top", ha="right")
     ax.legend(loc="upper left", ncols=len(DC_STRATEGIES), handletextpad=0.2,
               columnspacing=1.0, borderaxespad=0.3, bbox_to_anchor=(0.0, 1.10))
     style_region_axis(ax, order)
@@ -104,7 +117,10 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
     print("  wrote fig_dc_cost_by_region.pdf/.png")
     if offscale:
         note = "; ".join(f"{r} {lab.split('(')[0].strip()} {v:,.0f}%" for r, lab, v in offscale)
-        print(f"    off-scale (>{OUTLIER_PCT:.0f}%, drawn as up-arrows): {note}")
+        print(f"    off-scale (>{cap:.0f}%, up-arrow + value): {note}")
+    if excluded:
+        note = "; ".join(f"{r} {lab.split('(')[0].strip()}" for r, lab in excluded)
+        print(f"    excluded (marked x): {note}")
 
 
 def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
