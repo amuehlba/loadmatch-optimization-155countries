@@ -1148,7 +1148,8 @@ def _scratch_storage_anchor(region: str) -> Dict[str, float]:
     return anchors
 
 
-def _scratch_seed_population(feasible_factors: Dict[str, float]) -> List[Dict[str, float]]:
+def _scratch_seed_population(feasible_factors: Dict[str, float],
+                             locked: Sequence[str] = ()) -> List[Dict[str, float]]:
     """Deliberately spread starting individuals for the scratch GA.
 
     A population made only of small mutations of one bootstrap point collapses
@@ -1157,10 +1158,18 @@ def _scratch_seed_population(feasible_factors: Dict[str, float]) -> List[Dict[st
     variants scale the storage block down and the capacity factors up/down
     around the bootstrap point.  Infeasible variants simply die in generation
     one; feasible ones give the search genuine downward diversity.
+
+    Locked keys are left untouched: scaling a locked variable here would seed
+    the population with off-seed values that crossover then propagates (mutation
+    never resets a locked key), letting the "locked" value drift.  This matters
+    for the WSB/WSH data-center cases, which pin batteries or the H2 pair.
     """
+    locked_lower = {k.lower() for k in (locked or ())}
     storage_keys = [k for k in FACTOR_KEYS
-                    if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS]
-    capacity_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"]
+                    if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS
+                    and k.lower() not in locked_lower]
+    capacity_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"
+                     and k.lower() not in locked_lower]
 
     def scaled(s_mult=1.0, f_mult=1.0):
         v = feasible_factors.copy()
@@ -1292,10 +1301,13 @@ def _dc_directional_bootstrap(base_factors, locked, region, paths, parallel_eval
 
 # Vestigial-capacity groups: parameters the search can leave at small nonzero
 # values even when the corresponding technology is unused, so that capital is
-# paid for idle hardware (PI finding, 2026-07-08).  FCCHARG/FCDISCH are zeroed
-# as a pair (an electrolyzer without fuel cells, or vice versa, is never
-# useful); FACSHT cannot even reach 0 through the GA because capacity factors
-# have a 0.05 lower bound.
+# paid for idle hardware (PI finding, 2026-07-08).  The GA mutates multiplicatively
+# from a nonzero value, so a shrinking factor approaches 0 asymptotically but
+# essentially never lands on exactly 0 (the 0.05 lower bound was removed, but this
+# is unchanged).  FCCHARG/FCDISCH are zeroed as a PAIR (an electrolyzer without
+# fuel cells, or vice versa, is useless, and the GA mutates the two independently
+# so it won't zero them in lockstep).  The polish makes those discrete jumps
+# deterministically, adopting one only when it is feasible and cheaper.
 _POLISH_GROUPS = [
     ("h2fc",   ("FCCHARG", "FCDISCH")),
     ("soltherm", ("FACSHT",)),
@@ -1303,7 +1315,7 @@ _POLISH_GROUPS = [
 
 
 def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
-                   seed_factors=None):
+                   seed_factors=None, locked=()):
     """Cheap improvement tests on the found optimum, one parallel batch.
 
     Always: zero-out variants for vestigial capacity (H2 pair, solar-thermal
@@ -1312,13 +1324,20 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
     increase, the non-wind generation increase, and both — testing the PI's
     observation that a wind-only increase often suffices for the added load.
 
+    Locked keys are never zeroed or reverted: the WSB/WSH data-center cases pin
+    the H2 fuel-cell pair (FCCHARG/FCDISCH) or the batteries (BATDISCH/STORHBAT)
+    at the no-dc optimum, and this polish must not move them.
+
     Safe by construction: variants are adopted only when feasible AND cheaper,
     so genuinely needed capacity always survives.  Returns (factors, cost,
     adopted_label) with adopted_label None when the original stands.
     """
+    locked_lower = {k.lower() for k in (locked or ())}
     combos = []
+    # Skip any zero-group with a locked member (e.g. the H2 pair in WSB).
     active = [(name, keys) for name, keys in _POLISH_GROUPS
-              if any(best_factors.get(k, 0.0) > 0.0 for k in keys)]
+              if any(best_factors.get(k, 0.0) > 0.0 for k in keys)
+              and not any(k.lower() in locked_lower for k in keys)]
     combos.extend(active)
     if len(active) > 1:
         combos.append(("all", tuple(k for _, keys in active for k in keys)))
@@ -1334,6 +1353,7 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
         def _changed(cats, exclude=()):
             return [k for k in FACTOR_KEYS
                     if PARAM_REGISTRY[k][1] in cats and k not in exclude
+                    and k.lower() not in locked_lower
                     and abs(best_factors.get(k, 0.0) - seed_factors.get(k, 0.0)) > 1e-12]
         storage_keys = _changed(_SCRATCH_STORAGE_CATS)
         nonwind_keys = _changed(("capacity",), exclude=_WIND_KEYS)
@@ -2139,7 +2159,7 @@ def run_workflow(
         # deliberately-spread variants of the bootstrap point (storage down /
         # capacity up-down) so the search has genetic material in the cheap
         # directions from generation one.
-        _seed_pop = (_scratch_seed_population(candidate)
+        _seed_pop = (_scratch_seed_population(candidate, hj_locked_factors or ())
                      if (_scratch or _IFDATCEN) else None)
         best_factors, best_cost = genetic_search(
             candidate,
@@ -2164,7 +2184,8 @@ def run_workflow(
         # if that is feasible and cheaper (one extra parallel batch).
         best_factors, best_cost, _polish_label = polish_optimum(
             best_factors, best_cost, region, paths, parallel_evals,
-            seed_factors=base_factors if _IFDATCEN else None)
+            seed_factors=base_factors if _IFDATCEN else None,
+            locked=hj_locked_factors or ())
         if _polish_label:
             print("Polish adopted {} (cost {:.3f}).".format(_polish_label, best_cost))
         write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
