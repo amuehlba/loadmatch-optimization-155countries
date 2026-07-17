@@ -93,8 +93,10 @@ def main():
         ids = sorted(idx[r] for r in affected)
         print(f"\n  affected ({len(affected)}): {', '.join(affected) or '-'}")
         if ids:
+            # case3 skips GREENLAND/ICELAND unless FORCE=1; harmless for others.
+            export = f"ALL,DC_CASE={case}" + (",FORCE=1" if case == "case3" else "")
             print(f"  re-run: sbatch --array={','.join(map(str, ids))} "
-                  f"--export=ALL,DC_CASE={case} scripts/run_all_regions_dc_slurm.sh")
+                  f"--export={export} scripts/run_all_regions_dc_slurm.sh")
         print()
 
 
