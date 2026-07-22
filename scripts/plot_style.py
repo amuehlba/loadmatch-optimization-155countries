@@ -34,13 +34,15 @@ LABEL_BASELINE = "Trial-and-error"
 LABEL_GA = "GA (from trial-and-error)"
 LABEL_SCRATCH = "GA (from scratch, extended)"
 
-# --- data-centre supply strategies (colour + marker = composite encoding) -----
+# --- data-centre supply cases (colour + marker = composite encoding) ----------
+# Order and short labels per the PI (2026-07-18): EGS, WSBH, WSB, WSH, RBH.
+# Each case is defined in the caption/text, so the figures use only the codes.
 DC_STRATEGIES = [
-    ("dc1",    "EGS (case 1)",                                    "#008300", "o"),
-    ("dc2",    "Utility PV + wind + batteries + H$_2$ (case 2)",  "#2a78d6", "s"),
-    ("dc2rc",  "Rooftop PV + batteries + H$_2$ (case 3)",         "#4a3aa7", "^"),
-    ("dc2bat", "Case 2, batteries only",                          "#c98500", "D"),
-    ("dc2h2",  "Case 2, hydrogen only",                           "#e34948", "v"),
+    ("dc1",    "DC EGS",  "#008300", "o"),
+    ("dc2",    "DC WSBH", "#2a78d6", "s"),
+    ("dc2bat", "DC WSB",  "#c98500", "D"),
+    ("dc2h2",  "DC WSH",  "#e34948", "v"),
+    ("dc2rc",  "DC RBH",  "#4a3aa7", "^"),
 ]
 
 
@@ -90,6 +92,44 @@ def apply_style() -> None:
         "ps.fonttype": 42,
         "svg.fonttype": "none",
     })
+
+
+def apply_dc_style():
+    """DC-paper house style (PI request 2026-07-18): same base as apply_style()
+    but Times New Roman serif for all text, including math (H2 subscripts,
+    arrows).  ONLY the data-center figures call this; the baseline-optimization
+    figures keep apply_style()."""
+    apply_style()
+    mpl.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",      # Times-compatible math glyphs
+    })
+
+
+def cap_region(name):
+    """PI request: capitalize only the first letter of a country/region name
+    (e.g. 'AFRICA-EAST' -> 'Africa-east')."""
+    return str(name).capitalize()
+
+
+def region_sort_key(name):
+    """Canonical alphabetical sort key for a region, robust to the spelling and
+    formatting differences between data sources (case, spaces, hyphens) so every
+    figure orders the 30 regions IDENTICALLY -- e.g. 'SOUTHAM-NW' and
+    'South Am-NW' both key to 'southamnw'."""
+    return "".join(c for c in str(name).lower() if c.isalnum())
+
+
+def minor_ticks(ax, x=False, y=True):
+    """PI request: minor tick marks between the major numbers.  Numeric axes
+    only (skip the categorical case/region axis)."""
+    from matplotlib.ticker import AutoMinorLocator
+    if y:
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
+    if x:
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.tick_params(which="minor", length=2.5, color=MUTED)
 
 
 def region_order(df, by="baseline_cost_bil_per_yr", ascending=False):

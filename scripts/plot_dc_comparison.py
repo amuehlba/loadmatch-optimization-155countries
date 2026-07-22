@@ -34,7 +34,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from scripts.plot_style import (
-    apply_style, style_region_axis, add_region_bands, DC_STRATEGIES,
+    apply_dc_style as apply_style, style_region_axis, add_region_bands,
+    cap_region, DC_STRATEGIES, minor_ticks, region_sort_key,
     GRID, MUTED, INK, INK_SECONDARY,
 )
 
@@ -48,6 +49,26 @@ apply_style()
 OUTLIER_PCT = 30.0
 # Left summary panel: distribution x-axis clip (a few extreme tails go off-scale).
 DIST_XMAX = 42.0
+# PI decision: exclude Greenland & Iceland rooftop (case 3 / dc2rc) results from
+# the figures entirely; the exclusion is acknowledged in the caption.
+EXCLUDE = {"dc2rc": {"GREENLAND", "ICELAND"}}
+
+
+def _case_delta(df, case, suffix):
+    """A strategy's per-region column with the PI-excluded regions blanked out."""
+    s = df[f"{case}_{suffix}"]
+    drop = EXCLUDE.get(case, set())
+    return s.where(~df["region"].isin(drop)) if drop else s
+
+
+def _mean_pct(df, case):
+    """Cost-weighted (system) mean % cost increase for a strategy = total added
+    cost / total base cost over the same non-excluded regions.  Matches the PI's
+    reported aggregate % increases (e.g. EGS 8.00%, RBH 27.59% excl. Ic/Gr)."""
+    d = _case_delta(df, case, "delta_bil_per_yr")
+    base = pd.to_numeric(df["base_cost_bil_per_yr"], errors="coerce").where(d.notna())
+    den = base.sum()
+    return 100.0 * d.sum() / den if den else float("nan")
 
 
 def _load(csv_path: Path) -> pd.DataFrame:
@@ -56,7 +77,9 @@ def _load(csv_path: Path) -> pd.DataFrame:
     for c in df.columns:
         if c != "region" and not c.endswith("_feasible"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.sort_values("base_cost_bil_per_yr", ascending=False)
+    # alphabetical region order, shared with every other region figure so the
+    # labelled plots act as a key for the unlabelled scatter plots
+    return df.sort_values("region", key=lambda s: s.map(region_sort_key))
 
 
 def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
@@ -73,43 +96,42 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
     ax.axhline(10.0, color=MUTED, lw=1.1, ls=(0, (5, 3)), zorder=1)
     # info notes sit in the empty top-right corner (off-scale arrows are on the
     # left/centre) so no extra vertical space is used.
-    ax.text(0.985, 0.975, "– – –  +10% = added-load share (proportional-cost reference)",
+    ax.text(0.985, 0.975, "– – –  +10% = added demand due to data centers",
             transform=ax.transAxes, fontsize=10.5, color=INK_SECONDARY,
             va="top", ha="right")
 
     cap = OUTLIER_PCT
     offscale = []  # (region, strategy label, value)
-    excluded = []  # (region, strategy label)
+    excluded = []  # (region, strategy label) - dropped per PI, noted in caption
+    ymin = 0.0     # extend the axis if any case lowers cost (negative delta)
     for (case, label, color, marker), dx in zip(DC_STRATEGIES, offsets):
         vals = df[f"{case}_delta_pct"].to_numpy(dtype=float)
+        for j, reg in enumerate(order):
+            if reg in EXCLUDE.get(case, set()):
+                excluded.append((reg, label))
+                vals[j] = np.nan            # excluded: not plotted at all
         x = xs + dx
         onscale = np.where(vals <= cap, vals, np.nan)
         ax.scatter(x, onscale, s=46, color=color, marker=marker, label=label,
                    edgecolors="white", linewidths=0.7, zorder=4)
+        fin = onscale[np.isfinite(onscale)]
+        if fin.size:
+            ymin = min(ymin, float(fin.min()))
         for xi, v, reg in zip(x, vals, order):
-            if not np.isfinite(v):
-                # infeasible / excluded scenario (e.g. rooftop PV at high latitude)
-                excluded.append((reg, label))
-                ax.scatter([xi], [1.4], s=48, color=color, marker="x",
-                           linewidths=1.8, zorder=5)
-            elif v > cap:
+            if np.isfinite(v) and v > cap:
                 offscale.append((reg, label, v))
-                ax.annotate("", xy=(xi, cap * 0.95), xytext=(xi, cap * 0.80),
-                            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.6),
-                            zorder=5)
-                ax.text(xi, cap * 0.77, f"{v:.0f}%", ha="center", va="top",
-                        fontsize=7.5, color=color, zorder=5)
+                ax.text(xi, cap * 0.99, f"{v:.0f}%$\\uparrow$", ha="center", va="top",
+                        fontsize=8.5, color=color, zorder=5)
 
-    ax.set_ylim(0, cap)
-    ax.set_ylabel("Cost of powering data centers: increase in\n"
-                  "annual system cost vs no-data-center optimum (%)")
-    if excluded:
-        ax.text(0.985, 0.915, "×  excluded",
-                transform=ax.transAxes, fontsize=10, color=INK_SECONDARY,
-                va="top", ha="right")
+    ax.axhline(0.0, color=MUTED, lw=0.8, zorder=1)   # 0 = no change; below = cost falls
+    ax.set_ylim(ymin * 1.12, cap)
+    ax.set_ylabel("Percent increase, relative to base (no DC), in 2050 regional\n"
+                  "annual energy cost of powering data centers that consume\n"
+                  "the equivalent of 10% of all non-DC end-use energy")
     ax.legend(loc="upper left", ncols=len(DC_STRATEGIES), handletextpad=0.2,
               columnspacing=1.0, borderaxespad=0.3, bbox_to_anchor=(0.0, 1.10))
-    style_region_axis(ax, order)
+    style_region_axis(ax, [cap_region(r) for r in order])
+    minor_ticks(ax)
 
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}")
@@ -120,7 +142,7 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
         print(f"    off-scale (>{cap:.0f}%, up-arrow + value): {note}")
     if excluded:
         note = "; ".join(f"{r} {lab.split('(')[0].strip()}" for r, lab in excluded)
-        print(f"    excluded (marked x): {note}")
+        print(f"    excluded from figure (acknowledge in caption): {note}")
 
 
 def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
@@ -136,15 +158,24 @@ def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
     rng = np.random.default_rng(0)  # deterministic vertical jitter to declutter
     for i, (case, label, color, marker) in enumerate(DC_STRATEGIES):
         y = ny - 1 - i
-        vals = df[f"{case}_delta_pct"].dropna()
+        vals = _case_delta(df, case, "delta_pct").dropna()
         shown = vals[vals <= DIST_XMAX]
         jitter = rng.uniform(-0.22, 0.22, size=len(shown))
         axL.scatter(shown, y + jitter, s=34, color=color, marker=marker,
                     alpha=0.8, edgecolors="white", linewidths=0.6, zorder=3)
         med = vals.median()
-        if med <= DIST_XMAX:
-            axL.plot([med, med], [y - 0.34, y + 0.34], color=INK, lw=2.4, zorder=4)
-            axL.text(med, y + 0.42, f"{med:.1f}%", ha="center", fontsize=10, color=INK)
+        mean = _mean_pct(df, case)   # cost-weighted system mean (PI's aggregate %)
+        # labels sit to the RIGHT of their tick (not centred on it) with a light
+        # white backing so they stay readable over the dots.
+        lbl = dict(fontsize=8.5, color=INK, ha="left", va="center", zorder=5,
+                   bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.75))
+        if med <= DIST_XMAX:         # median: solid tick, upper half
+            axL.plot([med, med], [y + 0.02, y + 0.36], color=INK, lw=2.4, zorder=4)
+            axL.text(med + 0.6, y + 0.19, f"med {med:.1f}%", **lbl)
+        if mean <= DIST_XMAX:        # mean: dashed tick, lower half
+            axL.plot([mean, mean], [y - 0.36, y - 0.02], color=INK, lw=2.4,
+                     ls=(0, (2, 1.5)), zorder=4)
+            axL.text(mean + 0.6, y - 0.19, f"mean {mean:.1f}%", **lbl)
         n_off = int((vals > DIST_XMAX).sum())
         if n_off:
             axL.annotate(f"+{n_off} >{DIST_XMAX:.0f}%  ", xy=(DIST_XMAX, y),
@@ -155,12 +186,14 @@ def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
     axL.set_yticks(range(ny))
     axL.set_yticklabels([s[1] for s in reversed(DC_STRATEGIES)])
     axL.set_ylim(-0.6, ny - 0.4)
-    axL.set_xlabel("Cost increase per region (%; median marked)")
+    axL.set_xlabel("Percent cost increase relative to the base (no DC) "
+                   "(median & mean marked)")
     axL.tick_params(axis="y", length=0)
+    minor_ticks(axL, x=True, y=False)
 
     # Right: total added cost over all regions (bars).
     axR.grid(axis="x", color=GRID, lw=0.7, zorder=0)
-    totals = [df[f"{case}_delta_bil_per_yr"].dropna().sum() for case, *_ in DC_STRATEGIES]
+    totals = [_case_delta(df, case, "delta_bil_per_yr").dropna().sum() for case, *_ in DC_STRATEGIES]
     ypos = list(range(ny))[::-1]
     axR.barh(ypos, totals, height=0.66, color=[s[2] for s in DC_STRATEGIES], zorder=3)
     for y, tot in zip(ypos, totals):
@@ -169,16 +202,17 @@ def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
     axR.set_yticklabels([])
     axR.set_ylim(-0.6, ny - 0.4)
     axR.set_xlim(0, max(totals) * 1.22)
-    axR.set_xlabel("Total added cost, all regions (billion USD yr$^{-1}$)")
+    axR.set_xlabel("Added energy cost due to data centers (2023 USD \\$Bil/y)")
     axR.tick_params(axis="y", length=0)
+    minor_ticks(axR, x=True, y=False)
 
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_dc_strategy_summary.{ext}")
     plt.close(fig)
     print("  wrote fig_dc_strategy_summary.pdf/.png")
-    meds = "; ".join(f"{lab.split('(')[0].strip()} {df[f'{c}_delta_pct'].median():.1f}%"
-                     for c, lab, *_ in DC_STRATEGIES)
-    print(f"    caption stats: median cost increase - {meds}.")
+    stats = "; ".join(f"{lab} med {_case_delta(df, c, 'delta_pct').median():.1f}%"
+                      f"/mean {_mean_pct(df, c):.1f}%" for c, lab, *_ in DC_STRATEGIES)
+    print(f"    caption stats (cost increase per region) - {stats}.")
 
 
 def main(argv=None) -> None:

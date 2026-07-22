@@ -68,6 +68,10 @@ G_FACTORS = "Optimised factors"
 G_COST = "Cost by category (c/kWh, MN)"
 G_GEN = "Generation (TWh/yr)"
 GEN_EXCLUDE = {"Total supply", "Total gen (sum)"}
+# Generation sources the GA actually adjusts (via the wind / PV / solar-thermal
+# capacity factors).  Hydro, geothermal, wave, tidal are NOT design variables, so
+# their share only moves because the total shifts -> not shown as a change.
+GEN_ADJUSTED = {"Wind", "Solar", "Solar heat"}
 
 # Optimised factors that scale GENERATION capacity (wind / PV / solar-thermal /
 # CSP turbine); everything else is storage duration/power + dispatch.  Used to
@@ -77,6 +81,37 @@ GEN_FACTORS = {"FACONWIN", "FACOFFWIN", "FACUTILPV", "FACRESPV", "FACCOMPV",
 # Factors that are held fixed (not GA design variables) and so are not shown as a
 # structural "change": CPERFORM (heat-pump COP) is a physical constant.
 FACTOR_EXCLUDE = {"CPERFORM"}
+
+# Human-readable tick labels (the raw keys are model-internal variable names).
+FACTOR_LABELS = {
+    "FACONWIN": "Onshore wind", "FACOFFWIN": "Offshore wind",
+    "FACUTILPV": "Utility-scale PV", "FACRESPV": "Residential PV",
+    "FACCOMPV": "Commercial PV", "FACSHT": "Solar thermal heat",
+    "CSPTURBFAC": "CSP turbine",
+    "BATDISCH": "Battery discharge rate", "STORHBAT": "Battery duration",
+    "STORHCOLD": "Cold-storage duration", "STORHHWAT": "Hot-water STES duration",
+    "STORHPHS": "Pumped-hydro duration", "STORUGDYS": "Seasonal UTES duration",
+    "DAYH2STOR": "H$_2$ storage duration",
+    "FCDISCH": "Fuel-cell discharge rate", "FCCHARG": "Electrolyser charge rate",
+}
+COST_LABELS = {
+    "SHORT-DIST TRANSMISS": "Short-distance transmission",
+    "LONG-DIST-TRANS": "Long-distance transmission",
+    "DISTRIBUTION": "Distribution",
+    "ELECTRICITY GEN ONLY": "Electricity generation",
+    "ADDED-HYDRO-TURBS": "Added hydro turbines",
+    "SOLAR+GEOTHERM HEAT": "Solar + geothermal heat",
+    "LI-BATTERY STORAGE": "Li-ion battery storage",
+    "H2-ELEC PROD/STOR/FC": "H$_2$ electricity (prod./stor./FC)",
+    "CSPPCM + PHS STORAGE": "CSP-PCM + pumped-hydro storage",
+    "CWSTES+PCMICE STOR": "Cold-water STES + PCM-ice storage",
+    "HWSTES STORAGE": "Hot-water STES storage",
+    "UTES STORAGE": "Seasonal UTES storage",
+    "HPUMPS FOR HWST+UTES": "Heat pumps (HW-STES + UTES)",
+    "INDUS FIREBRICK STOR": "Industrial firebrick storage",
+    "H2-PROD/COMP/STOR": "H$_2$ prod./compression/storage",
+    "ALL-NONH2-STORAGE": "All non-H$_2$ storage",
+}
 
 apply_style()
 
@@ -232,18 +267,18 @@ def fig_factor_changes(df, outdir, regions, case_a, case_b, linthresh=20.0):
                     fontsize=8.5, color=color)
     ax.set_xlim(left, pos * 1.15)
     ax.set_yticks(range(ny))
-    ax.set_yticklabels([_short(c) for c in reversed(order)])
+    ax.set_yticklabels([FACTOR_LABELS.get(_short(c), _short(c)) for c in reversed(order)])
     ax.set_ylim(-0.6, ny - 0.4)
     ax.tick_params(axis="y", length=0)
     # group the rows: generation capacity on top, storage & dispatch below
     if 0 < n_gen < ny:
         ax.axhline(ny - n_gen - 0.5, color=INK, lw=1.3, zorder=5)
     if n_gen:
-        ax.text(-0.16, ny - (n_gen + 1) / 2, "Generation capacity", transform=ytr,
+        ax.text(-0.26,ny - (n_gen + 1) / 2, "Generation capacity", transform=ytr,
                 rotation=90, ha="center", va="center", fontsize=11,
                 fontweight="bold", color=INK)
     if n_gen < ny:
-        ax.text(-0.16, (ny - 1 - n_gen) / 2, "Storage & dispatch", transform=ytr,
+        ax.text(-0.26,(ny - 1 - n_gen) / 2, "Storage & dispatch", transform=ytr,
                 rotation=90, ha="center", va="center", fontsize=11,
                 fontweight="bold", color=INK)
     ax.set_xlabel("Change in optimised factor vs trial-and-error "
@@ -273,7 +308,7 @@ def fig_cost_change_by_category(df, outdir, regions, case_a, case_b):
         return
     order = sorted(keep, key=lambda c: -np.nanmax(both[c].to_numpy()))
     _diag_heatmap(dA[order].to_numpy().T, dB[order].to_numpy().T,
-                  [_short(c) for c in order], regions,
+                  [COST_LABELS.get(_short(c), _short(c)) for c in order], regions,
                   "Cost change (c/kWh)", "fig_cost_change_by_category", outdir)
     print("  wrote fig_cost_change_by_category.pdf/.png")
     print(f"    caption stats: {len(order)} cost categories change (c/kWh); blue = "
@@ -281,28 +316,31 @@ def fig_cost_change_by_category(df, outdir, regions, case_a, case_b):
 
 
 def fig_generation_mix_change(df, outdir, regions, case_a, case_b):
-    cols = _cols_in_group(df, G_GEN, exclude=GEN_EXCLUDE)
-    base = _case_matrix(df, cols, BASELINE_CASE, regions)
+    # Share denominator = ALL generation sources (so shares are of total output)...
+    cols_all = _cols_in_group(df, G_GEN, exclude=GEN_EXCLUDE)
+    base = _case_matrix(df, cols_all, BASELINE_CASE, regions)
     base_sh = base.div(base.sum(axis=1), axis=0) * 100.0
 
     def dshare(case):
-        opt = _case_matrix(df, cols, case, regions)
+        opt = _case_matrix(df, cols_all, case, regions)
         return opt.div(opt.sum(axis=1), axis=0) * 100.0 - base_sh
 
     dA, dB = dshare(case_a), dshare(case_b)
-    both = pd.concat([dA.abs(), dB.abs()])
-    keep = [c for c in cols if np.nanmax(both[c].to_numpy()) > 1e-3]
-    if not keep:
-        print("  [SKIP] fig_generation_mix_change: no generation share changed.")
+    # ...but show only the sources the GA actually adjusts (wind / PV / solar-
+    # thermal); the rest are not design variables.
+    cols = [c for c in cols_all if _short(c) in GEN_ADJUSTED]
+    if not cols:
+        print("  [SKIP] fig_generation_mix_change: no adjusted generation sources present.")
         return
-    order = sorted(keep, key=lambda c: -np.nanmax(both[c].to_numpy()))
+    both = pd.concat([dA[cols].abs(), dB[cols].abs()])
+    order = sorted(cols, key=lambda c: -np.nanmax(both[c].to_numpy()))
     _diag_heatmap(dA[order].to_numpy().T, dB[order].to_numpy().T,
                   [_short(c) for c in order], regions,
                   "Δ share of total generation (pp)",
                   "fig_generation_mix_change", outdir)
     print("  wrote fig_generation_mix_change.pdf/.png")
-    print("    caption stats: change in each source's share of total generation "
-          "(optimised share minus baseline share, percentage points).")
+    print("    caption stats: change in each GA-adjusted source's share of total "
+          "generation (optimised minus baseline, percentage points).")
 
 
 def main(argv=None):
