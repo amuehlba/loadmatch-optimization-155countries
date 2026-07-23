@@ -33,7 +33,8 @@
 # ============================================================================
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
-source .venv/bin/activate 2>/dev/null || true
+module load python/3.9.0        # provides libpython3.9.so; the venv alone does not
+source .venv/bin/activate
 
 R=data/results_verification
 OUT=$R/wwshourly_US
@@ -49,15 +50,23 @@ run() {  # $1=case label   $2=seed dir (under $R)   $3..=extra scenario flags
   echo "=================================================================="
   echo "  $label   seed=$seeddir   scenario flags: $*"
   echo "=================================================================="
-  python -m scripts.run_full_workflow --region UNITED-STATES \
-      --baseline-start "$seed" --evaluate-only --parallel-evals 1 \
-      --out-suffix wwsdump --no-plots "$@"
-  if [ -f "$WH" ]; then
-    cp -f "$WH" "$OUT/wwshourly.UNITED-STATES.$label"
-    echo "  saved -> $OUT/wwshourly.UNITED-STATES.$label"
+  # Timestamp reference so we only copy a wwshourly THIS run actually produced,
+  # never a stale one left over from a failed run.
+  local marker="$OUT/.marker.$label"
+  : > "$marker"
+  if python -m scripts.run_full_workflow --region UNITED-STATES \
+        --baseline-start "$seed" --evaluate-only --parallel-evals 1 \
+        --out-suffix wwsdump --no-plots "$@"; then
+    if [ -f "$WH" ] && [ "$WH" -nt "$marker" ]; then
+      cp -f "$WH" "$OUT/wwshourly.UNITED-STATES.$label"
+      echo "  saved -> $OUT/wwshourly.UNITED-STATES.$label"
+    else
+      echo "  ERROR: $WH was not (re)written by the $label run; NOT copying."
+    fi
   else
-    echo "  WARNING: $WH not found after the $label run"
+    echo "  ERROR: the $label run failed (python exit $?); NOT copying."
   fi
+  rm -f "$marker"
 }
 
 run base   UNITED-STATES

@@ -343,28 +343,55 @@ def _draw_nameplate_global(ax, legend_ax, tables):
 
     n = len(labels)
     xs = np.arange(n)
-    dx, w = 0.23, 0.4
+    dx, w = 0.23, 0.38
     ymax = max(max(gen_tot), max(sto_tot)) * 1.16
+    min_gap = 0.045 * ymax
     halo = [pe.withStroke(linewidth=1.6, foreground="black")]
     ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
 
-    def stack(xc, groups, vals, tot):
+    def stack(xc, groups, vals, tot, side):
+        """Draw one stacked column type; label big segments inside and smaller
+        ones (>=0.3 TW) outside with a leader line on the given side (generation
+        labels to the left, storage to the right) -- de-overlapped vertically."""
         bottoms = np.zeros(n)
+        outside = [[] for _ in range(n)]
         for (glabel, gcolor, _), gv in zip(groups, vals):
             gv = np.asarray(gv, float)
             ax.bar(xc, gv, width=w, bottom=bottoms, color=gcolor, label=glabel,
                    edgecolor="white", linewidth=0.5, zorder=3)
-            for x, v, b in zip(xc, gv, bottoms):
-                if v > 0 and v / ymax >= 0.045:
-                    ax.text(x, b + v / 2, f"{v:.1f}", ha="center", va="center", fontsize=7,
+            for ci, (x, v, b) in enumerate(zip(xc, gv, bottoms)):
+                if v <= 0:
+                    continue
+                yc = b + v / 2
+                if v / ymax >= 0.028:
+                    ax.text(x, yc, f"{v:.1f}", ha="center", va="center", fontsize=7,
                             color="white", zorder=6, path_effects=halo)
+                elif v >= 0.3:
+                    outside[ci].append([yc, f"{v:.1f}", gcolor])
             bottoms += gv
+        for ci, items in enumerate(outside):
+            items.sort(key=lambda e: e[0])
+            last = -1e9
+            for yc, text, gcolor in items:
+                y = max(yc, last + min_gap)
+                last = y
+                x = xc[ci]
+                if side == "left":
+                    xseg, xlab = x - w / 2, x - w / 2 - 0.05
+                    ax.plot([xseg, xlab], [yc, y], color=gcolor, lw=0.6, zorder=5)
+                    ax.text(xlab - 0.02, y, text, ha="right", va="center", fontsize=7,
+                            color=gcolor, zorder=6)
+                else:
+                    xseg, xlab = x + w / 2, x + w / 2 + 0.05
+                    ax.plot([xseg, xlab], [yc, y], color=gcolor, lw=0.6, zorder=5)
+                    ax.text(xlab + 0.02, y, text, ha="left", va="center", fontsize=7,
+                            color=gcolor, zorder=6)
         for x, t in zip(xc, tot):
             ax.text(x, t, f"{t:.1f}", ha="center", va="bottom", fontsize=8.5,
                     fontweight="bold", color=INK)
 
-    stack(xs - dx, NP_GROUPS, gen_vals, gen_tot)
-    stack(xs + dx, STORAGE_GROUPS, sto_vals, sto_tot)
+    stack(xs - dx, NP_GROUPS, gen_vals, gen_tot, "left")
+    stack(xs + dx, STORAGE_GROUPS, sto_vals, sto_tot, "right")
 
     # two-level x labels: Gen/Stor under each bar, case name under the pair
     tr = ax.get_xaxis_transform()
@@ -378,20 +405,21 @@ def _draw_nameplate_global(ax, legend_ax, tables):
     ax.set_xticks(xs)
     ax.set_xticklabels(labels, fontsize=10)
     ax.tick_params(axis="x", length=0, pad=16)
-    ax.set_xlim(-0.6, n - 0.4)
+    ax.set_xlim(-0.85, n - 0.15)
     minor_ticks(ax)
 
-    # legends (generation + storage) in the side panel
+    # legends (generation + storage) in the side panel, both flush-left
     from matplotlib.patches import Patch
     legend_ax.axis("off")
     gh = [Patch(fc=c, label=l) for l, c, _ in NP_GROUPS]
     sh = [Patch(fc=c, label=l) for l, c, _ in STORAGE_GROUPS]
     leg1 = legend_ax.legend(handles=gh, loc="upper left", bbox_to_anchor=(0.0, 1.0),
-                            fontsize=9, frameon=False, title="Generation", title_fontsize=10.5)
+                            fontsize=9, frameon=False, title="Generation",
+                            title_fontsize=10.5, alignment="left", borderaxespad=0.0)
     legend_ax.add_artist(leg1)
     legend_ax.legend(handles=sh, loc="lower left", bbox_to_anchor=(0.0, 0.0),
                      fontsize=9, frameon=False, title="Storage (discharge power)",
-                     title_fontsize=10.5)
+                     title_fontsize=10.5, alignment="left", borderaxespad=0.0)
     print("    2050 nameplate gen/storage (TW): "
           + "; ".join(f"{l} {g:.1f}/{s:.1f}" for l, g, s in zip(labels, gen_tot, sto_tot)))
 

@@ -25,7 +25,8 @@ from scripts.parse_fortran_output import (
 # import (plot_results imports PARAM_REGISTRY etc. from this module).
 
 MIN_FACTOR = 0.05
-FORTRAN_EXE = Path("fortran/bin/powerworld").resolve()
+FORTRAN_EXE = Path(os.environ.get("LOADMATCH_FORTRAN_EXE",
+                                  "fortran/bin/powerworld")).resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
 WORKSPACE_BASE = Path("data/tmp_workspaces")
 

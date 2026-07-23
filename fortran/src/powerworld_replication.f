@@ -817,11 +817,11 @@ C RES+COM PV OWNERS SEND 10-35% OF ELEC BACK TO GRID WITH BATTERIES.
 C https://solartechonline.com/blog/solar-self-consumption-guide/.
 C
       DATA SDTRCOSL
-     1    /1.0,    1.0,    0.25,   0.25,   1.0,    1.0,    1.0,    1.0,
+     1    /1.0,    1.0,    1.0,    1.0,    1.0,    1.0,    1.0,    1.0,
      1     1.0,    1.0,    1.0,    1.0,    1.0,    1.0  /
 C     
       DATA SDTRCOSH
-     1    /1.1,    1.1,    0.275,  0.275,  1.1,    1.1,    1.1,    1.1,
+     1    /1.1,    1.1,    1.1,    1.1,    1.1,    1.1,    1.1,    1.1,
      1     1.1,    1.1,    1.1,    1.1,    1.1,    1.1  /
 C
 C DISTCOSL = LOW  DISTRIBUTION COST (CENTS/KWH)
@@ -836,11 +836,11 @@ C            ONWIND OFFWIND RESPV  COMPV UTILPV CSPSTOR CSPNOSTOR GEOELEC
 C            HYDRO   TIDAL  WAVE  SOLTHERM GEOHEAT EGS 
 C     
       DATA DISTCOSL
-     1    /2.3,    2.3,    0.575,  0.575,  2.3,    2.3,    2.3,    2.3,
+     1    /2.3,    2.3,    2.3,    2.3,    2.3,    2.3,    2.3,    2.3,
      1     2.3,    2.3,    2.3,    2.3,    2.3,    2.3  /
 C     
       DATA DISTCOSH
-     1    /2.45,   2.45,   0.6125, 0.6125, 2.45,   2.45,   2.45,   2.45,
+     1    /2.45,   2.45,   2.45,   2.45,   2.45,   2.45,   2.45,   2.45,
      1     2.45,   2.45,   2.45,   2.45,   2.45,   2.45  /
 C
 C *****************************************************************************
@@ -19736,9 +19736,9 @@ C     COSTLDTHI  = 1.00
 C
 C 2023 VALUES FOR 155-COUNTRY PAPER 
 C
-      COSTLDTLO  = 0.44  
-      COSTLDTMN  = 0.94   
-      COSTLDTHI  = 1.75  
+      COSTLDTLO  = 0.42  
+      COSTLDTMN  = 0.89   
+      COSTLDTHI  = 1.00  
 
 C
 C TSUMELEC  = TWH ALL WIND + ALL SOLAR + HYDRO + WAVE + GEOTHERM + TIDAL
