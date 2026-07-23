@@ -6,10 +6,15 @@
 # scratch campaign, and all five data-center cases — while keeping AT MOST TWO
 # job arrays in the queue (running or pending) at any time:
 #
-#   wave 1:  base  +  scratch            (independent of each other)
-#   wave 2:  dc case1  +  dc case2       (start only after base SUCCEEDED,
-#   wave 3:  dc case3  +  dc case2bat     since dc cases seed from the new
-#   wave 4:  dc case2h2                   base optima)
+#   - scratch runs in the BACKGROUND for the whole campaign (the long pole; it
+#     feeds nothing downstream, so nothing waits on it)
+#   - base runs alongside scratch (2 arrays)
+#   - as soon as base SUCCEEDS, the five dc cases run ONE AT A TIME
+#     (case1, case2, case3, case2bat, case2h2), each seeding from the new base
+#     optima; dc does NOT wait for scratch
+#
+# So at every instant there are at most TWO arrays: scratch + (base, then one
+# dc case).  The first dc case starts the moment base finishes.
 #
 # The supervisor itself is one lightweight plain job (not an array).  If the
 # base array reports any failure, the data-center waves are NOT started (they
