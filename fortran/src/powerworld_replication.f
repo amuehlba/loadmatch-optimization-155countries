@@ -16816,11 +16816,14 @@ C EXCESIN   = INFLEXIBLE CURRENT DEMAND (TWH) IN EXCESS OF CURRENT SUPPLY
 C PKHYDISCH = MAX DISCHARGE RATE HYDRO FOR PEAKING POWER ALONE (TW) BEFORE T&D
 C           = HYDISCHTW - BASEHYD 
 C
-C EXCESIN STOP tolerance loosened 1.0E-12 -> 1.0E-6 TWh (2026-07-15, TEST;
-C pending PI sign-off).  The 1e-12 test STOPs the whole 3-year run on a
-C rounding-level per-step excess (NEW-ZEALAND case1 hit 9e-8 TWh at one step),
-C which is physically negligible.  Revert to 1.0E-12 for the stricter criterion.
-         IF (EXCESIN.GT.1.0E-6) THEN
+C EXCESIN STOP tolerance: 1.0E-12 TWh (strict; essentially zero unmet inflexible
+C load, a machine-noise floor only).  A larger ABSOLUTE tolerance cannot work
+C across regions spanning orders of magnitude in size: a brief 1.0E-6 TWh setting
+C exceeded GREENLAND's ~1E-6 TWh per-step demand, letting the GA zero out
+C generation and leave a full step's load unmet under the threshold, so energy
+C did not conserve (found 2026-07-25).  Kept strict; genuinely marginal cases are
+C fixed by nudging one design variable to real feasibility, not by loosening this.
+         IF (EXCESIN.GT.1.0E-12) THEN
           WRITE(IOUT,208)
           WRITE(IOUT,285) TIMWWS(J)/HRSPDAY, STORTEM,EXCESIN,STORSUB,
      1       SUPPLY(J), SUPPHT(J), WARMTWH, COLDTWH,FLEXLOAD,FLEXH2LD,

@@ -1,5 +1,5 @@
 --- docs/powerworld_260723.f	2026-07-23 10:12:05
-+++ fortran/src/powerworld.f	2026-07-23 10:24:21
++++ fortran/src/powerworld.f	2026-07-25 13:20:40
 @@ -661,10 +661,14 @@
  C GRIDNAM = NAME OF GRID WHEN READ IN FROM countrystats.dat
  C GRIDUSE = NAME OF GRID REGION SIMULATED FOR PRESENT SIMULATION (SET HERE)
@@ -268,24 +268,24 @@
  C     
        SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
       1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
-@@ -16766,7 +16816,11 @@
+@@ -16766,6 +16816,13 @@
  C PKHYDISCH = MAX DISCHARGE RATE HYDRO FOR PEAKING POWER ALONE (TW) BEFORE T&D
  C           = HYDISCHTW - BASEHYD 
  C
--         IF (EXCESIN.GT.1.0E-12) THEN
-+C EXCESIN STOP tolerance loosened 1.0E-12 -> 1.0E-6 TWh (2026-07-15, TEST;
-+C pending PI sign-off).  The 1e-12 test STOPs the whole 3-year run on a
-+C rounding-level per-step excess (NEW-ZEALAND case1 hit 9e-8 TWh at one step),
-+C which is physically negligible.  Revert to 1.0E-12 for the stricter criterion.
-+         IF (EXCESIN.GT.1.0E-6) THEN
++C EXCESIN STOP tolerance: 1.0E-12 TWh (strict; essentially zero unmet inflexible
++C load, a machine-noise floor only).  A larger ABSOLUTE tolerance cannot work
++C across regions spanning orders of magnitude in size: a brief 1.0E-6 TWh setting
++C exceeded GREENLAND's ~1E-6 TWh per-step demand, letting the GA zero out
++C generation and leave a full step's load unmet under the threshold, so energy
++C did not conserve (found 2026-07-25).  Kept strict; genuinely marginal cases are
++C fixed by nudging one design variable to real feasibility, not by loosening this.
+          IF (EXCESIN.GT.1.0E-12) THEN
            WRITE(IOUT,208)
            WRITE(IOUT,285) TIMWWS(J)/HRSPDAY, STORTEM,EXCESIN,STORSUB,
-      1       SUPPLY(J), SUPPHT(J), WARMTWH, COLDTWH,FLEXLOAD,FLEXH2LD,
-@@ -21443,4 +21497,222 @@
- C *****************************************************************************
+@@ -21444,3 +21501,221 @@
  C
        STOP
-+      END
+       END
 +
 +      SUBROUTINE READ_FACTOR_OVERRIDES(PATHHOME, REGION,
 +     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
@@ -477,7 +477,7 @@
 +      WRITE(*,'(A,1PE12.5)') '  STORHHBT   = ', STORHHBT
 +      WRITE(*,'(A,1PE12.5)') '  FRCIHFLEX  = ', FRCIHFLEX
 +      RETURN
-       END
++      END
 +
 +      INTEGER FUNCTION LEN_TRIM_F77(STR)
 +      CHARACTER*(*) STR

@@ -76,22 +76,38 @@ echo "=================================================================="
 echo "Re-eval CASE=$CASE  over ${#REGIONS[@]} regions   ($(date))  Host: $(hostname)"
 echo "=================================================================="
 
-nok=0; nskip=0; nfail=0
+# Regions to skip (space-separated), e.g. run GREENLAND separately via its
+# re-optimization: sbatch --export=ALL,SKIP_REGIONS=GREENLAND scripts/reeval_all_slurm.sh
+SKIP_REGIONS="${SKIP_REGIONS:-}"
+
+nok=0; nskip=0; nfail=0; ninfeas=0; flagged=""
 for REGION in "${REGIONS[@]}"; do
+  case " $SKIP_REGIONS " in
+    *" $REGION "*) echo "SKIP $REGION ($CASE): in SKIP_REGIONS"; nskip=$((nskip+1)); continue ;;
+  esac
   seed_and_flags "$REGION"
   if [ ! -f "$SEED" ]; then
     echo "SKIP $REGION ($CASE): no saved optimum at $SEED"
     nskip=$((nskip + 1)); continue
   fi
   echo "--- $REGION ($CASE)   $(date) ---"
-  if python -m scripts.run_full_workflow --region "$REGION" \
+  LOG=$(mktemp)
+  python -m scripts.run_full_workflow --region "$REGION" \
        --baseline-start "$SEED" --evaluate-only --parallel-evals 2 \
-       --max-land-pct 7 --no-plots $EXTRA; then
+       --max-land-pct 7 --no-plots $EXTRA >"$LOG" 2>&1
+  rc=$?
+  cat "$LOG"
+  if grep -q "\[evaluate\] feasible=True" "$LOG"; then
     nok=$((nok + 1))
+  elif grep -qE "REMAINING INFLEX LOAD|EXCESIN\)>0|feasible=False|UNMET|UNSERVED" "$LOG"; then
+    echo "*** INFEASIBLE: $REGION ($CASE) ***"
+    ninfeas=$((ninfeas + 1)); flagged="$flagged $REGION"
   else
-    echo "WARNING: $REGION ($CASE) re-eval failed"
-    nfail=$((nfail + 1))
+    echo "WARNING: $REGION ($CASE) re-eval failed (rc=$rc, no feasibility verdict)"
+    nfail=$((nfail + 1)); flagged="$flagged ${REGION}(fail)"
   fi
+  rm -f "$LOG"
 done
 
-echo "=== CASE=$CASE complete: ok=$nok skipped=$nskip failed=$nfail   ($(date)) ==="
+echo "=== CASE=$CASE complete: ok=$nok infeasible=$ninfeas skipped=$nskip failed=$nfail   ($(date)) ==="
+[ -n "$flagged" ] && echo "=== CASE=$CASE INFEASIBLE/FAILED:$flagged ==="
