@@ -15,6 +15,8 @@ export_dc_comparison.py) and produces two landscape, journal-style figures:
   fig_dc_strategy_summary two panels: per-strategy distribution of the cost
                           increase across regions (median marked), and the total
                           added cost over all 30 regions.
+  fig_dc_combined         the two above stacked into one figure: (a) the strategy
+                          summary on top, (b) the per-region cost plot below.
 
 Strategy identity is encoded redundantly (colour + marker shape), so the figures
 survive greyscale printing and colour-vision deficiency.  No titles or on-figure
@@ -82,13 +84,13 @@ def _load(csv_path: Path) -> pd.DataFrame:
     return df.sort_values("region", key=lambda s: s.map(region_sort_key))
 
 
-def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
+def _draw_cost_by_region(ax, df):
+    """Draw the per-region dodged dot plot on *ax*.  Returns (offscale, excluded)
+    lists for the caption note."""
     order = list(df["region"])
     n = len(order)
     xs = np.arange(n)
     offsets = np.linspace(-0.32, 0.32, len(DC_STRATEGIES))
-
-    fig, ax = plt.subplots(figsize=(16.0, 6.8))
 
     # Alternating vertical banding groups the five markers belonging to a region.
     add_region_bands(ax, n)
@@ -132,11 +134,11 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
               columnspacing=1.0, borderaxespad=0.3, bbox_to_anchor=(0.0, 1.10))
     style_region_axis(ax, [cap_region(r) for r in order])
     minor_ticks(ax)
+    return offscale, excluded
 
-    for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}")
-    plt.close(fig)
-    print("  wrote fig_dc_cost_by_region.pdf/.png")
+
+def _print_by_region_caption(offscale, excluded):
+    cap = OUTLIER_PCT
     if offscale:
         note = "; ".join(f"{r} {lab.split('(')[0].strip()} {v:,.0f}%" for r, lab, v in offscale)
         print(f"    off-scale (>{cap:.0f}%, up-arrow + value): {note}")
@@ -145,15 +147,10 @@ def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
         print(f"    excluded from figure (acknowledge in caption): {note}")
 
 
-def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
+def _draw_strategy_dist(axL, df):
+    """Left summary sub-panel: per-strategy distribution of the per-region cost
+    increase (strip + median/mean ticks)."""
     ny = len(DC_STRATEGIES)
-    fig, (axL, axR) = plt.subplots(
-        1, 2, figsize=(14.5, 4.6), gridspec_kw={"width_ratios": [1.25, 1.0],
-                                                "wspace": 0.08})
-
-    # Left: distribution of the per-region cost increase per strategy (strip +
-    # median). Extreme tails beyond DIST_XMAX are annotated rather than plotted so
-    # the axis resolves the bulk of the distribution.
     axL.grid(axis="x", color=GRID, lw=0.7, zorder=0)
     rng = np.random.default_rng(0)  # deterministic vertical jitter to declutter
     for i, (case, label, color, marker) in enumerate(DC_STRATEGIES):
@@ -191,7 +188,10 @@ def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
     axL.tick_params(axis="y", length=0)
     minor_ticks(axL, x=True, y=False)
 
-    # Right: total added cost over all regions (bars).
+
+def _draw_strategy_totals(axR, df):
+    """Right summary sub-panel: total added cost over all regions (bars)."""
+    ny = len(DC_STRATEGIES)
     axR.grid(axis="x", color=GRID, lw=0.7, zorder=0)
     totals = [_case_delta(df, case, "delta_bil_per_yr").dropna().sum() for case, *_ in DC_STRATEGIES]
     ypos = list(range(ny))[::-1]
@@ -206,13 +206,63 @@ def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
     axR.tick_params(axis="y", length=0)
     minor_ticks(axR, x=True, y=False)
 
+
+def _print_summary_caption(df):
+    stats = "; ".join(f"{lab} med {_case_delta(df, c, 'delta_pct').median():.1f}%"
+                      f"/mean {_mean_pct(df, c):.1f}%" for c, lab, *_ in DC_STRATEGIES)
+    print(f"    caption stats (cost increase per region) - {stats}.")
+
+
+def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(16.0, 6.8))
+    offscale, excluded = _draw_cost_by_region(ax, df)
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}")
+    plt.close(fig)
+    print("  wrote fig_dc_cost_by_region.pdf/.png")
+    _print_by_region_caption(offscale, excluded)
+
+
+def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
+    fig, (axL, axR) = plt.subplots(
+        1, 2, figsize=(14.5, 4.6), gridspec_kw={"width_ratios": [1.25, 1.0],
+                                                "wspace": 0.08})
+    _draw_strategy_dist(axL, df)
+    _draw_strategy_totals(axR, df)
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_dc_strategy_summary.{ext}")
     plt.close(fig)
     print("  wrote fig_dc_strategy_summary.pdf/.png")
-    stats = "; ".join(f"{lab} med {_case_delta(df, c, 'delta_pct').median():.1f}%"
-                      f"/mean {_mean_pct(df, c):.1f}%" for c, lab, *_ in DC_STRATEGIES)
-    print(f"    caption stats (cost increase per region) - {stats}.")
+    _print_summary_caption(df)
+
+
+def fig_dc_combined(df: pd.DataFrame, outdir: Path) -> None:
+    """Single figure: (a) the strategy summary (distribution + totals) on top,
+    (b) the per-region cost dot plot below."""
+    fig = plt.figure(figsize=(16.0, 12.4))
+    gs = fig.add_gridspec(2, 1, height_ratios=[4.6, 6.8], hspace=0.42)
+    gs_top = gs[0].subgridspec(1, 2, width_ratios=[1.25, 1.0], wspace=0.08)
+    axL = fig.add_subplot(gs_top[0])
+    axR = fig.add_subplot(gs_top[1])
+    axB = fig.add_subplot(gs[1])
+
+    _draw_strategy_dist(axL, df)
+    _draw_strategy_totals(axR, df)
+    offscale, excluded = _draw_cost_by_region(axB, df)
+
+    # panel labels: (a) above the top row, (b) above the bottom panel, both at the
+    # figure's left edge so they clear the y-tick labels and the by-region legend.
+    fig.text(0.012, axL.get_position().y1 + 0.015, "a",
+             fontsize=17, fontweight="bold", va="bottom", ha="left")
+    fig.text(0.012, axB.get_position().y1 + 0.020, "b",
+             fontsize=17, fontweight="bold", va="bottom", ha="left")
+
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_dc_combined.{ext}")
+    plt.close(fig)
+    print("  wrote fig_dc_combined.pdf/.png")
+    _print_summary_caption(df)
+    _print_by_region_caption(offscale, excluded)
 
 
 def main(argv=None) -> None:
@@ -229,6 +279,7 @@ def main(argv=None) -> None:
         return
     fig_dc_cost_by_region(df, args.outdir)
     fig_dc_strategy_summary(df, args.outdir)
+    fig_dc_combined(df, args.outdir)
 
 
 if __name__ == "__main__":
