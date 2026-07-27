@@ -1150,7 +1150,8 @@ def _scratch_storage_anchor(region: str) -> Dict[str, float]:
 
 
 def _scratch_seed_population(feasible_factors: Dict[str, float],
-                             locked: Sequence[str] = ()) -> List[Dict[str, float]]:
+                             locked: Sequence[str] = (),
+                             rate_up: bool = False) -> List[Dict[str, float]]:
     """Deliberately spread starting individuals for the scratch GA.
 
     A population made only of small mutations of one bootstrap point collapses
@@ -1171,6 +1172,8 @@ def _scratch_seed_population(feasible_factors: Dict[str, float],
                     and k.lower() not in locked_lower]
     capacity_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"
                      and k.lower() not in locked_lower]
+    rate_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "tw"
+                 and k.lower() not in locked_lower]
 
     def scaled(s_mult=1.0, f_mult=1.0):
         v = feasible_factors.copy()
@@ -1180,6 +1183,12 @@ def _scratch_seed_population(feasible_factors: Dict[str, float],
             v[k] = _clamp(k, v[k] * f_mult)
         return v
 
+    def rate_scaled(variant, r_mult):
+        v = variant.copy()
+        for k in rate_keys:
+            v[k] = _clamp(k, v[k] * r_mult)
+        return v
+
     variants = []
     for s in (0.25, 0.5, 0.75):
         variants.append(scaled(s_mult=s))
@@ -1187,6 +1196,21 @@ def _scratch_seed_population(feasible_factors: Dict[str, float],
         variants.append(scaled(f_mult=f))
     for s, f in ((0.5, 1.2), (0.25, 1.4), (0.75, 0.9), (0.5, 0.8)):
         variants.append(scaled(s_mult=s, f_mult=f))
+
+    # Data-center runs: storage-POWER-up variants.  The PI's hand solutions meet
+    # the added load by raising the discharge/charge RATE (plus a little
+    # generation), a direction ordinary mutation cannot climb because the rate
+    # levers start near zero, so multiplicative steps crawl -- and the storage
+    # block above is otherwise only scaled DOWN.  Injecting high-rate genetic
+    # material (alone, and paired with the capacity spread) lets elitist
+    # selection and crossover combine it with the bootstrap's generation to
+    # reach the cheap basin.  Locked rate levers (WSB pins the H2 pair, WSH pins
+    # the battery) are excluded, so this never drifts a locked value.
+    if rate_up and rate_keys:
+        for r in (2.0, 4.0, 8.0):
+            variants.append(rate_scaled(feasible_factors, r))
+        variants.append(rate_scaled(scaled(f_mult=0.7), 8.0))   # power up, capacity down
+        variants.append(rate_scaled(scaled(f_mult=1.3), 4.0))   # power up, capacity up
     return variants
 
 
@@ -1256,41 +1280,52 @@ def _refine_between(infeasible_factors, feasible_factors, region, paths,
     return None
 
 
-# Data-center feasibility probes: generation-first, wind-first (PI insight:
-# the added data-center load is constant, which wind output matches far better
-# than solar, and hand-tuned wind-only solutions exist at ~10-20% added cost).
-# The generic inflation bootstrap raises ALL free variables together, which
-# never visits the wind-only direction and strands the GA in an overbuilt basin.
+# Data-center feasibility probes: power-first, then wind, then generation (PI
+# insight: the added data-center load is constant and is met cheaply by more
+# storage discharge/charge RATE, or by wind, which matches the constant load far
+# better than solar; the PI's hand solutions raise the rate plus a little
+# generation and sit at ~10-20% added cost).  The generic inflation bootstrap
+# raises ALL free variables together, which never visits these directions and
+# strands the GA in an overbuilt-generation basin with the rate levers unused.
 _DC_PROBE_STEPS = (1.15, 1.3, 1.5, 1.75, 2.0, 2.5, 3.0)
+# Storage-power (discharge/charge rate) levers start near zero, so reaching
+# feasibility on them needs much larger multiplicative steps than generation.
+_DC_RATE_PROBE_STEPS = (1.5, 2.0, 3.0, 5.0, 8.0, 12.0)
 _WIND_KEYS = ("FACONWIN", "FACOFFWIN")
+_STORAGE_RATE_KEYS = tuple(k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "tw")
 
 
 def _dc_directional_bootstrap(base_factors, locked, region, paths, parallel_evals):
-    """Generation-only feasibility search for data-center runs.
+    """Directional feasibility search for data-center runs.
 
-    Stage 1 scales ONLY the free wind factors of the seed through
-    _DC_PROBE_STEPS (one parallel batch); stage 2 scales all free electric
-    generation factors jointly, storage untouched.  The first feasible
-    candidate is grid-refined back toward its predecessor.  Returns
-    (factors, cost, stdout_or_None), or None when no generation-only candidate
-    is feasible (caller falls back to the generic inflation bootstrap)."""
+    Scales one lever group of the seed at a time through per-stage probe steps
+    (one parallel batch each), cheapest lever first: the free storage-power
+    (discharge/charge rate) keys, then the free wind factors, then all free
+    electric generation factors jointly.  Storage energy is left untouched.  The
+    first feasible candidate is grid-refined back toward its predecessor.
+    Returns (factors, cost, stdout_or_None), or None when no single-group
+    candidate is feasible (caller falls back to the generic inflation
+    bootstrap)."""
     locked_lower = {k.lower() for k in (locked or ())}
     stages = [
-        ("wind", [k for k in _WIND_KEYS if k.lower() not in locked_lower]),
+        ("rate", [k for k in _STORAGE_RATE_KEYS if k.lower() not in locked_lower],
+         _DC_RATE_PROBE_STEPS),
+        ("wind", [k for k in _WIND_KEYS if k.lower() not in locked_lower],
+         _DC_PROBE_STEPS),
         ("gen",  [k for k in ELECTRIC_CAPACITY_FACTOR_KEYS
-                  if k.lower() not in locked_lower]),
+                  if k.lower() not in locked_lower], _DC_PROBE_STEPS),
     ]
-    for name, keys in stages:
+    for name, keys, steps in stages:
         if not keys:
             continue
         cands = []
-        for f in _DC_PROBE_STEPS:
+        for f in steps:
             cand = base_factors.copy()
             for k in keys:
                 cand[k] = _clamp(k, cand.get(k, PARAM_REGISTRY[k][0]) * f)
             cands.append(cand)
         specs = [{"label": "dc-probe-{}{:g}".format(name, f), "factors": c}
-                 for f, c in zip(_DC_PROBE_STEPS, cands)]
+                 for f, c in zip(steps, cands)]
         results = _eval_batch(specs, parallel_evals, region, paths)
         for i, res in enumerate(results):
             if res["feasible"]:
@@ -1370,6 +1405,23 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
             for k in keys:
                 variant[k] = seed_factors[k]
             specs.append({"label": "polish-revert-{}".format(name), "factors": variant})
+
+        # Power-for-energy swap (PI insight): raise the free discharge/charge
+        # rate while holding storage energy at the seed, testing whether more
+        # storage POWER lets the added load be served without the extra storage
+        # energy the GA piled on.  Locked rate levers are never moved.  The rate
+        # is boosted from the seed value (the GA leaves it near base), and any
+        # changed storage-energy keys are first reverted to the seed.
+        rate_keys = [k for k in _STORAGE_RATE_KEYS if k.lower() not in locked_lower]
+        if rate_keys and storage_keys:
+            for rmult in (2.0, 4.0):
+                variant = best_factors.copy()
+                for k in storage_keys:
+                    variant[k] = seed_factors[k]
+                for k in rate_keys:
+                    variant[k] = _clamp(k, seed_factors.get(k, variant.get(k, 0.0)) * rmult)
+                specs.append({"label": "polish-rate-x{:g}".format(rmult),
+                              "factors": variant})
 
     if not specs:
         return best_factors, best_cost, None
@@ -2160,7 +2212,8 @@ def run_workflow(
         # deliberately-spread variants of the bootstrap point (storage down /
         # capacity up-down) so the search has genetic material in the cheap
         # directions from generation one.
-        _seed_pop = (_scratch_seed_population(candidate, hj_locked_factors or ())
+        _seed_pop = (_scratch_seed_population(candidate, hj_locked_factors or (),
+                                              rate_up=bool(_IFDATCEN))
                      if (_scratch or _IFDATCEN) else None)
         best_factors, best_cost = genetic_search(
             candidate,

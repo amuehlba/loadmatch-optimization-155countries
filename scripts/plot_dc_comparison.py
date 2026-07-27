@@ -213,29 +213,6 @@ def _print_summary_caption(df):
     print(f"    caption stats (cost increase per region) - {stats}.")
 
 
-def fig_dc_cost_by_region(df: pd.DataFrame, outdir: Path) -> None:
-    fig, ax = plt.subplots(figsize=(16.0, 6.8))
-    offscale, excluded = _draw_cost_by_region(ax, df)
-    for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"fig_dc_cost_by_region.{ext}")
-    plt.close(fig)
-    print("  wrote fig_dc_cost_by_region.pdf/.png")
-    _print_by_region_caption(offscale, excluded)
-
-
-def fig_dc_strategy_summary(df: pd.DataFrame, outdir: Path) -> None:
-    fig, (axL, axR) = plt.subplots(
-        1, 2, figsize=(14.5, 4.6), gridspec_kw={"width_ratios": [1.25, 1.0],
-                                                "wspace": 0.08})
-    _draw_strategy_dist(axL, df)
-    _draw_strategy_totals(axR, df)
-    for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"fig_dc_strategy_summary.{ext}")
-    plt.close(fig)
-    print("  wrote fig_dc_strategy_summary.pdf/.png")
-    _print_summary_caption(df)
-
-
 def fig_dc_combined(df: pd.DataFrame, outdir: Path) -> None:
     """Single figure: (a) the strategy summary (distribution + totals) on top,
     (b) the per-region cost dot plot below."""
@@ -250,11 +227,11 @@ def fig_dc_combined(df: pd.DataFrame, outdir: Path) -> None:
     _draw_strategy_totals(axR, df)
     offscale, excluded = _draw_cost_by_region(axB, df)
 
-    # panel labels: (a) above the top row, (b) above the bottom panel, both at the
-    # figure's left edge so they clear the y-tick labels and the by-region legend.
-    fig.text(0.012, axL.get_position().y1 + 0.015, "a",
+    # panel labels at each panel's top-left plotting corner (matches the other
+    # combined figures), not floated out at the figure's left edge.
+    axL.text(0.0, 1.045, "a", transform=axL.transAxes,
              fontsize=17, fontweight="bold", va="bottom", ha="left")
-    fig.text(0.012, axB.get_position().y1 + 0.020, "b",
+    axB.text(0.0, 1.045, "b", transform=axB.transAxes,
              fontsize=17, fontweight="bold", va="bottom", ha="left")
 
     for ext in ("pdf", "png"):
@@ -277,9 +254,7 @@ def main(argv=None) -> None:
     if df.empty:
         print("No data-center rows found in", args.csv)
         return
-    fig_dc_cost_by_region(df, args.outdir)
-    fig_dc_strategy_summary(df, args.outdir)
-    fig_dc_combined(df, args.outdir)
+    fig_dc_combined(df, args.outdir)   # single figure: a = strategy summary, b = per-region
 
 
 if __name__ == "__main__":
