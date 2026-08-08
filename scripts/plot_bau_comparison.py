@@ -19,8 +19,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from scripts.plot_style import (apply_style, cap_region, add_region_bands,
-                                style_region_axis, minor_ticks, GRID, MUTED,
-                                INK_SECONDARY, C_GA)
+                                style_region_axis, minor_ticks, GRID,
+                                C_GA, C_SCRATCH)
 
 apply_style()
 
@@ -35,7 +35,7 @@ C_HEALTH = "#c98500"    # amber         (air-pollution health cost)
 C_CLIMATE = "#e34948"   # red           (climate cost)
 
 _NUM = ["bau_lcoe_c_per_kwh", "bau_health_c_per_kwh", "bau_climate_c_per_kwh",
-        "bau_social_c_per_kwh", "wws_lcoe_ga_c_per_kwh"]
+        "bau_social_c_per_kwh", "wws_lcoe_ga_c_per_kwh", "wws_lcoe_scratch_c_per_kwh"]
 
 
 def _load(csv_path: Path) -> pd.DataFrame:
@@ -55,7 +55,8 @@ def fig_wws_vs_bau(df: pd.DataFrame, outdir: Path) -> None:
     energy = df["bau_lcoe_c_per_kwh"].values
     health = df["bau_health_c_per_kwh"].values
     climate = df["bau_climate_c_per_kwh"].values
-    wws = df["wws_lcoe_ga_c_per_kwh"].values
+    wws_ga = df["wws_lcoe_ga_c_per_kwh"].values
+    wws_scr = df["wws_lcoe_scratch_c_per_kwh"].values
 
     fig, ax = plt.subplots(figsize=(max(9.0, 0.42 * n + 3.0), 6.2))
     add_region_bands(ax, n)
@@ -71,9 +72,18 @@ def fig_wws_vs_bau(df: pd.DataFrame, outdir: Path) -> None:
     ax.bar(x, climate, bw, bottom=energy + health, color=C_CLIMATE,
            edgecolor="white", linewidth=0.6, label="BAU climate", zorder=2)
 
-    # WWS optimized energy cost (headline), a marker well below the BAU stack.
-    ax.scatter(x, wws, s=36, color=C_GA, edgecolor="white", linewidth=0.8,
-               zorder=4, label="WWS optimized")
+    # WWS optimized energy cost (headline): the baseline optimization (GA from
+    # the PI trial-and-error start) and the from-scratch optimization, both well
+    # below the BAU stack.  Slight x-offset + distinct markers keep them apart
+    # where the two costs nearly coincide.  Colours follow the project entities
+    # (blue = from trial-and-error, orange = from scratch).
+    dx = 0.13
+    ax.scatter([xi - dx for xi in x], wws_ga, s=34, color=C_GA, marker="o",
+               edgecolor="white", linewidth=0.8, zorder=4,
+               label="WWS (baseline optimization)")
+    ax.scatter([xi + dx for xi in x], wws_scr, s=34, color=C_SCRATCH, marker="D",
+               edgecolor="white", linewidth=0.8, zorder=4,
+               label="WWS (from scratch)")
 
     ax.set_ylabel("2050 energy social cost (2013 US cents/kWh)")
     ax.set_ylim(0, None)
@@ -95,9 +105,11 @@ def _print_caption(df: pd.DataFrame) -> None:
     print("  caption: Per-region 2050 business-as-usual (BAU) social cost of "
           "energy, decomposed into private energy, air-pollution health, and "
           "climate cost (2013 US cents/kWh), with the optimized WWS energy cost "
-          "overlaid (blue). Regions ordered by BAU social cost. Across "
-          "{} regions the optimized WWS total societal cost is {:.0f}% of BAU "
-          "(${:.0f}B/yr vs ${:.0f}B/yr).".format(len(df), share, tot_wws, tot_bau))
+          "overlaid for the baseline optimization (blue) and the from-scratch "
+          "optimization (orange). Regions ordered by BAU social cost. Across "
+          "{} regions the WWS (baseline-optimization) total societal cost is "
+          "{:.0f}% of BAU (${:.0f}B/yr vs ${:.0f}B/yr).".format(
+              len(df), share, tot_wws, tot_bau))
 
 
 def main(argv=None) -> None:
