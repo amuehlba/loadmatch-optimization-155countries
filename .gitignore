@@ -4,6 +4,7 @@ __pycache__/
 .env
 .venv
 .ipynb_checkpoints/
+.DS_Store
 data/processed/*
 data/results_python/*
 data/results_fortran/*

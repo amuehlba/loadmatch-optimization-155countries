@@ -18,25 +18,29 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 source .venv/bin/activate 2>/dev/null || true
 
-echo "=== 1/6  Cross-region comparison table (base vs GA vs scratch) ==="
+echo "=== 1/7  Cross-region comparison table (base vs GA vs scratch) ==="
 python -m scripts.export_comparison
 
-echo "=== 2/6  Data-center comparison table ==="
+echo "=== 2/7  Data-center comparison table ==="
 python -m scripts.export_dc_comparison
 
-echo "=== 3/6  Full results workbook (XLSX) ==="
+echo "=== 3/7  WWS-vs-BAU comparison table (baseline + from-scratch) ==="
+python -m scripts.export_bau_comparison
+
+echo "=== 4/7  Full results workbook (XLSX) ==="
 python -m scripts.export_results
 
-echo "=== 4/6  PI xx deliverables (strip override echo; no-op-safe) ==="
+echo "=== 5/7  PI xx deliverables (strip override echo; no-op-safe) ==="
 python -m scripts.rebuild_xx_deliverables
 
-echo "=== 5/6  Publication figures ==="
+echo "=== 6/7  Publication figures ==="
 python -m scripts.plot_comparison
 python -m scripts.plot_dc_comparison
+python -m scripts.plot_bau_comparison
 python -m scripts.plot_structure                    # what changed vs trial-and-error
 python -m scripts.plot_results --all-regions || echo "  (overview figures skipped)"
 
-echo "=== 6/6  Data-integrity check ==="
+echo "=== 7/7  Data-integrity check ==="
 python - <<'PY'
 import sys, pandas as pd
 csv = "data/results_verification/comparison_summary.csv"
@@ -55,7 +59,7 @@ print(f"  pct_savings min/max: {df['pct_savings'].min():.2f}% / {df['pct_savings
 bad = False
 if cost_equal == n:
     print("  ERROR: every baseline == GA -> baseline was CLOBBERED (see paper2-baseline-clobber). "
-          "Do NOT run confirm_base_reeval into the main dirs; re-run the base campaign.")
+          "Do NOT seed a base re-evaluation into the main dirs; re-run the base campaign.")
     bad = True
 # Taiwan land-cap check (scratch)
 if "ga_scratch2_newland_pct_regland" in df.columns:

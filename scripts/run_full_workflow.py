@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Dict, Sequence, List, Tuple
 
 from src.io.dat_parser import read_dat, write_dat
-from scripts import run_python_model, export_fortran_factors
 from scripts.parse_fortran_output import (
     parse_and_save as _parse_and_save,
     save_summary as _save_summary,
@@ -121,11 +120,8 @@ def _fortran_global_lock():
 
 def _region_paths(region: str):
     """Return per-region output paths.  Every region gets its own sub-folder."""
-    lp_dir = Path("data/results_python") / region
     results_dir = Path("data/results_verification") / region
     return dict(
-        lp_summary=lp_dir / "summary.dat",
-        factor_result=lp_dir / "fortran_factors.dat",
         factor_dest=Path("fortran/fortran_factors.dat"),
         factor_pathhome=Path("data/raw/fortran_factors.dat"),
         results_dir=results_dir,
@@ -139,23 +135,14 @@ def _region_paths(region: str):
         optimal_summary=results_dir / "optimal_summary.json",
         # Final optimal Fortran output (consumed by plot_results.py)
         fortran_optimal_out=results_dir / "fortran_optimal_run.out",
-        # LP warm-start GA: separate outputs so they don't overwrite the baseline-GA results
-        lp_eval_summary=results_dir / "lp_summary.json",
-        lp_ga_summary=results_dir / "lp_ga_summary.json",
-        fortran_lp_out=results_dir / "fortran_lp_run.out",
-        fortran_lp_ga_out=results_dir / "fortran_lp_ga_run.out",
-        lp_ga_history_file=results_dir / "lp_ga_factor_history.log",
-        first_feasible_summary=results_dir / "first_feasible_summary.json",
     )
 
 
 # Module-level defaults kept for backward compatibility (US region).
 _paths = _region_paths(_DEFAULT_REGION)
-LP_SUMMARY = _paths["lp_summary"]
-FACTOR_RESULT = _paths["factor_result"]
 FACTOR_DEST = _paths["factor_dest"]
 FACTOR_PATHHOME = _paths["factor_pathhome"]
-FACTOR_PATHS = [FACTOR_RESULT, FACTOR_DEST, FACTOR_PATHHOME]
+FACTOR_PATHS = [FACTOR_DEST, FACTOR_PATHHOME]
 RESULTS_DIR = _paths["results_dir"]
 FORTRAN_LOG = _paths["fortran_log"]
 FORTRAN_ERR = _paths["fortran_err"]
@@ -786,9 +773,6 @@ def write_factor_files(factors, paths=None):
     _factor_key_set = set(FACTOR_KEYS)
     to_write = {k: v for k, v in factors.items() if k in _factor_key_set}
     # Only write to the two paths that Fortran reads at runtime.
-    # paths["factor_result"] (data/results_python/{region}/fortran_factors.dat) is
-    # the LP solver output file; writing GA factors there would corrupt the LP
-    # factors that run_ga_from_lp_workflow reads after run_ga completes.
     factor_paths = [
         paths["factor_dest"],
         paths["factor_pathhome"],
@@ -1929,18 +1913,6 @@ def genetic_search(
 # Main workflow
 # ---------------------------------------------------------------------------
 
-def _build_full_factors(lp_factors: Dict[str, float]) -> Dict[str, float]:
-    """Build a complete optimised-param dict from LP DAT output.
-    Only FACTOR_KEYS (non-fixed) params are accepted from lp_factors.
-    Fixed params are intentionally excluded — write_factor_files()
-    injects them at their PARAM_REGISTRY defaults."""
-    _factor_key_set = set(FACTOR_KEYS)
-    all_factors = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-    lp_upper = {k.upper(): float(v) for k, v in lp_factors.items()}
-    all_factors.update({k: v for k, v in lp_upper.items() if k in _factor_key_set})
-    return all_factors
-
-
 def run_workflow(
     region="UNITED-STATES",
     parallel_evals=1,
@@ -2003,7 +1975,6 @@ def run_workflow(
     results_label = region + _RUN_SUFFIX
     paths = _region_paths(results_label)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
-    paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
 
     # ── Clear factor history so each run starts fresh ─────────────────────────
     if paths["history_file"].exists():
@@ -2030,29 +2001,26 @@ def run_workflow(
 
     if baseline_start == "defaults":
         base_factors = extract_fortran_region_defaults(region)
-        print("Using Fortran hardcoded region defaults as baseline factors (skipping LP).")
+        print("Using Fortran hardcoded region defaults as baseline factors.")
     elif baseline_start == "scratch":
         base_factors = build_scratch_start()
         print("Using spreadsheet scratch start (capacity factors = 1.0, "
-              "storage design variables = 0; skipping LP).")
+              "storage design variables = 0).")
     elif baseline_start:
         baseline_path = Path(baseline_start)
         if not baseline_path.exists():
             raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
-        print(f"Using baseline factors from {baseline_path} (skipping LP).")
+        print(f"Using baseline factors from {baseline_path}.")
         base_factors = load_baseline_start(baseline_path)
     else:
-        run_python_model.main(region=region, output_dir=paths["lp_summary"].parent)
-        export_fortran_factors.main([
-            "--summary", str(paths["lp_summary"]),
-            "--output", str(paths["factor_result"]),
-        ])
-        lp_factors = read_dat(str(paths["factor_result"]))
-        base_factors = _build_full_factors(lp_factors)
+        raise ValueError(
+            "No baseline start specified. The LP warm-start path has been "
+            "removed; pass --baseline-start <file|scratch|defaults>."
+        )
     baseline_paths = dict(paths)
     # In evaluate-only mode the seeded factors ARE the result: write the run to
     # the OPTIMAL output and never touch the baseline files.  This stops a seeded
-    # re-evaluation (e.g. confirm_base_reeval_slurm.sh, which seeds each region's
+    # re-evaluation (a seeded re-evaluation that reuses each region's
     # genetic_factors.dat) from overwriting the PI trial-and-error baseline.
     baseline_paths["fortran_out"] = (paths["fortran_optimal_out"] if evaluate_only
                                      else paths["fortran_baseline_out"])
@@ -2110,7 +2078,7 @@ def run_workflow(
         )
         opt_data["timing"] = {
             "datacenter_scenario":   _IFDATCEN,
-            "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
+            "start_mode":            "scratch" if _scratch else (baseline_start or "baseline"),
             "optimizer":             "evaluate",
             "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
             "optimize_seconds":      0.0,
@@ -2128,12 +2096,12 @@ def run_workflow(
 
     feasible_initial = check_feasibility(stdout)
     initial_cost = _apply_land_cap(parse_cost(stdout), stdout)
-    log_candidate(base_factors, feasible_initial, initial_cost, label="LP",
+    log_candidate(base_factors, feasible_initial, initial_cost, label="baseline",
                   history_file=paths["history_file"])
     if feasible_initial and baseline_start is None:
-        # LP solution is already feasible — no further optimisation needed.
+        # Baseline is already feasible — no further optimisation needed.
         print(
-            "Fortran verification succeeded with LP factors (cost {:.3f}).".format(
+            "Fortran verification succeeded with baseline factors (cost {:.3f}).".format(
                 initial_cost
             )
         )
@@ -2298,7 +2266,7 @@ def run_workflow(
         _n_evals = None
     opt_data["timing"] = {
         "datacenter_scenario":   _IFDATCEN,
-        "start_mode":            "scratch" if _scratch else (baseline_start or "lp"),
+        "start_mode":            "scratch" if _scratch else (baseline_start or "baseline"),
         "max_land_pct":          _MAX_LAND_PCT,
         "land_penalty_per_pp":   _LAND_PENALTY_PER_PP if _MAX_LAND_PCT is not None else None,
         "polish":                _polish_label if optimizer == "ga" else None,
@@ -2344,143 +2312,14 @@ def run_workflow(
 
 
 # ---------------------------------------------------------------------------
-# LP warm-start GA workflow (separate outputs, does not overwrite baseline-GA)
-# ---------------------------------------------------------------------------
-
-def run_ga_from_lp_workflow(
-    region="UNITED-STATES",
-    parallel_evals=1,
-    ga_population=24,
-    ga_generations=50,
-    ga_mutation_rate=0.15,
-    ga_mutation_scale=0.2,
-    ga_elite_frac=0.2,
-    ga_mutation_cooling=0.98,
-    ga_factor_scales=None,
-    ga_magnitude_damping=0.5,
-    generate_plots=False,
-):
-    """Run GA starting from LP factors, saving to lp_summary.json and lp_ga_summary.json.
-
-    This function intentionally does NOT overwrite baseline_summary.json or
-    optimal_summary.json so that all four cases (baseline, LP-eval, GA-from-baseline,
-    GA-from-LP) can coexist for per-region four-case comparison plots.
-    """
-    paths = _region_paths(region)
-    paths["results_dir"].mkdir(parents=True, exist_ok=True)
-    paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
-
-    # Use a separate history log so LP-GA history doesn't overwrite baseline-GA history.
-    paths_ga = dict(paths)
-    paths_ga["history_file"] = paths["lp_ga_history_file"]
-    if paths_ga["history_file"].exists():
-        paths_ga["history_file"].unlink()
-        print("Cleared previous LP-GA factor history: {}".format(paths_ga["history_file"]))
-
-    # 1. Load LP factors
-    lp_factors_path = paths["factor_result"]
-    if not lp_factors_path.exists():
-        raise FileNotFoundError(
-            f"LP factors not found: {lp_factors_path}. "
-            "Run '--run-lp-only' first."
-        )
-    lp_factors = read_dat(str(lp_factors_path))
-    base_factors = _build_full_factors(lp_factors)
-
-    # 2. Evaluate LP solution with Fortran → lp_summary.json
-    print(f"Evaluating LP factors with Fortran for region '{region}'...")
-    with _fortran_global_lock():
-        write_factor_files(base_factors, paths)
-        lp_stdout = run_fortran(region=region, paths=paths)
-    paths["fortran_lp_out"].write_text(lp_stdout)
-    _parse_and_save(
-        lp_stdout,
-        factors=base_factors,
-        region=region,
-        run_type="lp_eval",
-        out_path=paths["lp_eval_summary"],
-    )
-    lp_cost = parse_cost(lp_stdout)
-    lp_feasible = check_feasibility(lp_stdout)
-    log_candidate(base_factors, lp_feasible, lp_cost, label="LP-eval",
-                  history_file=paths_ga["history_file"])
-    print(f"  LP Fortran evaluation: feasible={lp_feasible}, cost={lp_cost:.3f}")
-
-    if lp_feasible:
-        candidate, cost = base_factors.copy(), lp_cost
-        # LP itself is the first feasible point — copy its summary
-        import shutil as _shutil
-        _shutil.copy2(paths["lp_eval_summary"], paths["first_feasible_summary"])
-    else:
-        print("  LP solution infeasible in Fortran — inflating capacity factors...")
-        candidate, cost, ff_stdout = inflate_until_feasible(
-            base_factors, region=region, paths=paths_ga)
-        _parse_and_save(
-            ff_stdout,
-            factors=candidate,
-            region=region,
-            run_type="first_feasible",
-            out_path=paths["first_feasible_summary"],
-        )
-
-    # 3. GA from LP warm-start
-    print(f"Running GA from LP warm-start (population={ga_population}, "
-          f"generations={ga_generations})...")
-    best_factors, best_cost = genetic_search(
-        candidate,
-        cost,
-        population_size=ga_population,
-        generations=ga_generations,
-        mutation_rate=ga_mutation_rate,
-        mutation_scale=ga_mutation_scale,
-        elite_frac=ga_elite_frac,
-        direction="both",
-        parallel_evals=parallel_evals,
-        locked_factors=None,
-        mutation_cooling=ga_mutation_cooling,
-        factor_scales=ga_factor_scales or {},
-        magnitude_damping=ga_magnitude_damping,
-        region=region,
-        paths=paths_ga,
-    )
-    print(f"GA-from-LP best cost: {best_cost:.3f}")
-    write_dat(best_factors, paths["results_dir"] / "lp_ga_factors.dat")
-
-    # 4. Final Fortran evaluation → lp_ga_summary.json
-    print("Running final Fortran evaluation with LP-GA optimal factors...")
-    with _fortran_global_lock():
-        write_factor_files(best_factors, paths)
-        final_stdout = run_fortran(region=region, paths=paths)
-    paths["fortran_lp_ga_out"].write_text(final_stdout)
-    _parse_and_save(
-        final_stdout,
-        factors=best_factors,
-        region=region,
-        run_type="lp_ga_optimal",
-        out_path=paths["lp_ga_summary"],
-    )
-    print(
-        "LP-GA final cost: {:.3f}  →  {}".format(
-            parse_cost(final_stdout), paths["lp_ga_summary"]
-        )
-    )
-
-    if generate_plots:
-        try:
-            import scripts.plot_results as _plot_results
-            _plot_results.main(region=region)
-        except Exception as exc:
-            print(f"  [WARN] Plot generation failed: {exc}")
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Run LP optimisation + Fortran verification with Hooke-Jeeves or genetic algorithm.\n\n"
+            "Run the Fortran grid model under a genetic algorithm (or Hooke-Jeeves),\n"
+            "seeded from a baseline factor file via --baseline-start.\n\n"
             "GA STRATEGY WITH MANY PARAMETERS:\n"
             "  The model exposes ~35 tunable parameters. For staged optimisation:\n"
             "  Phase 1: Lock new params, optimise capacity factors only:\n"
@@ -2607,15 +2446,14 @@ def parse_args():
         type=str,
         default=None,
         metavar="PATH|defaults",
-        help="Starting point for the GA/HJ optimiser. Four options: "
-        "(1) omit: run LP and stop if feasible; "
-        "(2) 'defaults': the Fortran hardcoded region values (the PI's "
-        "trial-and-error solution) — the standard base-case start; "
-        "(3) 'scratch': the spreadsheet starting point (all capacity factors=1, "
+        help="Starting point for the GA/HJ optimiser (required). Three options: "
+        "(1) 'defaults': the Fortran hardcoded region values (the PI's "
+        "trial-and-error solution), the standard base-case start; "
+        "(2) 'scratch': the spreadsheet starting point (all capacity factors=1, "
         "storage design variables=0); results go to isolated <REGION>_scratch/ "
         "dirs and xx_optimized_scratch/ so the base case is never overwritten; "
-        "(4) PATH to a baseline_results.dat / factors file: load factors from "
-        "that file and skip LP. Default: %(default)s.",
+        "(3) PATH to a baseline_results.dat / factors file: load factors from "
+        "that file. Default: %(default)s.",
     )
     parser.add_argument(
         "--no-plots",
@@ -2699,25 +2537,6 @@ def parse_args():
              "Used by the Snakemake preprocess_supply rule.",
     )
     parser.add_argument(
-        "--run-lp-only",
-        action="store_true",
-        default=False,
-        help="Run the LP optimisation and export factors to "
-             "data/results_python/<REGION>/fortran_factors.dat, then exit. "
-             "Requires a working LP solver (Gurobi/HiGHS). "
-             "Used by the Snakemake run_lp rule.",
-    )
-    parser.add_argument(
-        "--run-ga-from-lp",
-        action="store_true",
-        default=False,
-        help="Evaluate LP factors with Fortran (→ lp_summary.json), then run GA "
-             "from the LP warm-start (→ lp_ga_summary.json). "
-             "Does NOT overwrite baseline_summary.json or optimal_summary.json. "
-             "Requires completed '--run-lp-only' output. "
-             "Used by the Snakemake run_ga_from_lp rule.",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=12345,
@@ -2760,59 +2579,6 @@ def main():
         # Run IFREWRITE=1,2 if wwssupworld.<REGION> is missing; otherwise no-op.
         # The Snakemake preprocess_supply rule touches the sentinel on success.
         preprocess_region(args.region)
-        return
-
-    if args.run_lp_only:
-        # Run LP optimisation + factor export, then exit.
-        # Output: data/results_python/<REGION>/fortran_factors.dat
-        #
-        # On LP failure (infeasible, no solver, etc.) we write PARAM_REGISTRY
-        # defaults for all FACTOR_KEYS to fortran_factors.dat and a placeholder
-        # summary.dat so that run_ga_from_lp can always proceed.  This keeps
-        # the Snakemake dependency graph unblocked; the lp_summary.json written
-        # by run_ga_from_lp will carry lp_failed=1 to flag the fallback.
-        paths = _region_paths(args.region)
-        paths["lp_summary"].parent.mkdir(parents=True, exist_ok=True)
-        try:
-            run_python_model.main(region=args.region, output_dir=paths["lp_summary"].parent)
-            export_fortran_factors.main([
-                "--summary", str(paths["lp_summary"]),
-                "--output",  str(paths["factor_result"]),
-            ])
-            print(f"LP factors written to: {paths['factor_result']}")
-        except Exception as exc:
-            print(f"[WARN] LP solver failed for {args.region}: {exc}")
-            print(f"  Writing PARAM_REGISTRY defaults as fallback to {paths['factor_result']}")
-            fallback_factors = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-            write_dat(fallback_factors, str(paths["factor_result"]))
-            write_dat({"objective_cost": float("inf"), "lp_failed": 1},
-                      str(paths["lp_summary"]))
-            # Write stub lp_solution.json so Snakemake's declared output is satisfied
-            import json as _json
-            lp_sol_path = paths["lp_summary"].parent / "lp_solution.json"
-            with open(lp_sol_path, "w") as _f:
-                _json.dump({"region": args.region, "lp_failed": True,
-                            "error": str(exc)}, _f, indent=2)
-            print(f"  Fallback factor file written; downstream run_ga_from_lp will proceed.")
-        return
-
-    if args.run_ga_from_lp:
-        # Evaluate LP factors with Fortran → lp_summary.json
-        # Run GA from LP warm-start → lp_ga_summary.json
-        factor_scales = _parse_factor_scales(args.ga_factor_scale)
-        run_ga_from_lp_workflow(
-            region=args.region,
-            parallel_evals=max(1, args.parallel_evals),
-            ga_population=args.ga_population,
-            ga_generations=args.ga_generations,
-            ga_mutation_rate=args.ga_mutation_rate,
-            ga_mutation_scale=args.ga_mutation_scale,
-            ga_elite_frac=args.ga_elite_frac,
-            ga_mutation_cooling=args.ga_mutation_cooling,
-            ga_factor_scales=factor_scales,
-            ga_magnitude_damping=args.ga_magnitude_damping,
-            generate_plots=not args.no_plots,
-        )
         return
 
     # ── Normal GA/HJ workflow ─────────────────────────────────────────────────

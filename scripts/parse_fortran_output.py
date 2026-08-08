@@ -158,6 +158,64 @@ def parse_land_area(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# WWS-vs-BAU comparison (region level)
+# ---------------------------------------------------------------------------
+# powerworld.f prints three region-level blocks (FORMAT 286/287/301): each is a
+# header line followed by one line of space-separated floats, mapped positionally
+# to named keys.  Field order is fixed by the Fortran WRITE statements, so we key
+# off a stable substring of each header and read the value line.
+_FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?")
+
+_BAU_BLOCKS = [
+    # FORMAT 286: BAU vs WWS cost per kWh and the WWS:BAU ratios
+    ("2050BAUREGLOAD-GW", [
+        "bau_load_gw", "bau_lcoe_c_per_kwh", "bau_health_c_per_kwh",
+        "bau_climate_c_per_kwh", "bau_social_c_per_kwh", "wws_lcoe_c_per_kwh",
+        "ratio_wws_bau_energy_cost", "ratio_bau_energy_to_social",
+        "ratio_wws_bau_load", "ratio_wws_bau_social_overall",
+        "ratio_wws_energy_to_bau_social",
+    ]),
+    # FORMAT 287: absolute $B/yr costs, avoided air-pollution mortality, VOSL
+    ("2050 BAUEN($BIL/Y)", [
+        "bau_energy_bil_per_yr", "bau_health_bil_per_yr", "bau_climate_bil_per_yr",
+        "bau_total_bil_per_yr", "wws_total_bil_per_yr",
+        "air_poll_mortality_2016", "air_poll_mortality_2050", "vosl_mil_per_death",
+    ]),
+    # FORMAT 301: social cost per tonne CO2e and 2050 emissions
+    ("2050 BAUEN($/TONNE-CO2E)", [
+        "bau_energy_usd_per_tco2e", "bau_health_usd_per_tco2e",
+        "bau_climate_usd_per_tco2e", "bau_total_usd_per_tco2e",
+        "wws_total_usd_per_tco2e", "co2e_mtonne_per_yr",
+    ]),
+]
+
+
+def parse_bau_comparison(text: str) -> dict:
+    """Extract the region-level WWS-vs-BAU comparison (blocks 286/287/301).
+
+    Returns a dict with BAU vs WWS energy/health/climate/social cost (c/kWh),
+    absolute $B/yr costs, avoided air-pollution mortality (2016 and 2050), CO2e
+    emissions, and the WWS:BAU ratios.  Any block that is absent (older xx
+    files) leaves its keys None.  Ratios come back as 0.0 when the Fortran had
+    no BAU data for the region (it guards on BAULCOER > 0)."""
+    out: dict = {}
+    for header, keys in _BAU_BLOCKS:
+        vals = None
+        idx = text.find(header)
+        if idx != -1:
+            # value line is the first non-empty line after the header line
+            for line in text[idx + len(header):].splitlines()[1:]:
+                if line.strip():
+                    nums = _FLOAT_RE.findall(line)
+                    if len(nums) >= len(keys):
+                        vals = [float(x) for x in nums[:len(keys)]]
+                    break
+        for i, k in enumerate(keys):
+            out[k] = vals[i] if vals is not None else None
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Core parsing
 # ---------------------------------------------------------------------------
 
@@ -220,6 +278,9 @@ def parse_output(
 
     # ── New land area (percent of regional land: wind spacing + footprint) ────
     summary.update(parse_land_area(text))
+
+    # ── WWS-vs-BAU comparison (region level) ─────────────────────────────────
+    summary["bau"] = parse_bau_comparison(text)
 
     # ── Non-grid H2 production capacity (xx versions from 2026-07-09 on) ──────
     m = _H2PEAKLD_RE.search(text)
