@@ -26,7 +26,6 @@ Only stdlib is used, so this runs anywhere the results tree is present.
 import argparse
 import csv
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -104,7 +103,12 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
         if not rdir.is_dir():
             continue
         region = rdir.name
-        if re.search(r"(_scratch\w*|_dc\d+\w*)$", region):
+        # Only the base regions are rows: their optimal_summary.json holds the
+        # baseline-optimization WWS and their _scratch2/_scratch sibling holds
+        # the from-scratch WWS.  Region names use hyphens, never underscores, so
+        # an underscore marks a scenario/experiment dir (_scratch*, _dc*, or a
+        # throwaway seed run) that must not appear as its own region.
+        if "_" in region:
             continue
         if regions and region not in regions:
             continue
@@ -118,8 +122,15 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
 
         bl = _load(rdir / "baseline_summary.json")
         base = _bau_stats(bl, rdir, "fortran_baseline_run.out")
-        sdir = results_root / (region + "_scratch")
-        scr = _bau_stats(_load(sdir / "optimal_summary.json"), sdir, "fortran_optimal_run.out")
+        # From-scratch WWS: prefer the improved _scratch2 campaign, else _scratch.
+        scr = {}
+        for sfx in ("_scratch2", "_scratch"):
+            sdir = results_root / (region + sfx)
+            cand = _bau_stats(_load(sdir / "optimal_summary.json"), sdir,
+                              "fortran_optimal_run.out")
+            if _has_bau(cand):
+                scr = cand
+                break
 
         rows.append({
             "region":                     region,
