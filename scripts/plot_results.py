@@ -1873,21 +1873,25 @@ def _read_region_list(repo_root):
 
 
 def _first_baseline_cost(records, save_dir):
-    """Trial-and-error reference cost ($B/yr) for a region's base run."""
-    baseline_cost = None
+    """Trial-and-error reference cost ($B/yr): the base run's first logged record,
+    or (if factor_history.log is gone) the baseline summary JSON, which the log
+    clearing never touched."""
     for rec in records or []:
         c = rec.get("cost_mn_bil_per_year", float("inf"))
         if c < float("inf"):
-            baseline_cost = c
-            break
-    cbl = save_dir / "canonical_baseline_summary.json" if save_dir else None
-    if cbl and cbl.exists():
-        try:
-            d = json.loads(cbl.read_text())
-            baseline_cost = d.get("cost_bn_per_yr", d.get("cost", baseline_cost))
-        except Exception:
-            pass
-    return baseline_cost
+            return c
+    for jname in ("baseline_summary.json", "canonical_baseline_summary.json"):
+        jp = (save_dir / jname) if save_dir else None
+        if jp and jp.exists():
+            try:
+                d = json.loads(jp.read_text())
+                v = (d.get("annual_cost_mn_bil_per_yr")
+                     or d.get("cost_bn_per_yr") or d.get("cost"))
+                if v:
+                    return float(v)
+            except Exception:
+                pass
+    return None
 
 
 def _convergence_gen(region, repo_root):
@@ -1921,8 +1925,9 @@ def fig_all_convergence(repo_root, overview_dir, regions=None):
 
     for idx, region in enumerate(regions):
         color = _region_color(idx)
-        df_gen_b, records_b, save_dir_b = _convergence_gen(region, repo_root)
-        baseline_cost = _first_baseline_cost(records_b, save_dir_b)
+        base_dir = repo_root / "data" / "results_verification" / region
+        df_gen_b, records_b, _ = _convergence_gen(region, repo_root)
+        baseline_cost = _first_baseline_cost(records_b, base_dir)
         if not baseline_cost or baseline_cost <= 0:
             print(f"  [convergence] {region}: no baseline cost -> skipped")
             continue
@@ -2086,7 +2091,13 @@ def plot_all_regions(repo_root):
     results_root = repo_root / "data" / "results_verification"
     overview_dir = results_root  # save directly here, not in a region subfolder
 
-    # Collect all regions with completed results
+    # Convergence (figA1) is self-contained: it enumerates the config regions and
+    # loads each region's own base + scratch factor_history.log, so run it up front,
+    # independent of (and unblocked by) the region_data scan the other overviews need.
+    _try_fig("FigA1 — Convergence (baseline + scratch, all regions)",
+             fig_all_convergence, repo_root, overview_dir)
+
+    # Collect all regions with completed results (for the wind/solar + ternary figs)
     region_data = {}
     for region_dir in sorted(results_root.iterdir()):
         if not region_dir.is_dir():
@@ -2157,13 +2168,12 @@ def plot_all_regions(repo_root):
         }
 
     if len(region_data) < 2:
-        print(f"\n  [SKIP] Overview figures: need ≥2 regions with results "
-              f"(found {len(region_data)}).")
+        print(f"\n  [SKIP] wind/solar + ternary overviews: need ≥2 regions with a base "
+              f"factor_history.log (found {len(region_data)}). Convergence (figA1) above "
+              f"is unaffected.")
         return
 
-    print(f"\n  Generating overview figures for {list(region_data.keys())}...")
-    _try_fig("FigA1 — Convergence (baseline + scratch, all regions)",
-             fig_all_convergence, repo_root, overview_dir)
+    print(f"\n  Generating wind/solar + ternary overviews for {list(region_data.keys())}...")
     _try_fig("FigA2 — All-region wind/solar scatter",
              fig_all_wind_solar, region_data, overview_dir)
     _try_fig("FigA3 — All-region ternary",

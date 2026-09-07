@@ -1976,10 +1976,17 @@ def run_workflow(
     paths = _region_paths(results_label)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
 
-    # ── Clear factor history so each run starts fresh ─────────────────────────
-    if paths["history_file"].exists():
-        paths["history_file"].unlink()
-        print("Cleared previous factor history: {}".format(paths["history_file"]))
+    # ── Preserve prior factor history; only a fresh GA run starts a new log ───
+    # evaluate-only mode runs NO GA, so it must never clear the history.  This
+    # guard is why the convergence logs were lost: an evaluate-only re-cost/
+    # re-eval into the base <REGION>/ dir used to unlink factor_history.log and
+    # then never regenerate it.  A fresh GA run archives (not deletes) the old
+    # log to factor_history.log.prev so a prior optimization is never silently
+    # destroyed.
+    if not evaluate_only and paths["history_file"].exists():
+        _prev = paths["history_file"].with_suffix(".log.prev")
+        paths["history_file"].replace(_prev)
+        print("Archived previous factor history to {}".format(_prev))
 
     # ── Parse canonical baseline output if present ────────────────────────────
     # data/raw/xx.<SHORTCODE> is the PI's pristine baseline output (his exact
