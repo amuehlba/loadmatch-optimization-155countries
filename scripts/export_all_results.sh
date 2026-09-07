@@ -39,6 +39,7 @@ python -m scripts.plot_dc_comparison
 python -m scripts.plot_bau_comparison
 python -m scripts.plot_structure                    # what changed vs trial-and-error
 python -m scripts.plot_results --all-regions || echo "  (overview figures skipped)"
+python -m scripts.plot_dispatch || echo "  (SI dispatch/SOC figures skipped)"
 
 echo "=== 7/7  Data-integrity check ==="
 python - <<'PY'
