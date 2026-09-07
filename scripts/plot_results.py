@@ -1799,7 +1799,7 @@ _REGION_SHORT = {
     "CENTRAL-AMERIC":"CAMR", "CENTRAL-ASIA": "CASA", "SOUTHAM-NW":   "SA-NW",
     "SOUTHAM-SE":    "SA-SE","MADAGASCAR":   "MDG",  "MAURITIUS":    "MUS",
     "ICELAND":       "ISL",  "ISRAEL":       "IL",   "JAMAICA":      "JAM",
-    "CUBA":          "CUB",  "HAITI":        "HTI",
+    "CUBA":          "CUB",  "HAITI":        "HTI",   "GREENLAND":    "GRL",
 }
 _S3_TERNARY = np.sqrt(3)
 
@@ -1853,32 +1853,123 @@ def _build_cap(fac_fn):
     }
 
 
-def fig_all_convergence(region_data, overview_dir):
-    """Relative cost reduction over GA generations for all regions."""
-    fig, ax = plt.subplots(figsize=(13, 6))
+def _read_region_list(repo_root):
+    """The canonical 30 regions from config/workflow.yaml (order preserved)."""
+    cfg = repo_root / "config" / "workflow.yaml"
+    regions = []
+    if cfg.exists():
+        in_block = False
+        for ln in cfg.read_text().splitlines():
+            if re.match(r"^regions:\s*(#.*)?$", ln):
+                in_block = True
+                continue
+            if in_block:
+                m = re.match(r"^\s*-\s*([A-Za-z0-9\-]+)\s*$", ln)
+                if m:
+                    regions.append(m.group(1))
+                elif ln.strip() and not ln[0].isspace():
+                    break
+    return regions
 
-    _LINESTYLES = ["-", "--", "-.", ":"]
-    for idx, (region, rd) in enumerate(region_data.items()):
+
+def _first_baseline_cost(records, save_dir):
+    """Trial-and-error reference cost ($B/yr) for a region's base run."""
+    baseline_cost = None
+    for rec in records or []:
+        c = rec.get("cost_mn_bil_per_year", float("inf"))
+        if c < float("inf"):
+            baseline_cost = c
+            break
+    cbl = save_dir / "canonical_baseline_summary.json" if save_dir else None
+    if cbl and cbl.exists():
+        try:
+            d = json.loads(cbl.read_text())
+            baseline_cost = d.get("cost_bn_per_yr", d.get("cost", baseline_cost))
+        except Exception:
+            pass
+    return baseline_cost
+
+
+def _convergence_gen(region, repo_root):
+    """(df_gen, records, save_dir) for a results dir, or (None, None, None)."""
+    res = _load_ga_data(region, repo_root)
+    if res[0] is None:
+        return None, None, None
+    _, df_gen, _, _, _, records, save_dir = res
+    return df_gen, records, save_dir
+
+
+def fig_all_convergence(repo_root, overview_dir, regions=None):
+    """Cost-reduction convergence vs the trial-and-error baseline for every region.
+
+    Two curves per region, same colour: the Baseline GA (from the trial-and-error
+    start, solid) and the Scratch GA (from the from-scratch start, dashed).  Both
+    are expressed as a reduction relative to the SAME trial-and-error reference
+    cost, so the two starts are directly comparable.  Data-centre runs are ignored.
+    """
+    from matplotlib.lines import Line2D
+    regions = regions or _read_region_list(repo_root)
+    if not regions:      # fallback: base result dirs (no scratch/DC suffix)
+        root = repo_root / "data" / "results_verification"
+        regions = [d.name for d in sorted(root.iterdir())
+                   if d.is_dir() and "_" not in d.name
+                   and (d / "factor_history.log").exists()]
+
+    fig, ax = plt.subplots(figsize=(13, 7))
+    region_handles, ymin, ymax = [], 0.0, 0.0
+    n_base = n_scr = 0
+
+    for idx, region in enumerate(regions):
         color = _region_color(idx)
-        ls = _LINESTYLES[idx // len(_PALETTE) % len(_LINESTYLES)]
-        df_gen = rd["df_gen"]
-        baseline_cost = rd["baseline_cost"]
-        if baseline_cost is None or baseline_cost <= 0:
+        df_gen_b, records_b, save_dir_b = _convergence_gen(region, repo_root)
+        baseline_cost = _first_baseline_cost(records_b, save_dir_b)
+        if not baseline_cost or baseline_cost <= 0:
+            print(f"  [convergence] {region}: no baseline cost -> skipped")
             continue
-        valid = df_gen[df_gen["cum_best_cost"] < float("inf")].copy()
-        if valid.empty:
-            continue
-        reduction = (1 - valid["cum_best_cost"] / baseline_cost) * 100
-        ax.plot(valid["gen"], reduction, lw=1.8, color=color, ls=ls,
-                label=f"{_rshort(region)}  ({baseline_cost:.1f} → {rd['optimal_cost']:.1f} $B/yr)")
+        drew = False
 
-    ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5)
+        valid = df_gen_b[df_gen_b["cum_best_cost"] < float("inf")] if df_gen_b is not None else None
+        if valid is not None and not valid.empty:
+            red = (1 - valid["cum_best_cost"] / baseline_cost) * 100
+            ax.plot(valid["gen"], red, lw=1.5, color=color, ls="-", alpha=0.9)
+            ymin, ymax = min(ymin, red.min()), max(ymax, red.max())
+            n_base += 1
+            drew = True
+
+        for suff in ("_scratch2", "_scratch"):     # from-scratch run (extended first)
+            df_gen_s, _, _ = _convergence_gen(region + suff, repo_root)
+            if df_gen_s is None:
+                continue
+            vs = df_gen_s[df_gen_s["cum_best_cost"] < float("inf")]
+            if not vs.empty:
+                reds = (1 - vs["cum_best_cost"] / baseline_cost) * 100
+                ax.plot(vs["gen"], reds, lw=1.3, color=color, ls="--", alpha=0.9)
+                ymin, ymax = min(ymin, reds.min()), max(ymax, reds.max())
+                n_scr += 1
+                drew = True
+            break
+
+        if drew:
+            region_handles.append(Line2D([0], [0], color=color, lw=2.4,
+                                         label=_rshort(region)))
+
+    ax.axhline(0, color="gray", lw=0.8, ls=":", alpha=0.6)
     ax.set_xlabel("Generation")
-    ax.set_ylabel("Cost reduction vs baseline (%)")
-    ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0,
-              frameon=False, ncol=2, fontsize=8)
+    ax.set_ylabel("Cost reduction vs trial-and-error baseline (%)")
     ax.set_xlim(left=1)
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(max(-60.0, ymin - 3.0), min(100.0, ymax + 3.0))
+
+    # Legend 1: what the line style means (scenario).  Legend 2: region colours.
+    style_handles = [
+        Line2D([0], [0], color="0.25", lw=2.4, ls="-",  label="Baseline (from trial-and-error)"),
+        Line2D([0], [0], color="0.25", lw=2.4, ls="--", label="Scratch (from scratch)"),
+    ]
+    leg1 = ax.legend(handles=style_handles, loc="lower right", frameon=False, fontsize=10)
+    ax.add_artist(leg1)
+    ax.legend(handles=region_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
+              borderaxespad=0, frameon=False, ncol=2, fontsize=8, title="Region")
+    print(f"  convergence: drew {n_base} baseline + {n_scr} scratch region curves "
+          f"(of {len(regions)} regions)")
     _save(fig, "figA1_all_regions_convergence", overview_dir)
 
 
@@ -2005,6 +2096,8 @@ def plot_all_regions(repo_root):
         if not (region_dir / "factor_history.log").exists():
             continue
         region = region_dir.name
+        if "_" in region:      # skip scratch/DC alternative runs (base regions only)
+            continue
         print(f"\n  Loading {region} for overview figures...")
         result = _load_ga_data(region, repo_root)
         if result[0] is None:
@@ -2069,8 +2162,8 @@ def plot_all_regions(repo_root):
         return
 
     print(f"\n  Generating overview figures for {list(region_data.keys())}...")
-    _try_fig("FigA1 — All-region cost convergence",
-             fig_all_convergence, region_data, overview_dir)
+    _try_fig("FigA1 — Convergence (baseline + scratch, all regions)",
+             fig_all_convergence, repo_root, overview_dir)
     _try_fig("FigA2 — All-region wind/solar scatter",
              fig_all_wind_solar, region_data, overview_dir)
     _try_fig("FigA3 — All-region ternary",
