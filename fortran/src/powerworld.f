@@ -2033,9 +2033,6 @@ C
         FCDISCH    = 0.01         
         DAYH2STOR  = 2.  
         STORUGDYS  = 1. 
-C  Africa-North base solution updated to run solar heat (FACSHT 0 -> 1) per
-C  the PI's revised xx.AFRICA-NORTH; applies wherever IFEGS=1.
-        FACSHT     = 1.
        ENDIF
 C
 C *****************************************************************************
