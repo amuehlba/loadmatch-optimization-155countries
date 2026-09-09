@@ -134,7 +134,7 @@ def _draw_perkwh(ax, df: pd.DataFrame) -> None:
     ax.scatter([xi - dx for xi in x], df.wws_tae.values, s=30, color=INK, marker="D",
                edgecolor="white", linewidth=0.8, zorder=4, label="WWS (Trial-and-Error)")
     ax.scatter([xi + dx for xi in x], df.wws_baseline.values, s=32, color=C_GA, marker="o",
-               edgecolor="white", linewidth=0.8, zorder=4, label="WWS (Baseline)")
+               edgecolor="white", linewidth=0.8, zorder=4, label=r"WWS ($\mathit{Baseline}$)")
     ax.set_ylabel("2050 energy social cost\n(2020 US cents/kWh)")
     ax.set_ylim(0, None)
     minor_ticks(ax, y=True)
@@ -155,7 +155,7 @@ def _draw_reductions(ax, df: pd.DataFrame) -> None:
     ax.bar([xi - 0.27 for xi in x], cost_t, w, color=INK, edgecolor="white",
            linewidth=0.5, zorder=2, label="Aggregate private energy cost, WWS (Trial-and-Error)")
     ax.bar(list(x), cost_b, w, color=C_GA, edgecolor="white",
-           linewidth=0.5, zorder=2, label="Aggregate private energy cost, WWS (Baseline)")
+           linewidth=0.5, zorder=2, label=r"Aggregate private energy cost, WWS ($\mathit{Baseline}$)")
     ax.bar([xi + 0.27 for xi in x], dem, w, color=C_DEMAND, edgecolor="white",
            linewidth=0.5, zorder=2, label="End-use energy demand")
     lo = min(0.0, float(min(cost_t.min(), cost_b.min(), dem.min())))

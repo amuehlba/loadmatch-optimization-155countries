@@ -30,9 +30,12 @@ BAND = "#f5f5f3"           # alternating row/column banding
 C_BASELINE = "#6e7377"     # trial-and-error  (neutral grey reference)
 C_GA = "#2a78d6"           # GA from trial-and-error  (headline result)
 C_SCRATCH = "#eb6834"      # GA from scratch, extended  (context)
-LABEL_BASELINE = "Trial-and-error"
-LABEL_GA = "GA (from trial-and-error)"
-LABEL_SCRATCH = "GA (from scratch, extended)"
+# Settled paper naming (2026): Trial-and-Error (roman), Baseline / Scratch in
+# italic.  Italic is rendered via mathtext (\mathit); apply_style() sets a
+# sans-serif mathtext font so the italic word matches the surrounding label.
+LABEL_BASELINE = "Trial-and-Error"
+LABEL_GA = r"$\mathit{Baseline}$ (from trial-and-error)"
+LABEL_SCRATCH = r"$\mathit{Scratch}$ (from-scratch)"
 
 # --- data-centre supply cases (colour + marker = composite encoding) ----------
 # Order and short labels per the PI (2026-07-18): EGS, WSBH, WSB, WSH, RBH.
@@ -67,6 +70,7 @@ def apply_style() -> None:
     mpl.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "Helvetica Neue", "DejaVu Sans"],
+        "mathtext.fontset": "dejavusans",   # sans italic for \mathit{Baseline/Scratch}
         "font.size": 12,
         "axes.titlesize": 13,
         "axes.labelsize": 13,

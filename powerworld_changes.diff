@@ -1,6 +1,6 @@
---- docs/powerworld_260723.f	2026-07-23 10:12:05
-+++ fortran/src/powerworld.f	2026-07-25 13:20:40
-@@ -661,10 +661,14 @@
+--- docs/powerworld_260908.f	2026-09-09 18:59:06
++++ fortran/src/powerworld.f	2026-09-09 18:59:06
+@@ -671,10 +671,14 @@
  C GRIDNAM = NAME OF GRID WHEN READ IN FROM countrystats.dat
  C GRIDUSE = NAME OF GRID REGION SIMULATED FOR PRESENT SIMULATION (SET HERE)
  C     
@@ -19,7 +19,7 @@
        CHARACTER(14) COUNTRY, NAMEGRID, GRIDNAM,  NAMCOUNGR, GRIDUSE,
       1              NAMECOUN,DOMAIN,   NAMEREAD, DUMMY,     GRIDLOAD,
       1              GRIDCOUN,NAMHTREG, NH,       NAMEORIG,  NAMORIGGR,
-@@ -1146,10 +1150,10 @@
+@@ -1156,10 +1160,10 @@
  C PATHTEMP = DIRECTORY WHERE wwssupworld.dat READ FROM WHEN IFREWRITE=1,2
  C PATHLOAD = DIRECTORY WHERE HOURLY LOAD DATA ARE LOCATED
  C
@@ -34,7 +34,7 @@
  C
  C *****************************************************************************
  C                  PARAMETERS THAT MODEL USERS CHANGE 
-@@ -1234,9 +1238,6 @@
+@@ -1244,9 +1248,6 @@
  C           = 2: INCREASE 2050 DEMAND BY A CONSTANT TW AMOUNT EACH TIME STEP
  C                DUE TO DATA CENTERS. PROVIDE THE ADDED DEMAND WITH
  C                WIND, SOLAR, BATTERIES, & H2 FUEL CELLS ONLY,
@@ -44,7 +44,7 @@
  C           = 0: DO NOT INCREASE DATA CENTER DEMAND OR SUPPLY AT ALL
  C FDATCEN   = FRACTION OF ANNUAL AVG ALL PURPOSE LOAD (TLFIN2050) ADDED ON
  C             TOP OF TLFIN2050 AS INFLEXIBLE LOAD FOR DATACENTERS  
-@@ -1246,14 +1247,19 @@
+@@ -1256,14 +1257,19 @@
  C                        ~1075 GW OF DEMAND 155 COUNTRIES IN 2050
  C           = 0.02 GIVES ~18 GW OF DEMAND IN THE U.S. IN 2050
  C                        ~179 GW OF DEMAND 155 COUNTRIES IN 2050
@@ -67,25 +67,7 @@
  C
        IF (IFDATCEN.GE.1) THEN
         FDATCEN  = 0.10 
-@@ -1372,7 +1378,7 @@
- C *****************************************************************************
- C
-       IF (IFCOUNTRY.EQ.1) THEN
--C      GRIDUSE = 'AFRICA-EAST'
-+       GRIDUSE = 'AFRICA-EAST'
- C      GRIDUSE = 'AFRICA-NORTH'
- C      GRIDUSE = 'AFRICA-SOUTH'
- C      GRIDUSE = 'AFRICA-WEST'
-@@ -1401,7 +1407,7 @@
- C      GRIDUSE = 'SOUTHEAST-ASIA'
- C      GRIDUSE = 'SOUTH-KOREA'
- C      GRIDUSE = 'TAIWAN'
--       GRIDUSE = 'UNITED-STATES'
-+C      GRIDUSE = 'UNITED-STATES'
- C
- C *****************************************************************************
- C THESE GRIDS ARE FOR TESTING EFFECT OF COMBINING COUNTRIES ON GRID STABILITY 
-@@ -1526,6 +1532,12 @@
+@@ -1536,6 +1542,12 @@
         GRIDUSE = 'CONUS'
        ENDIF
  C
@@ -98,10 +80,11 @@
        WRITE(IOUT,111) GRIDUSE
   111  FORMAT('DOMAIN: ',A14,' POWERWORLD.F LOADMATCH GRID INTEGRATION ',
       1       'MODEL'/)
-@@ -1576,6 +1588,14 @@
+@@ -1585,6 +1597,14 @@
+ C      IFREWRITE = 2 
         IFREWRITE = 3 
        ENDIF
- C
++C
 +C     Override IFREWRITE from command-line argument 2 (automated preprocessing).
 +C     Usage: powerworld [REGION] [1|2|3] -- if omitted, default above is kept.
 +      IFARG = ' '
@@ -109,11 +92,10 @@
 +      IF (IFARG.EQ.'1') IFREWRITE = 1
 +      IF (IFARG.EQ.'2') IFREWRITE = 2
 +      IF (IFARG.EQ.'3') IFREWRITE = 3
-+C
+ C
  C INITYEAR = INITIAL YEAR OF SIMULATIONS
  C
-       IF (IFCAISO.EQ.1) THEN
-@@ -2318,11 +2338,6 @@
+@@ -2328,11 +2348,6 @@
          BATDISCH   = 0.         
          DAYH2STOR  = 0.  
          STORUGDYS  = 0. 
@@ -125,7 +107,7 @@
         ENDIF
  C
  C *****************************************************************************
-@@ -2688,10 +2703,29 @@
+@@ -2698,10 +2713,29 @@
         CSPTURBFAC = 0.
         FACSHT     = 0.
  C
@@ -159,7 +141,7 @@
  C
         STORUGDYS  = 0.
  C
-@@ -2702,18 +2736,8 @@
+@@ -2712,18 +2746,8 @@
         FLDISELEC  = 0.
         HCDDADD    = 1.
  C
@@ -178,7 +160,7 @@
         ENDIF 
  C  
  C *****************************************************************************
-@@ -5680,6 +5704,28 @@
+@@ -5727,6 +5751,28 @@
        ENDIF
  C     ENDIF GRIDUSE
  C
@@ -207,7 +189,7 @@
  C *****************************************************************************
  C                        FIND TIME ZONE IN MIDDLE OF DOMAIN
  C *****************************************************************************
-@@ -6638,7 +6684,7 @@
+@@ -6685,7 +6731,7 @@
  C INPUT SUPPLY DATA
  C
         IF (IFREWRITE.EQ.3) THEN
@@ -216,7 +198,7 @@
         ELSEIF (IFREWRITE.EQ.2) THEN
          OPEN(KWWS, FILE = PATHHOME//'wwssupreform.dat')
         ELSEIF (IFREWRITE.EQ.1.OR.IFREWRITE.EQ.0) THEN 
-@@ -8565,6 +8611,10 @@
+@@ -8612,6 +8658,10 @@
        TGWCOMPV   = TGWCOMPV   * FACCOMPV
        TGWUTILPV  = TGWUTILPV  * FACUTILPV
  C
@@ -227,7 +209,7 @@
        IF (TGWSHEAT.GT.SMAL30) THEN
         FACSHT     = MAX(EGWSHEAT / TGWSHEAT, FACSHT)
         TGWSHEAT   = TGWSHEAT * FACSHT
-@@ -11626,7 +11676,7 @@
+@@ -11673,7 +11723,7 @@
  C STORHOURS = AVG NUMBER OF HOURS OF STORAGE AMONG ALL NON-UTES, NON-H2 STORAGE
  C             EXCEPT, IT INCLUDES H2 STORAGE FOR GRID ELECTRICITY
  C
@@ -236,7 +218,7 @@
  C             
  C UTESTWH   = MAX STORAGE CAPACITY (TWH) UNDERGROUND SEAS HEAT STORAGE IN SOIL 
  C             REALLY TWH OF ELECTRICITY STORAGE THAT GIVES NECESSARY
-@@ -11643,7 +11693,7 @@
+@@ -11690,7 +11740,7 @@
  C FEXISTPHS = FRACTION OF PROPOSED PHS STORAGE THAT ALREADY EXISTS
  C TEXISTPHS = EXISTING PUMPED-HYDRO STORAGE (PHS) INSTALLED CAPACITY (TW)
  C
@@ -245,7 +227,7 @@
  C
  C FRACCSP   = FRAC OF KWH OF NON-UTES STORAGE IN PHASE-CHANGE MATERIAL FROM CSP
  C FRACPHS   = FRAC OF KWH OF NON-UTES STORAGE IN PUMPED-HYDRO STORAGE
-@@ -11685,14 +11735,14 @@
+@@ -11732,14 +11782,14 @@
  C             PRODUCE AND COMPRESS H2 = ENERGY EMBODIED IN H2 / H2CHAREFF
  C           = FCDISCH (TW) / (H2DCEFF * H2CHAREFF)
  C     
@@ -268,7 +250,7 @@
  C     
        SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
       1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
-@@ -16766,6 +16816,13 @@
+@@ -16810,6 +16860,13 @@
  C PKHYDISCH = MAX DISCHARGE RATE HYDRO FOR PEAKING POWER ALONE (TW) BEFORE T&D
  C           = HYDISCHTW - BASEHYD 
  C
@@ -282,7 +264,7 @@
           IF (EXCESIN.GT.1.0E-12) THEN
            WRITE(IOUT,208)
            WRITE(IOUT,285) TIMWWS(J)/HRSPDAY, STORTEM,EXCESIN,STORSUB,
-@@ -21444,3 +21501,221 @@
+@@ -21482,3 +21539,221 @@
  C
        STOP
        END

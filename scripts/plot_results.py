@@ -1966,8 +1966,8 @@ def fig_all_convergence(repo_root, overview_dir, regions=None):
 
     # Legend 1: what the line style means (scenario).  Legend 2: region colours.
     style_handles = [
-        Line2D([0], [0], color="0.25", lw=2.4, ls="-",  label="Baseline (from trial-and-error)"),
-        Line2D([0], [0], color="0.25", lw=2.4, ls="--", label="Scratch (from scratch)"),
+        Line2D([0], [0], color="0.25", lw=2.4, ls="-",  label=r"$\mathit{Baseline}$ (from trial-and-error)"),
+        Line2D([0], [0], color="0.25", lw=2.4, ls="--", label=r"$\mathit{Scratch}$ (from-scratch)"),
     ]
     leg1 = ax.legend(handles=style_handles, loc="lower right", frameon=False, fontsize=10)
     ax.add_artist(leg1)
