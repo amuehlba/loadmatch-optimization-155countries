@@ -27,7 +27,8 @@
 #SBATCH --mem=96G
 
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "${SLURM_SUBMIT_DIR:-.}"
+[ -d data/results_verification ] || { echo "ERROR: run from the repo root (data/results_verification not found in $PWD)"; exit 1; }
 source .venv/bin/activate 2>/dev/null || true
 mkdir -p logs wwshourly_US
 

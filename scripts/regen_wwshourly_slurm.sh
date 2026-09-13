@@ -30,7 +30,8 @@
 #SBATCH --mem=96G
 
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "${SLURM_SUBMIT_DIR:-.}"
+[ -f config/workflow.yaml ] || { echo "ERROR: run from the repo root (config/workflow.yaml not found in $PWD)"; exit 1; }
 source .venv/bin/activate 2>/dev/null || true
 mkdir -p logs
 
@@ -39,6 +40,7 @@ REGIONS=()
 while IFS= read -r R; do
   REGIONS+=("$R")
 done < <(sed -n 's/^[[:space:]]*-[[:space:]]*//p' config/workflow.yaml | grep -E '^[A-Z]')
+[ "${#REGIONS[@]}" -gt 0 ] || { echo "ERROR: no regions parsed from config/workflow.yaml"; exit 1; }
 echo "Regenerating wwshourly for ${#REGIONS[@]} regions"
 echo "binary: $(readlink -f fortran/bin/powerworld)"
 
