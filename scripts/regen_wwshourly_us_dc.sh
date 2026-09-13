@@ -19,6 +19,7 @@
 #   sbatch scripts/regen_wwshourly_us_dc.sh
 # ============================================================================
 #SBATCH --job-name=uswwsh
+#SBATCH --partition=serc
 #SBATCH --output=logs/uswwsh_%j.out
 #SBATCH --error=logs/uswwsh_%j.err
 #SBATCH --time=3:00:00

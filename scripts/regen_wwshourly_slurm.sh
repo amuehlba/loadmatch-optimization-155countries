@@ -22,6 +22,7 @@
 #   sbatch scripts/regen_wwshourly_slurm.sh
 # ============================================================================
 #SBATCH --job-name=wwsh_regen
+#SBATCH --partition=serc
 #SBATCH --output=logs/wwsh_regen_%j.out
 #SBATCH --error=logs/wwsh_regen_%j.err
 #SBATCH --time=6:00:00
