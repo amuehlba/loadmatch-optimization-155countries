@@ -37,13 +37,16 @@ ALWAYS_LOCK="HCDDADD FMORTBAU"
 LOCK_CASE2="FACRESPV FACCOMPV CSPTURBFAC FACSHT STORHCOLD STORHHWAT STORHPHS STORUGDYS CPERFORM"
 LOCK_CASE3="FACONWIN FACOFFWIN FACUTILPV CSPTURBFAC FACSHT STORHCOLD STORHHWAT STORHPHS STORUGDYS CPERFORM"
 
-# tag | results-dir suffix | scenario flags | hj-locks
+# tag | results-dir suffix | scenario flags | hj-locks | [seed-dir suffix]
+# The 5th arg overrides which optimum is used as the seed.  Most cases seed from
+# their own DC optimum (default = their own suffix).  The EGS case (dc1) is an
+# evaluate-only run with no GA optimum of its own, so it seeds from the base
+# optimum ("") like the DC campaign does.
 run_case () {
-  local TAG="$1" SUFFIX="$2" SCEN="$3" LOCKS="$4"
-  local DIR="data/results_verification/${R}${SUFFIX}"
-  local SEED="${DIR}/genetic_factors.dat"
-  if [ ! -f "$SEED" ]; then echo "  [SKIP] $TAG : optimum not found ($SEED)"; return; fi
-  echo "=== $TAG   dir=${DIR}   ($(date)) ==="
+  local TAG="$1" SUFFIX="$2" SCEN="$3" LOCKS="$4" SEEDSUF="${5-$2}"
+  local SEED="data/results_verification/${R}${SEEDSUF}/genetic_factors.dat"
+  if [ ! -f "$SEED" ]; then echo "  [SKIP] $TAG : seed not found ($SEED)"; return; fi
+  echo "=== $TAG   seed=${SEED}   ($(date)) ==="
   # shellcheck disable=SC2086
   if python -m scripts.run_full_workflow --region "$R" --optimizer ga \
         --baseline-start "$SEED" --evaluate-only --parallel-evals 1 \
@@ -57,7 +60,7 @@ run_case () {
 }
 
 run_case base        ""       ""                              ""
-run_case dc1_EGS     _dc1     "--datacenter 1"                "$ALWAYS_LOCK"
+run_case dc1_EGS     _dc1     "--datacenter 1"                "$ALWAYS_LOCK"  ""
 run_case dc2_WSBH    _dc2     "--datacenter 2"                "$LOCK_CASE2 $ALWAYS_LOCK"
 run_case dc2bat_WSB  _dc2bat  "--datacenter 2 --dc-label bat" "$LOCK_CASE2 FCDISCH FCCHARG DAYH2STOR $ALWAYS_LOCK"
 run_case dc2h2_WSH   _dc2h2   "--datacenter 2 --dc-label h2"  "$LOCK_CASE2 BATDISCH STORHBAT $ALWAYS_LOCK"
