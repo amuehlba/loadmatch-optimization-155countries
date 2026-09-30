@@ -1,10 +1,10 @@
-"""BAU-vs-WWS figure (base optimization paper), 2020 USD, two panels.
+"""BAU-vs-WWS figure (base optimization paper), 2023 USD, two panels.
 
 Reads the PI's provided tables in data/results_verification/Tables/, sheet
 BAULCOE (per-region source block), and draws two aligned per-region panels
 (same region order in both):
 
-  A) per unit energy (2020 US cents/kWh): 2050 business-as-usual social cost
+  A) per unit energy (2023 US cents/kWh): 2050 business-as-usual social cost
      decomposed into private energy + air-pollution health + climate, with the
      WWS energy cost overlaid for the trial-and-error model and the GA Baseline
      optimization.
@@ -15,8 +15,8 @@ BAULCOE (per-region source block), and draws two aligned per-region panels
      are comparable; the demand reduction is a large part of why the aggregate
      energy-cost reduction is bigger than the per-kWh one in panel A.
 
-WWS (Trial-and-Error) is read from Tables-155Countries-Base-Trial-Error-New.xlsx
-and WWS (Baseline) from Tables-155Countries-Opt-New.xlsx; BAU is the shared
+WWS (Trial-and-Error) is read from Tables-155Countries-Base-Trial-Error.xlsx
+and WWS (Baseline) from Tables-155Countries-Opt.xlsx; BAU is the shared
 reference (verified identical in both).  Panel B uses WWS (Baseline).
 
 Usage
@@ -30,15 +30,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook
 
-from scripts.plot_style import (apply_style, add_region_bands, style_region_axis,
-                                minor_ticks, GRID, MUTED, INK, C_GA)
+from scripts.plot_style import (apply_style, add_region_bands, style_region_axis, region_label,
+                                minor_ticks, GRID, MUTED, INK, C_GA,
+                                LABEL_BASELINE, LABEL_GA)
 
 apply_style()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TABLES = REPO_ROOT / "data" / "results_verification" / "Tables"
-OPT_TABLE = TABLES / "Tables-155Countries-Opt-New.xlsx"               # WWS (Baseline)
-TAE_TABLE = TABLES / "Tables-155Countries-Base-Trial-Error-New.xlsx"  # WWS (Trial-and-Error)
+OPT_TABLE = TABLES / "Tables-155Countries-Opt.xlsx"               # WWS (Baseline)
+TAE_TABLE = TABLES / "Tables-155Countries-Base-Trial-Error.xlsx"  # WWS (Trial-and-Error)
 DEFAULT_OUTDIR = REPO_ROOT / "data" / "results_verification"
 
 # BAULCOE left block (the per-region source that the paper-layout AC:BL block
@@ -56,7 +57,7 @@ C_ENERGY = "#6e7377"    # grey   BAU private energy
 C_HEALTH = "#c98500"    # amber  BAU air-pollution health
 C_CLIMATE = "#e34948"   # red    BAU climate
 C_DEMAND = "#6a3d9a"    # purple end-use demand reduction (panel B)
-# WWS (Baseline) = C_GA blue; WWS (Trial-and-Error) = INK dark.
+# WWS LOADMATCH-O (Baseline) = C_GA blue; WWS LOADMATCH (Trial-and-Error) = INK dark.
 
 
 def _read_baulcoe(path: Path):
@@ -116,7 +117,7 @@ def _load(opt_path: Path = OPT_TABLE, tae_path: Path = TAE_TABLE):
 
 
 def _draw_perkwh(ax, df: pd.DataFrame) -> None:
-    """Panel A: per-region social cost per unit energy (2020 cents/kWh)."""
+    """Panel A: per-region social cost per unit energy (2023 cents/kWh)."""
     n = len(df)
     x = list(range(n))
     energy = df.bau_energy.values
@@ -132,10 +133,10 @@ def _draw_perkwh(ax, df: pd.DataFrame) -> None:
            edgecolor="white", linewidth=0.6, label="BAU climate", zorder=2)
     dx = 0.13
     ax.scatter([xi - dx for xi in x], df.wws_tae.values, s=30, color=INK, marker="D",
-               edgecolor="white", linewidth=0.8, zorder=4, label="WWS (Trial-and-Error)")
+               edgecolor="white", linewidth=0.8, zorder=4, label=LABEL_BASELINE)
     ax.scatter([xi + dx for xi in x], df.wws_baseline.values, s=32, color=C_GA, marker="o",
-               edgecolor="white", linewidth=0.8, zorder=4, label=r"WWS ($\mathit{Baseline}$)")
-    ax.set_ylabel("2050 energy social cost\n(2020 US cents/kWh)")
+               edgecolor="white", linewidth=0.8, zorder=4, label=LABEL_GA)
+    ax.set_ylabel("2050 energy social cost\n(2023 US cents/kWh)")
     ax.set_ylim(0, None)
     minor_ticks(ax, y=True)
     ax.legend(loc="upper right", ncol=1, handletextpad=0.5, borderaxespad=0.8, fontsize=10)
@@ -153,9 +154,9 @@ def _draw_reductions(ax, df: pd.DataFrame) -> None:
     ax.grid(axis="y", color=GRID, linewidth=0.6, zorder=0)
     w = 0.26
     ax.bar([xi - 0.27 for xi in x], cost_t, w, color=INK, edgecolor="white",
-           linewidth=0.5, zorder=2, label="Aggregate private energy cost, WWS (Trial-and-Error)")
+           linewidth=0.5, zorder=2, label="Aggregate private energy cost, " + LABEL_BASELINE)
     ax.bar(list(x), cost_b, w, color=C_GA, edgecolor="white",
-           linewidth=0.5, zorder=2, label=r"Aggregate private energy cost, WWS ($\mathit{Baseline}$)")
+           linewidth=0.5, zorder=2, label="Aggregate private energy cost, " + LABEL_GA)
     ax.bar([xi + 0.27 for xi in x], dem, w, color=C_DEMAND, edgecolor="white",
            linewidth=0.5, zorder=2, label="End-use energy demand")
     lo = min(0.0, float(min(cost_t.min(), cost_b.min(), dem.min())))
@@ -163,7 +164,7 @@ def _draw_reductions(ax, df: pd.DataFrame) -> None:
         ax.axhline(0, color=MUTED, lw=0.8, zorder=3)
     ax.set_ylim(lo - 4 if lo < 0 else 0, 100)
     ax.set_ylabel("Relative reduction vs BAU (%)")
-    style_region_axis(ax, list(df.region))
+    style_region_axis(ax, [region_label(r) for r in df.region])
     minor_ticks(ax, y=True)
     ax.legend(loc="upper right", ncol=1, handletextpad=0.5, borderaxespad=0.8, fontsize=9.5)
 
@@ -191,8 +192,8 @@ def fig_wws_vs_bau(df: pd.DataFrame, agg: dict, outdir: Path) -> None:
 def _print_caption(df: pd.DataFrame, agg: dict) -> None:
     b, en, wb = agg["bau_social_bil"], agg["bau_energy_bil"], agg["wws_baseline_bil"]
     print("  caption: Business-as-usual (BAU) social cost of energy versus WWS by "
-          "region, 2020 USD: BAU private energy, air-pollution health, and climate "
-          "cost per unit energy (2020 US cents/kWh), with WWS for the trial-and-error "
+          "region, 2023 USD: BAU private energy, air-pollution health, and climate "
+          "cost per unit energy (2023 US cents/kWh), with WWS for the trial-and-error "
           "model and GA from the trial-and-error start (a); relative reduction versus "
           "BAU of aggregate private energy cost for the trial-and-error model and GA "
           "from the trial-and-error start, and of end-use energy demand (b).")

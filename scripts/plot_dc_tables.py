@@ -53,19 +53,19 @@ DEFAULT_OUT = REPO_ROOT / "data" / "results_verification"
 apply_style()
 
 _DC_COLOR = {k: c for k, _, c, _ in DC_STRATEGIES}
-BASE_FILE = "Tables-155Countries-Opt-New.xlsx"   # optimized no-DC base (latest -New results)
+BASE_FILE = "Tables-155Countries-Opt.xlsx"   # optimized no-DC base (WWS Baseline)
 
 # PI decision: exclude Greenland & Iceland rooftop (case 3, RBH) results from the
 # figures (aggregate total and per-region distribution); noted in the caption.
-EXCLUDE = {"Tables-155-DC-RBH-New.xlsx": {"Greenland", "Iceland"}}
+EXCLUDE = {"Tables-155-DC-RBH.xlsx": {"Greenland", "Iceland"}}
 
 CASES = [
     (BASE_FILE,                     "Base (no DC)", C_BASELINE),
-    ("Tables-155-DC-EGS-New.xlsx",  "DC EGS",  _DC_COLOR["dc1"]),
-    ("Tables-155-DC-WSBH-New.xlsx", "DC WSBH", _DC_COLOR["dc2"]),
-    ("Tables-155-DC-WSB-New.xlsx",  "DC WSB",  _DC_COLOR["dc2bat"]),
-    ("Tables-155-DC-WSH-New.xlsx",  "DC WSH",  _DC_COLOR["dc2h2"]),
-    ("Tables-155-DC-RBH-New.xlsx",  "DC RBH",  _DC_COLOR["dc2rc"]),
+    ("Tables-155-DC-EGS.xlsx",  "DC EGS",  _DC_COLOR["dc1"]),
+    ("Tables-155-DC-WSBH.xlsx", "DC WSBH", _DC_COLOR["dc2"]),
+    ("Tables-155-DC-WSB.xlsx",  "DC WSB",  _DC_COLOR["dc2bat"]),
+    ("Tables-155-DC-WSH.xlsx",  "DC WSH",  _DC_COLOR["dc2h2"]),
+    ("Tables-155-DC-RBH.xlsx",  "DC RBH",  _DC_COLOR["dc2rc"]),
 ]
 
 

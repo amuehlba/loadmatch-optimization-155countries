@@ -49,6 +49,7 @@ from scripts.run_full_workflow import (
     extract_fortran_region_defaults,
 )
 from src.io.dat_parser import read_dat as _read_dat
+from scripts.plot_style import LABEL_BASELINE, LABEL_GA, LABEL_SCRATCH, TAE_IT, region_label
 
 # ── matplotlib publication defaults (SKILL.md spec) ───────────────────────────
 OKABE_ITO = [
@@ -59,6 +60,10 @@ OKABE_ITO = [
 mpl.rcParams.update({
     "font.family":       "sans-serif",
     "font.sans-serif":   ["Helvetica", "Arial", "DejaVu Sans"],
+    "mathtext.fontset":  "custom",       # \mathit{Baseline/Scratch} in the text font
+    "mathtext.rm":       "sans",
+    "mathtext.it":       "sans:italic",
+    "mathtext.bf":       "sans:bold",
     "font.size":         8,
     "axes.titlesize":    9,
     "axes.labelsize":    8,
@@ -1789,18 +1794,6 @@ def fig13_sankey(out_path, save_dir, scenario_label="baseline scenario",
 # Multi-region overview figures
 # ══════════════════════════════════════════════════════════════════════════════
 
-_REGION_SHORT = {
-    "UNITED-STATES": "US",   "CANADA":       "CA",   "EUROPE":       "EU",
-    "CHINA":         "CN",   "INDIA":        "IN",   "JAPAN":        "JP",
-    "AUSTRALIA":     "AU",   "RUSSIA":       "RU",   "SOUTHEAST-ASIA": "SEA",
-    "AFRICA-EAST":   "AFR-E","AFRICA-NORTH": "AFR-N","AFRICA-SOUTH": "AFR-S",
-    "AFRICA-WEST":   "AFR-W","MIDEAST":      "ME",   "SOUTH-KOREA":  "KR",
-    "TAIWAN":        "TW",   "PHILIPPINES":  "PH",   "NEW-ZEALAND":  "NZ",
-    "CENTRAL-AMERIC":"CAMR", "CENTRAL-ASIA": "CASA", "SOUTHAM-NW":   "SA-NW",
-    "SOUTHAM-SE":    "SA-SE","MADAGASCAR":   "MDG",  "MAURITIUS":    "MUS",
-    "ICELAND":       "ISL",  "ISRAEL":       "IL",   "JAMAICA":      "JAM",
-    "CUBA":          "CUB",  "HAITI":        "HTI",   "GREENLAND":    "GRL",
-}
 _S3_TERNARY = np.sqrt(3)
 
 # 32-colour palette built from tab20 (20) + 12 hand-picked from tab20b that are
@@ -1818,7 +1811,7 @@ def _region_color(idx):
 
 
 def _rshort(region):
-    return _REGION_SHORT.get(region, region[:4])
+    return region_label(region)
 
 
 def _cap_shares(cap):
@@ -1960,14 +1953,14 @@ def fig_all_convergence(repo_root, overview_dir, regions=None):
 
     ax.axhline(0, color="gray", lw=0.8, ls=":", alpha=0.6)
     ax.set_xlabel("Generation")
-    ax.set_ylabel("Cost reduction vs trial-and-error baseline (%)")
+    ax.set_ylabel(f"Cost reduction vs LOADMATCH ({TAE_IT}) (%)")
     ax.set_xlim(left=1)
     ax.set_ylim(max(-60.0, ymin - 3.0), min(100.0, ymax + 3.0))
 
     # Legend 1: what the line style means (scenario).  Legend 2: region colours.
     style_handles = [
-        Line2D([0], [0], color="0.25", lw=2.4, ls="-",  label=r"$\mathit{Baseline}$ (from trial-and-error)"),
-        Line2D([0], [0], color="0.25", lw=2.4, ls="--", label=r"$\mathit{Scratch}$ (from-scratch)"),
+        Line2D([0], [0], color="0.25", lw=2.4, ls="-",  label=LABEL_GA),
+        Line2D([0], [0], color="0.25", lw=2.4, ls="--", label=LABEL_SCRATCH),
     ]
     leg1 = ax.legend(handles=style_handles, loc="lower right", frameon=False, fontsize=10)
     ax.add_artist(leg1)
@@ -1979,7 +1972,7 @@ def fig_all_convergence(repo_root, overview_dir, regions=None):
 
 
 def fig_all_wind_solar(region_data, overview_dir):
-    """Wind vs solar share scatter for all regions (baseline + GA-optimal)."""
+    """Wind vs solar share scatter for all regions (trial-and-error + GA Baseline)."""
     fig, ax = plt.subplots(figsize=(11, 6))
 
     # Collect axis range
@@ -2017,9 +2010,9 @@ def fig_all_wind_solar(region_data, overview_dir):
 
     legend_handles += [
         Line2D([0], [0], marker="s", color="gray", ms=7, lw=0,
-               markeredgecolor="black", label="Baseline"),
+               markeredgecolor="black", label=LABEL_BASELINE),
         Line2D([0], [0], marker="^", color="gray", ms=7, lw=0,
-               markeredgecolor="black", label="GA optimal"),
+               markeredgecolor="black", label=LABEL_GA),
     ]
     ax.set_xlabel("Solar share of 2050 installed capacity (%)")
     ax.set_ylabel("Wind share of 2050 installed capacity (%)")
@@ -2031,7 +2024,7 @@ def fig_all_wind_solar(region_data, overview_dir):
 
 
 def fig_all_ternary(region_data, overview_dir):
-    """Wind–Solar–Water ternary for all regions (baseline + GA-optimal)."""
+    """Wind–Solar–Water ternary for all regions (trial-and-error + GA Baseline)."""
     fig, ax = plt.subplots(figsize=(11, 7))
 
     # Draw triangle and grid
@@ -2073,9 +2066,9 @@ def fig_all_ternary(region_data, overview_dir):
 
     legend_handles += [
         Line2D([0], [0], marker="s", color="gray", ms=7, lw=0,
-               markeredgecolor="black", label="Baseline"),
+               markeredgecolor="black", label=LABEL_BASELINE),
         Line2D([0], [0], marker="^", color="gray", ms=7, lw=0,
-               markeredgecolor="black", label="GA optimal"),
+               markeredgecolor="black", label=LABEL_GA),
     ]
     ax.set_xlim(-0.18, 1.18)
     ax.set_ylim(-0.12, _S3_TERNARY / 2 + 0.16)

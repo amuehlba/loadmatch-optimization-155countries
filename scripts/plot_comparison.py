@@ -12,12 +12,20 @@ the regions on the x-axis (shared region order = largest system cost first):
                         (b) GA cost reduction vs trial-and-error (%, linear) - the
                             headline comparison, which is invisible on the log
                             panel because it is ~1-8% against a 10^4 spread.
-  fig_land_comparison  new land for WWS (wind spacing + footprint, % of regional
-                        land) per region on a log axis, trial-and-error vs GA
-                        (dumbbell); the connector length shows where GA changed
+  fig_land_comparison  single panel: new land for WWS (wind spacing + footprint,
+                        % of regional land) per region, linear axis, dumbbell of
+                        trial-and-error, GA-from-trial-and-error and GA-from-
+                        scratch; the connector length shows where GA changed
                         land use.
-  fig_solve_time       GA solve time per region (hours, linear): GA-from-trial-
-                        and-error vs GA-from-scratch.
+  fig_solve_time       two panels:
+                        (a) GA solve time per region (hours, linear): GA-from-
+                            trial-and-error vs GA-from-scratch, with the PI's
+                            mean trial-and-error time per region as a reference;
+                        (b) time to solve all 30 regions (hours, log) per model:
+                            one simulation at a time on one core vs (GA only)
+                            one region at a time on 24 cores vs as run (~3
+                            overlapping jobs for trial-and-error; all regions
+                            at once for the GA) - the parallelisation benefit.
 
 Figures carry no titles or on-figure statistics (journal style): the numbers a
 caption needs are printed to stdout when the script runs.
@@ -39,10 +47,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from scripts.plot_style import (
-    apply_style, region_order, style_region_axis, add_region_bands,
+    apply_style, region_order, style_region_axis, add_region_bands, region_label,
     C_BASELINE, C_GA, C_SCRATCH,
-    LABEL_BASELINE, LABEL_GA, LABEL_SCRATCH,
-    GRID, STICK, MUTED,
+    LABEL_BASELINE, LABEL_GA, LABEL_SCRATCH, TAE_IT, plain_label,
+    GRID, STICK, MUTED, INK, INK_SECONDARY,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +63,18 @@ apply_style()
 # (the differences are ~1-8%, invisible on a log axis otherwise).
 _MARKER = dict(edgecolors="white", linewidths=0.9, zorder=4)
 SZ_BASE, SZ_GA, SZ_SCRATCH = 88, 46, 60
+
+# LOADMATCH trial-and-error effort, as reported by the PI (2026-09) for the 30
+# regions: ~30 simulations per region at 75.3 s each on one core (Intel Xeon
+# Gold 6154) plus ~45 s of expert time per simulation to inspect, adjust and
+# resubmit; run with ~3 jobs overlapping, the tuning took ~17.5 h of expert-
+# attended wall-clock.  75.3 s is also the single-core reference used for the
+# GA's one-simulation-at-a-time (serial) equivalent.
+TAE_SIMS_PER_REGION = 30
+TAE_SEC_PER_SIM = 75.3
+TAE_EXPERT_SEC_PER_SIM = 45.0
+TAE_WALL_HOURS = 17.5
+GA_PARALLEL_EVALS = 24          # --parallel-evals / cores per region job
 
 
 def _load(csv_path: Path) -> pd.DataFrame:
@@ -126,7 +146,7 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path, order) -> None:
         (d["ga_scratch2_cost_bil_per_yr"], C_SCRATCH, "o", LABEL_SCRATCH, SZ_SCRATCH),
     ])
     axA.set_yscale("log")
-    axA.set_ylabel("Annual system cost\n(billion USD yr$^{-1}$, log scale)")
+    axA.set_ylabel("Annual private energy cost\n(billion 2023 USD yr$^{-1}$, log scale)")
     axA.legend([h[k] for k in order_series], order_series, loc="upper right",
                ncols=3, handletextpad=0.2, columnspacing=1.1, borderaxespad=0.2)
     axA.text(0.0, 1.02, "a", transform=axA.transAxes, fontweight="bold",
@@ -141,11 +161,11 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path, order) -> None:
     sc_red = (100.0 * (d["baseline_cost_bil_per_yr"] - d["ga_scratch2_cost_bil_per_yr"])
               / d["baseline_cost_bil_per_yr"])
     _paired_bars(axB, xs, [(d["pct_savings"], C_GA), (sc_red, C_SCRATCH)])
-    axB.set_ylabel("Cost reduction vs\ntrial-and-error (%)")
+    axB.set_ylabel(f"Cost reduction vs LOADMATCH\n({TAE_IT}) (%)")
     axB.text(0.0, 1.02, "b", transform=axB.transAxes, fontweight="bold",
              fontsize=14, va="bottom")
 
-    style_region_axis(axB, order)
+    style_region_axis(axB, [region_label(r) for r in order])
     axA.tick_params(axis="x", length=0)
 
     for ext in ("pdf", "png"):
@@ -160,7 +180,7 @@ def fig_cost_comparison(df: pd.DataFrame, outdir: Path, order) -> None:
               / sc["ga_cost_bil_per_yr"].sum()) if len(sc) else float("nan")
     print(f"  wrote fig_cost_comparison.pdf/.png")
     print(f"    caption stats: total cost over {n} regions "
-          f"{tot_b:,.0f} -> {tot_g:,.0f} billion USD/yr (-{red:.1f}%); "
+          f"{tot_b:,.0f} -> {tot_g:,.0f} billion 2023 USD/yr (-{red:.1f}%); "
           f"per-region GA reduction {d['pct_savings'].min():.1f}-{d['pct_savings'].max():.1f}%; "
           f"GA-from-scratch (extended) is {sc_gap:+.1f}% vs GA-from-trial-and-error over {len(sc)} regions.")
 
@@ -175,26 +195,23 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
     order_l = list(d["region"])
     n = len(d)
     xs = list(range(n))
-    # Panel (b) is the difference in new-land share vs trial-and-error, in
-    # percentage points (the shares are already % of regional land, so a pp
-    # difference is the directly meaningful quantity).
+    # Difference in new-land share vs trial-and-error, in percentage points (the
+    # shares are already % of regional land); caption stats only - the dumbbell
+    # connector already shows it, so there is no separate difference panel.
     d["land_pp_change"] = d["ga_newland_pct_regland"] - d["bl_newland_pct_regland"]
-    # The from-scratch run's land is added to both panels automatically once the
-    # CSV carries the column (ga_scratch2_newland_pct_regland); the current export
-    # only has trial-and-error and GA-from-trial-and-error land.
+    # The from-scratch run's land is added automatically once the CSV carries the
+    # column (ga_scratch2_newland_pct_regland).
     has_sc_land = ("ga_scratch2_newland_pct_regland" in d.columns
                    and d["ga_scratch2_newland_pct_regland"].notna().any())
     if has_sc_land:
         sc_land = pd.to_numeric(d["ga_scratch2_newland_pct_regland"], errors="coerce")
         d["land_pp_change_scratch"] = sc_land - d["bl_newland_pct_regland"]
 
-    fig, (axA, axB) = plt.subplots(
-        2, 1, figsize=(13.5, 7.6), sharex=True,
-        gridspec_kw={"height_ratios": [1.3, 1.0], "hspace": 0.12})
+    fig, ax = plt.subplots(figsize=(13.5, 5.6))
 
-    # (a) absolute new-land share, dumbbell of baseline vs GA (+ from-scratch)
-    add_region_bands(axA, n)
-    axA.grid(axis="y", color=GRID, lw=0.7, zorder=0.5)
+    # absolute new-land share, dumbbell of trial-and-error vs GA (+ from-scratch)
+    add_region_bands(ax, n)
+    ax.grid(axis="y", color=GRID, lw=0.7, zorder=0.5)
     land_series = [
         (d["bl_newland_pct_regland"], C_BASELINE, "o", LABEL_BASELINE, SZ_BASE),
         (d["ga_newland_pct_regland"], C_GA, "o", LABEL_GA, SZ_GA),
@@ -203,30 +220,12 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
     if has_sc_land:
         land_series.append((sc_land, C_SCRATCH, "o", LABEL_SCRATCH, SZ_SCRATCH))
         order_series.append(LABEL_SCRATCH)
-    h = _dumbbell(axA, xs, land_series)
-    axA.set_ylim(bottom=0)
-    axA.set_ylabel("New land for WWS: spacing + footprint\n"
-                   "(% of regional land area)")
-    axA.legend([h[k] for k in order_series], order_series, loc="upper right", ncols=1)
-    axA.text(0.0, 1.02, "a", transform=axA.transAxes, fontweight="bold",
-             fontsize=14, va="bottom")
-
-    # (b) difference in new-land use vs trial-and-error, percentage points
-    # (signed: up = uses more land, down = less), for GA and (when present) the
-    # from-scratch run.
-    add_region_bands(axB, n)
-    axB.grid(axis="y", color=GRID, lw=0.7, zorder=0.5)
-    axB.axhline(0, color=MUTED, lw=0.9, zorder=1)
-    bars = [(d["land_pp_change"], C_GA)]
-    if has_sc_land:
-        bars.append((d["land_pp_change_scratch"], C_SCRATCH))
-    _paired_bars(axB, xs, bars)
-    axB.set_ylabel("Difference in new-land use vs\ntrial-and-error (percentage points)")
-    axB.text(0.0, 1.02, "b", transform=axB.transAxes, fontweight="bold",
-             fontsize=14, va="bottom")
-
-    style_region_axis(axB, order_l)
-    axA.tick_params(axis="x", length=0)
+    h = _dumbbell(ax, xs, land_series)
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel("New land for WWS: spacing + footprint\n"
+                  "(% of regional land area)")
+    ax.legend([h[k] for k in order_series], order_series, loc="upper right", ncols=1)
+    style_region_axis(ax, [region_label(r) for r in order_l])
 
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_land_comparison.{ext}")
@@ -240,6 +239,97 @@ def fig_land_comparison(df: pd.DataFrame, outdir: Path, order,
              f"{len(flagged)} of {n} exceed baseline by >{100*tolerance:.0f}%: {flagged}")
     print(f"  wrote fig_land_comparison.pdf/.png")
     print(f"    caption stats: GA land difference {pp.min():+.2f} to {pp.max():+.2f} pp; {check}.")
+    if has_sc_land:
+        ps = d["land_pp_change_scratch"]
+        print(f"    caption stats: from-scratch land difference {ps.min():+.2f} to {ps.max():+.2f} pp.")
+
+
+def _solve_time_totals(d: pd.DataFrame, n_regions: int):
+    """Per-model totals over all regions (hours): `serial` = every simulation one
+    after another on one core; `as_run` = wall-clock as actually run (trial-and-
+    error: ~3 overlapping jobs; GA: all regions at once, so the slowest region);
+    `per_region` (GA only) = regions one after another, each on its own 24-core
+    node (the summed per-region times)."""
+    tae_sims = TAE_SIMS_PER_REGION * n_regions
+    tae_cpu = tae_sims * TAE_SEC_PER_SIM / 3600.0
+    tae_expert = tae_sims * TAE_EXPERT_SEC_PER_SIM / 3600.0
+    rows = [dict(label=LABEL_BASELINE, color=C_BASELINE, sims=tae_sims,
+                 serial=tae_cpu + tae_expert, per_region=None, as_run=TAE_WALL_HOURS,
+                 cpu=tae_cpu, expert=tae_expert)]
+    for hcol, ncol, color, label in (("hours", "n_evaluations", C_GA, LABEL_GA),
+                                     ("hours_scratch2", "scratch2_n_evaluations",
+                                      C_SCRATCH, LABEL_SCRATCH)):
+        if hcol not in d or d[hcol].isna().all() or ncol not in d:
+            continue
+        sims = float(pd.to_numeric(d[ncol], errors="coerce").sum())
+        rows.append(dict(label=label, color=color, sims=sims,
+                         serial=sims * TAE_SEC_PER_SIM / 3600.0,
+                         per_region=float(d[hcol].sum()), as_run=float(d[hcol].max()),
+                         cpu=None, expert=0.0))
+    return rows
+
+
+def _h(v):
+    """Hours label: 1 decimal below 100 h (rounded half-up, so 11.25 -> 11.3 as
+    in the PI's text), thousands-separated whole hours above."""
+    return f"{v:,.0f} h" if v >= 100 else f"{v + 1e-9:.1f} h"
+
+
+def _draw_solve_totals(ax, rows):
+    """Panel (b): one row per model on a log hour axis.  Open circle = serial
+    (one simulation at a time on one core, plus expert time for trial-and-
+    error); diamond = GA with regions one after another on 24 cores each; filled
+    circle = as run.  The connector spans the parallelisation gain; labels give
+    the speed-up over serial."""
+    ny = len(rows)
+
+    def _mark(x, y, speedup, **kw):
+        ax.scatter(x, y, zorder=5, **kw)
+        ax.text(x, y + 0.2, _h(x), ha="center", va="bottom", fontsize=9.5, color=INK)
+        if speedup:
+            ax.text(x, y - 0.22, speedup, ha="center", va="top", fontsize=9.5,
+                    color=INK_SECONDARY)
+
+    for i, r in enumerate(rows):
+        y = ny - 1 - i
+        pts = [v for v in (r["serial"], r["per_region"], r["as_run"]) if v]
+        ax.plot([min(pts), max(pts)], [y, y], color=STICK, lw=1.6, zorder=2,
+                solid_capstyle="round")
+        _mark(r["serial"], y, None, s=80, facecolors="white", edgecolors=r["color"],
+              linewidths=1.8)
+        if r["per_region"]:
+            _mark(r["per_region"], y, f"{r['serial'] / r['per_region']:.1f}\u00d7",
+                  s=56, marker="D", color=r["color"], alpha=0.55, edgecolors="white",
+                  linewidths=0.9)
+        sp = r["serial"] / r["as_run"]
+        _mark(r["as_run"], y, f"{sp:.1f}\u00d7 faster" if sp < 100 else f"{sp:.0f}\u00d7 faster",
+              s=80, color=r["color"], edgecolors="white", linewidths=0.9)
+        note = (f"{r['sims']:,.0f} simulations, "
+                + (f"{_h(r['cpu'])} compute\n+ {_h(r['expert'])} expert time"
+                   if r["expert"] else "no expert time"))
+        ax.text(1.01, y, note, transform=ax.get_yaxis_transform(), ha="left",
+                va="center", fontsize=10, color=INK)
+    ax.set_xscale("log")
+    lo = min(r["as_run"] for r in rows)
+    hi = max(r["serial"] for r in rows)
+    ax.set_xlim(lo / 2.0, hi * 2.0)
+    ax.set_ylim(-0.7, ny - 0.3)
+    ax.set_yticks(range(ny))
+    ax.set_yticklabels([r["label"] for r in reversed(rows)])
+    ax.tick_params(axis="y", length=0)
+    ax.grid(axis="x", which="major", color=GRID, lw=0.7, zorder=0)
+    ax.set_xlabel("Time to solve all 30 regions (hours, log scale)")
+    keys = [
+        plt.Line2D([], [], marker="o", ls="", mfc="white", mec=MUTED, mew=1.8, ms=8,
+                   label=f"One simulation at a time on one core ({TAE_SEC_PER_SIM:g} s each)"),
+        plt.Line2D([], [], marker="D", ls="", color=MUTED, alpha=0.55, mec="white", ms=7,
+                   label=f"LOADMATCH-O: one region at a time, {GA_PARALLEL_EVALS} cores"),
+        plt.Line2D([], [], marker="o", ls="", color=MUTED, mec="white", ms=8,
+                   label=f"As run: {TAE_IT}, ~3 overlapping jobs; LOADMATCH-O, all "
+                         f"regions at once ({GA_PARALLEL_EVALS} cores each)"),
+    ]
+    return ax.legend(handles=keys, loc="lower left", bbox_to_anchor=(0.03, 1.0),
+                     ncols=1, fontsize=9.5, handletextpad=0.3, borderaxespad=0.3)
 
 
 def fig_solve_time(df: pd.DataFrame, outdir: Path, order) -> None:
@@ -257,26 +347,53 @@ def fig_solve_time(df: pd.DataFrame, outdir: Path, order) -> None:
     ns = len(series)
     w = 0.8 / ns
 
-    fig, ax = plt.subplots(figsize=(13.5, 5.2))
-    ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
+    fig, (axA, axB) = plt.subplots(
+        2, 1, figsize=(13.5, 9.8),
+        gridspec_kw={"height_ratios": [1.5, 1.0], "hspace": 0.75})
+
+    # (a) GA solve time per region, trial-and-error mean as a reference line
+    add_region_bands(axA, n)
+    axA.grid(axis="y", color=GRID, lw=0.7, zorder=0)
     for si, (col, color, label) in enumerate(series):
         offset = (si - (ns - 1) / 2.0) * w
-        ax.bar([x + offset for x in xs], d[col], width=w * 0.92,
-               color=color, label=label, zorder=3)
+        axA.bar([x + offset for x in xs], d[col], width=w * 0.92,
+                color=color, label=label, zorder=3)
+    tae_region_h = TAE_WALL_HOURS / n
+    axA.axhline(tae_region_h, color=C_BASELINE, lw=1.6, ls="--", zorder=4,
+                label=f"{LABEL_BASELINE}, mean {tae_region_h:.2f} h per region")
     ymax = max(float(d[col].max()) for col, _, _ in series)
-    ax.set_ylim(0, ymax * 1.22)   # headroom so the upper-right legend clears the bars
-    if ns > 1:
-        ax.legend(loc="upper right", ncols=ns)
-    ax.set_ylabel("GA solve time (hours)")
-    style_region_axis(ax, order_s)
+    axA.set_ylim(0, ymax * 1.22)   # headroom so the upper-right legend clears the bars
+    axA.legend(loc="upper right", ncols=3, fontsize=10)
+    axA.set_ylabel("Solve time per region\n(hours, wall-clock)")
+    style_region_axis(axA, [region_label(r) for r in order_s])
+    axA.text(0.0, 1.02, "a", transform=axA.transAxes, fontweight="bold",
+             fontsize=14, va="bottom")
+
+    # (b) all-region totals: serial vs (GA) one region at a time vs as run
+    rows = _solve_time_totals(d, n)
+    leg = _draw_solve_totals(axB, rows)
+    fig.canvas.draw()   # panel letter sits level with the top of the key
+    top = axB.transAxes.inverted().transform(leg.get_window_extent().extents[2:])[1]
+    axB.text(0.0, top, "b", transform=axB.transAxes, fontweight="bold",
+             fontsize=14, va="top")
 
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_solve_time.{ext}")
     plt.close(fig)
 
-    totals = "; ".join(f"{d[col].sum():.0f} h {label}" for col, _, label in series)
     print(f"  wrote fig_solve_time.pdf/.png")
-    print(f"    caption stats: totals over {n} regions - {totals}.")
+    for r in rows:
+        extra = (f"; one region at a time {r['per_region']:.1f} h "
+                 f"({r['serial'] / r['per_region']:.1f}x)" if r["per_region"] else
+                 f" (compute {_h(r['cpu'])} + expert {_h(r['expert'])} serial)")
+        print(f"    caption stats: {plain_label(r['label'])}: {r['sims']:,.0f} simulations; "
+              f"serial {r['serial']:,.1f} h; as run {r['as_run']:.1f} h "
+              f"({r['serial'] / r['as_run']:.1f}x){extra}.")
+    for col, _, label in series:
+        eff = d[col].sum() * 3600.0 * GA_PARALLEL_EVALS / pd.to_numeric(
+            d["n_evaluations" if col == "hours" else "scratch2_n_evaluations"]).sum()
+        print(f"    {plain_label(label)}: effective {eff:.0f} core-s per simulation under "
+              f"{GA_PARALLEL_EVALS}-way load (vs {TAE_SEC_PER_SIM} s single-core reference).")
 
 
 def main(argv=None) -> None:

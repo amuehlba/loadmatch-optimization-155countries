@@ -39,6 +39,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from scripts.plot_style import region_label
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS = REPO_ROOT / "data" / "results_verification"
 DEFAULT_OUTDIR = RESULTS / "SI_dispatch"
@@ -83,7 +85,7 @@ _XLABEL = ("GMT day of simulation for {region}, "
 
 
 def _display_region(name: str) -> str:
-    return str(name).replace("-", " ").title()
+    return region_label(name)
 
 
 def parse_out(path: Path):
