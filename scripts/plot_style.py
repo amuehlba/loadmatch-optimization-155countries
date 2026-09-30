@@ -30,8 +30,8 @@ BAND = "#f5f5f3"           # alternating row/column banding
 C_BASELINE = "#6e7377"     # trial-and-error  (neutral grey reference)
 C_GA = "#2a78d6"           # GA from trial-and-error  (headline result)
 C_SCRATCH = "#eb6834"      # GA from scratch, extended  (context)
-# Settled paper naming (2026-09): the PI's model is LOADMATCH, the optimised
-# model LOADMATCH-O; the cases Trial-and-Error / Baseline / Scratch are italic.
+# Paper naming: the simulation model is LOADMATCH, the optimization framework
+# LOADMATCH-O; the cases Trial-and-Error / Baseline / Scratch are italic.
 # Italic is rendered via mathtext (\mathit); apply_style() points mathtext at
 # the sans-serif text font so the italic word matches the surrounding label.
 # Hyphens stay outside the math: in mathtext "-" is a minus sign.
@@ -46,8 +46,8 @@ def plain_label(label):
     return label.replace(r"$\mathit{", "").replace("}$", "")
 
 # --- data-centre supply cases (colour + marker = composite encoding) ----------
-# Order and short labels per the PI (2026-07-18): EGS, WSBH, WSB, WSH, RBH.
-# Each case is defined in the caption/text, so the figures use only the codes.
+# Order and short labels: EGS, WSBH, WSB, WSH, RBH.  Each case is defined in the
+# caption/text, so the figures use only the codes.
 DC_STRATEGIES = [
     ("dc1",    "DC EGS",  "#008300", "o"),
     ("dc2",    "DC WSBH", "#2a78d6", "s"),
@@ -79,7 +79,7 @@ def apply_style() -> None:
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "Helvetica Neue", "DejaVu Sans"],
         # mathtext in the text font, so \mathit{Baseline/Scratch} is Arial Italic
-        # (DejaVu Sans where Arial is absent, e.g. Sherlock)
+        # (DejaVu Sans where Arial is absent)
         "mathtext.fontset": "custom",
         "mathtext.rm": "sans",
         "mathtext.it": "sans:italic",
@@ -112,10 +112,10 @@ def apply_style() -> None:
 
 
 def apply_dc_style():
-    """DC-paper house style (PI request 2026-07-18): same base as apply_style()
-    but Times New Roman serif for all text, including math (H2 subscripts,
-    arrows).  ONLY the data-center figures call this; the baseline-optimization
-    figures keep apply_style()."""
+    """Data-center figure style: same base as apply_style() but Times New Roman
+    serif for all text, including math (H2 subscripts, arrows).  Only the
+    data-center figures call this; the baseline-optimization figures keep
+    apply_style()."""
     apply_style()
     mpl.rcParams.update({
         "font.family": "serif",
@@ -125,8 +125,8 @@ def apply_dc_style():
 
 
 def cap_region(name):
-    """PI request: capitalize only the first letter of a country/region name
-    (e.g. 'AFRICA-EAST' -> 'Africa-east')."""
+    """Capitalize only the first letter of a country/region name (data-center
+    figures), e.g. 'AFRICA-EAST' -> 'Africa-east'."""
     return str(name).capitalize()
 
 
@@ -141,7 +141,7 @@ def region_sort_key(name):
 # Display names for the 30 regions in the baseline-optimization figures, keyed
 # by the model's region code.  Chosen for readability and to match the paper
 # text (e.g. 'East Africa', not 'AFRICA-EAST' or 'Africa-East').  The DC figures
-# keep cap_region() (PI request 2026-07-18).
+# use cap_region() instead.
 REGION_LABELS = {
     "AFRICA-EAST": "East Africa",       "AFRICA-NORTH": "North Africa",
     "AFRICA-SOUTH": "Southern Africa",  "AFRICA-WEST": "West Africa",
@@ -159,7 +159,7 @@ REGION_LABELS = {
     "SOUTHEAST-ASIA": "Southeast Asia", "SOUTH-KOREA": "South Korea",
     "TAIWAN": "Taiwan",                 "UNITED-STATES": "United States",
 }
-# Spellings in the PI's Tables that do not reduce to the model code's key.
+# Spellings in the post-processed Tables that do not reduce to the model code's key.
 _REGION_ALIASES = {"middleeast": "MIDEAST", "centralamerica": "CENTRAL-AMERIC"}
 _LABEL_BY_KEY = {region_sort_key(k): v for k, v in REGION_LABELS.items()}
 _LABEL_BY_KEY.update({k: REGION_LABELS[c] for k, c in _REGION_ALIASES.items()})
@@ -167,13 +167,13 @@ _LABEL_BY_KEY.update({k: REGION_LABELS[c] for k, c in _REGION_ALIASES.items()})
 
 def region_label(name):
     """Display name for a region given its model code ('SOUTHAM-SE') or the
-    PI's Tables spelling ('South Am-SE'); unknown names pass through."""
+    Tables spelling ('South Am-SE'); unknown names pass through."""
     return _LABEL_BY_KEY.get(region_sort_key(name), str(name))
 
 
 def minor_ticks(ax, x=False, y=True):
-    """PI request: minor tick marks between the major numbers.  Numeric axes
-    only (skip the categorical case/region axis)."""
+    """Minor tick marks between the major numbers.  Numeric axes only (skip
+    the categorical case/region axis)."""
     from matplotlib.ticker import AutoMinorLocator
     if y:
         ax.yaxis.set_minor_locator(AutoMinorLocator())

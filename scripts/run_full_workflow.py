@@ -1,3 +1,22 @@
+"""LOADMATCH-O driver: genetic-algorithm optimization of the LOADMATCH design
+parameters for one region.
+
+Each candidate is evaluated by a full LOADMATCH run (fortran/bin/powerworld).
+Candidate values reach the binary through data/raw/fortran_factors.dat, which
+the READ_FACTOR_OVERRIDES subroutine appended to powerworld.f reads after the
+region defaults are set.  Parallel evaluations run in isolated workspaces under
+data/tmp_workspaces/.
+
+Outputs go to data/results_verification/<REGION><SUFFIX>/ (summaries, raw
+Fortran reports, factor_history.log, genetic_factors.dat) and the optimized xx
+report to data/results_verification/xx_optimized<SUFFIX>/xx.<SHORTCODE>.
+The suffix isolates alternative runs (_scratch2, _dc1, _dc2rc, ...).
+
+Run from the repo root:
+    python -m scripts.run_full_workflow --region EUROPE --baseline-start defaults ...
+
+Set LOADMATCH_FORTRAN_EXE to use a binary other than fortran/bin/powerworld.
+"""
 import argparse
 import contextlib
 import fcntl
@@ -11,173 +30,127 @@ import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, Sequence, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
-from src.io.dat_parser import read_dat, write_dat
+from src.dat_parser import read_dat, write_dat
+from src.regions import REGION_SHORTCODE
+from src.xx_tools import strip_override_echo
 from scripts.parse_fortran_output import (
-    parse_and_save as _parse_and_save,
-    save_summary as _save_summary,
-    parse_land_area as _parse_land_area,
-    _ANNUAL_COST_RE as _ANNUAL_COST_PATTERN,
+    check_feasibility,
+    parse_and_save,
+    parse_annual_cost,
+    parse_land_area,
+    save_summary,
 )
-# plot_results is imported lazily inside run_workflow() to avoid a circular
-# import (plot_results imports PARAM_REGISTRY etc. from this module).
 
-MIN_FACTOR = 0.05
 FORTRAN_EXE = Path(os.environ.get("LOADMATCH_FORTRAN_EXE",
                                   "fortran/bin/powerworld")).resolve()
 BASE_RAW_DIR = Path("data/raw").resolve()
+RESULTS_ROOT = Path("data/results_verification")
 WORKSPACE_BASE = Path("data/tmp_workspaces")
+_FORTRAN_SRC = Path("fortran/src/powerworld.f")
 
-# Wall-clock ceilings for Fortran subprocesses.  A single model evaluation on
-# the 30s/3yr data takes minutes; anything past FORTRAN_EVAL_TIMEOUT_S is a hung
-# process (I/O stall, non-convergence) and MUST be killed, otherwise it wedges
-# the whole GA for the full SLURM walltime (a hung worker makes future.result()
-# block forever — the try/except cannot help because no exception is raised).
-# Supply preprocessing (IFREWRITE=1,2) is legitimately far slower, so it gets a
-# much larger ceiling.
-FORTRAN_EVAL_TIMEOUT_S = 3600        # 1 h per model evaluation
-FORTRAN_PREP_TIMEOUT_S = 6 * 3600    # 6 h per preprocessing pass
-_DEFAULT_REGION = "UNITED-STATES"
+# Wall-clock ceilings for Fortran subprocesses.  A model evaluation takes
+# minutes; one that exceeds FORTRAN_EVAL_TIMEOUT_S is hung and is killed (and
+# counted as infeasible) so it cannot stall the GA until the job walltime.
+# Supply preprocessing (IFREWRITE=1,2) is legitimately much slower.
+FORTRAN_EVAL_TIMEOUT_S = 3600
+FORTRAN_PREP_TIMEOUT_S = 6 * 3600
+
 # Data-center scenario (Fortran IFDATCEN): 0 = base WWS, 1 = EGS-powered data
-# centers, 2 = WWS-powered data centers.  Set once per workflow via run_workflow
-# (datacenter=...) and passed to the binary as command-line arg 3.
+# centers, 2 = WWS-powered data centers.  Passed to the binary as argument 3.
 _IFDATCEN = 0
-# Land-use cap (percent of regional land area for new wind spacing + footprint,
-# from the xx LANDNEWTECH table).  None = no cap.  Enforced as a graded cost
-# penalty rather than hard infeasibility: a hard cap would dead-end runs whose
-# STARTING point already violates it (e.g. a trial-and-error seed above the cap,
-# or the bootstrap's capacity inflation), whereas the penalty keeps a selection
-# gradient pointing back into compliance.  The effective (selection) cost is
-# multiplied by (1 + _LAND_PENALTY_PER_PP * excess_pp), where excess_pp is the
-# percentage points above the cap, so over-cap candidates are strongly
-# disfavoured among feasible ones (at the default 5.0, e.g. +8 pp over -> 41x).
-# NOTE this is SOFT: if the search finds no feasible compliant solution at all
-# (e.g. a dense, land-tight region optimised from scratch), it still returns the
-# least-penalised feasible one, which can exceed the cap.  Tune with
-# --land-penalty-per-pp.
+
+# Land-use cap: new wind spacing + footprint as percent of regional land area
+# (from the xx LANDNEWTECH table).  None = no cap.  Enforced as a graded cost
+# penalty rather than hard infeasibility, so a starting point above the cap
+# still has a selection gradient back into compliance: the effective
+# (selection) cost is multiplied by (1 + _LAND_PENALTY_PER_PP * excess_pp).
+# The penalty is soft: if no compliant feasible solution is found, the least
+# penalized feasible one is returned and can exceed the cap.
 _MAX_LAND_PCT = None
 _LAND_PENALTY_PER_PP = 5.0
 
+# Results-isolation suffix for the current run ("", "_scratch2", "_dc1", ...),
+# appended to the results dir and the xx_optimized dir.
+_RUN_SUFFIX = ""
+
+# Serializes direct (non-workspace) Fortran runs, which share
+# data/raw/fortran_factors.dat, across concurrent jobs.
+_FORTRAN_LOCK_PATH = Path("data/.fortran_run.lock")
+
 
 def _apply_land_cap(cost, stdout):
-    """Effective (selection) cost after the land-use penalty.
-
-    The reported costs in all summaries stay the raw parsed values; this
-    penalty only steers the optimizer.  A compliant final solution therefore
-    has identical raw and effective cost."""
+    """Effective (selection) cost after the land-use penalty.  Reported costs
+    in all summaries stay the raw parsed values."""
     if _MAX_LAND_PCT is None or cost == float("inf"):
         return cost
-    land = _parse_land_area(stdout).get("new_land_pct_regland")
+    land = parse_land_area(stdout).get("new_land_pct_regland")
     if land is None or land <= _MAX_LAND_PCT:
         return cost
     return cost * (1.0 + _LAND_PENALTY_PER_PP * (land - _MAX_LAND_PCT))
 
 
-# Results-isolation suffix for the current run ("", "_scratch", "_dc1", ...).
-# Set by run_workflow; appended to the region results dir and the xx_optimized
-# deliverables dir so alternative runs never overwrite the base-case results.
-_RUN_SUFFIX = ""
-
-# Region name -> the PI's xx-file shortcode (shared, stdlib-only module so the
-# standalone reporting can reuse it without importing this heavy driver).
-from src.region_shortcodes import REGION_SHORTCODE
-
-
-# Deliverable xx files must match the PI's format exactly — strip our
-# READ_FACTOR_OVERRIDES stdout echo before writing them.
-from src.xx_tools import strip_override_echo as _strip_override_echo
-
-
-def _xx_deliverable_path(region):
-    """Destination for a GA-optimal xx file (the PI's deliverable format/name).
-
-    Written to a dedicated folder — NOT data/raw/ — so it can never overwrite the
-    PI's pristine baseline xx.<SHORTCODE> files.  Scenarios get their own folders.
-    """
-    shortcode = REGION_SHORTCODE.get(region, region)
-    subdir = "xx_optimized" + _RUN_SUFFIX
-    dest_dir = Path("data/results_verification") / subdir
+def _xx_report_path(region):
+    """Destination of the optimized xx report.  Kept out of data/raw/ so the
+    reference xx.<SHORTCODE> files there are never overwritten."""
+    dest_dir = RESULTS_ROOT / ("xx_optimized" + _RUN_SUFFIX)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    return dest_dir / "xx.{}".format(shortcode)
-# Lock file used to serialise all direct (non-workspace) Fortran calls so that
-# concurrent cluster jobs writing to the shared fortran/fortran_factors.dat do
-# not clobber each other.
-_FORTRAN_LOCK_PATH = Path("fortran/.fortran_run.lock")
+    return dest_dir / "xx.{}".format(REGION_SHORTCODE.get(region, region))
 
 
 @contextlib.contextmanager
 def _fortran_global_lock():
-    """Exclusive file lock around write-factor + run-Fortran to prevent races."""
+    """Exclusive file lock around write-factor-file + run-Fortran."""
     _FORTRAN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(_FORTRAN_LOCK_PATH, "w") as _lf:
-        fcntl.flock(_lf, fcntl.LOCK_EX)
+    with open(_FORTRAN_LOCK_PATH, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(_lf, fcntl.LOCK_UN)
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def _region_paths(region: str):
-    """Return per-region output paths.  Every region gets its own sub-folder."""
-    results_dir = Path("data/results_verification") / region
+def _region_paths(results_label: str):
+    """Output paths for one results directory (<REGION><SUFFIX>)."""
+    results_dir = RESULTS_ROOT / results_label
     return dict(
-        factor_dest=Path("fortran/fortran_factors.dat"),
-        factor_pathhome=Path("data/raw/fortran_factors.dat"),
+        factor_file=BASE_RAW_DIR / "fortran_factors.dat",
         results_dir=results_dir,
         fortran_log=results_dir / "fortran_stdout.log",
         fortran_err=results_dir / "fortran_stderr.log",
         fortran_out=results_dir / "fortran_last_run.out",
         fortran_baseline_out=results_dir / "fortran_baseline_run.out",
+        fortran_optimal_out=results_dir / "fortran_optimal_run.out",
         history_file=results_dir / "factor_history.log",
-        # Parsed JSON summaries (raw .out files are always kept as well)
         baseline_summary=results_dir / "baseline_summary.json",
         optimal_summary=results_dir / "optimal_summary.json",
-        # Final optimal Fortran output (consumed by plot_results.py)
-        fortran_optimal_out=results_dir / "fortran_optimal_run.out",
     )
 
 
-# Module-level defaults kept for backward compatibility (US region).
-_paths = _region_paths(_DEFAULT_REGION)
-FACTOR_DEST = _paths["factor_dest"]
-FACTOR_PATHHOME = _paths["factor_pathhome"]
-FACTOR_PATHS = [FACTOR_DEST, FACTOR_PATHHOME]
-RESULTS_DIR = _paths["results_dir"]
-FORTRAN_LOG = _paths["fortran_log"]
-FORTRAN_ERR = _paths["fortran_err"]
-FORTRAN_OUT = _paths["fortran_out"]
-HISTORY_FILE = _paths["history_file"]
-
 # ---------------------------------------------------------------------------
-# Parameter registry: every tunable Fortran parameter with CONUS defaults.
+# Parameter registry: every Fortran parameter the override file can set.
 #
-# Each entry:  KEY -> (default_conus, category, description)
+#   KEY -> (default, category, description)
 #
-# Categories control mutation behaviour:
-#   "capacity"  – dimensionless scaling factor (typically 0.05–10)
-#   "ratio"     – dimensionless ratio
-#   "factor"    – dimensionless multiplier
-#   "hours"     – storage / DR duration in hours  (>= 0)
-#   "days"      – storage duration in days         (>= 0)
-#   "tw"        – power rate in TW                 (>= 0)
-#   "fraction"  – value between 0 and 1
-#   "cop"       – coefficient of performance       (1–6)
-#   "fixed"     – locked by default, not a design variable
+# Categories of the design variables (mutated by the GA):
+#   "capacity"  dimensionless capacity scaling factor
+#   "tw"        storage charge/discharge power (TW)
+#   "hours"     storage duration (hours)
+#   "days"      storage duration (days)
+# "fixed" parameters are not design variables and are never written to the
+# factor file, so the Fortran keeps its own (region-specific) values.
 # ---------------------------------------------------------------------------
 PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
-    # --- Original 7 capacity factors ---
+    # --- Generation capacity ---
     "FACONWIN":    (1.0,          "capacity",  "Onshore wind capacity scaling"),
     "FACOFFWIN":   (1.0,          "capacity",  "Offshore wind capacity scaling"),
     "FACUTILPV":   (1.0,          "capacity",  "Utility-scale PV capacity scaling"),
     "FACRESPV":    (1.0,          "capacity",  "Residential rooftop PV scaling"),
     "FACCOMPV":    (1.0,          "capacity",  "Commercial rooftop PV scaling"),
-    # CSPTURBFAC is FIXED, not a design variable: the PI expects concentrated
-    # solar power (CSP) to see little further real-world growth, so its turbine
-    # capacity is held at the model's baseline (not scaled by the GA).  Like
-    # other fixed params it is omitted from the factor file, so Fortran uses its
-    # own region-specific value.
-    "CSPTURBFAC":  (1.0,          "fixed",     "CSP turbine capacity ratio [PI: CSP not a growth tech; held fixed]"),
+    # CSP is not treated as a growth technology: its turbine capacity stays at
+    # the model baseline.
+    "CSPTURBFAC":  (1.0,          "fixed",     "CSP turbine capacity ratio"),
     "FACSHT":      (1.0,          "capacity",  "Solar thermal heat scaling"),
     # --- CSP / storage configuration ---
     "CSPSTORGAT":  (2.61244594,   "fixed",     "CSP storage charge/discharge ratio"),
@@ -191,16 +164,12 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "UGFAC":       (3.0,          "fixed",     "UTES charge rate factor"),
     "STORUGDYS":   (60.0,         "days",      "UTES seasonal heat storage days"),
     "DAYH2STOR":   (40.0,         "days",      "H2 storage days"),
-    # --- Hydropower ---
-    # HPTURBRAT: 10.0 for CONUS; 1.0 for every other region in powerworld.f.
-    # MXHRDRM:   11   for CONUS; 8   for every other region in powerworld.f.
-    # These values are NOT written to factor files (write_factor_files omits fixed
-    # params), so Fortran always uses its region-specific hardcoded value.
-    "HPTURBRAT":   (10.0,         "fixed",     "Hydro turbine discharge ratio (CONUS=10; all others=1)"),
+    # --- Hydropower (region-specific in powerworld.f) ---
+    "HPTURBRAT":   (10.0,         "fixed",     "Hydro turbine discharge ratio"),
     "DAMCAPRAT":   (0.583,        "fixed",     "Hydro dam capacity / annual output"),
     "DAYBASHYD":   (360.0,        "fixed",     "Baseload hydro storage days"),
-    # --- Demand response ---
-    "MXHRDRM":     (11.0,         "fixed",     "Max demand-response shift hours (CONUS=11; all others=8)"),
+    # --- Demand response (region-specific in powerworld.f) ---
+    "MXHRDRM":     (11.0,         "fixed",     "Max demand-response shift hours"),
     # --- Thermal storage and demand response ---
     "COOLSTES":    (0.4,          "fixed",     "Fraction AC from CW-STES vs ice"),
     "PHSMIN":      (0.016,        "fixed",     "Min PHS nameplate capacity (TW)"),
@@ -209,43 +178,58 @@ PARAM_REGISTRY: Dict[str, Tuple[float, str, str]] = {
     "FRSTORINIT":  (0.5,          "fixed",     "Initial storage fill fraction"),
     "FDISTHEAT":   (0.2,          "fixed",     "District heating fraction"),
     # --- Heat pump and health ---
-    # CPERFORM (heat-pump COP) is a FIXED physical constant, NOT a design
-    # variable.  powerworld.f reads it BEFORE optimization and it feeds the
-    # heat/electricity demand split (FISHEAT = FHTBUILD/CPERFORM -> FHTHPUMP ->
-    # FRCLOWHT), i.e. it reshapes the exogenous load.  If the GA is allowed to
-    # move it, every run gets a different demand structure and the optimizer can
-    # cut "cost" by editing the technology assumption instead of the supply
-    # system.  The PI holds it at 4.0 in every simulation, so it is kept "fixed"
-    # (and, like other fixed params, omitted from the factor file) so Fortran
-    # always uses its own 4.0 and FRCLOWHT is identical across all runs.
-    "CPERFORM":    (4.0,          "fixed",     "Heat pump COP (kWh-th/kWh-el) [physical constant; feeds demand split, held fixed]"),
+    # The heat-pump COP feeds the exogenous heat/electricity demand split
+    # (FISHEAT = FHTBUILD/CPERFORM), so it is a fixed physical constant, not a
+    # design variable: every run keeps the same demand structure.
+    "CPERFORM":    (4.0,          "fixed",     "Heat pump COP (kWh-th/kWh-el)"),
     "HCDDADD":     (1.0,          "fixed",     "HDD/CDD daily minimum (numerical safeguard)"),
     "FMORTBAU":    (0.9,          "fixed",     "BAU air-pollution mortality fraction"),
     # --- Hot-water, H2, heat battery ---
     "HWFAC":       (1.0,          "fixed",     "HW-STES charge rate factor"),
     "FCDISCH":     (0.091,        "tw",        "H2 fuel-cell discharge rate (TW)"),
     "FCCHARG":     (0.091,        "tw",        "H2 electrolyser charge rate (TW)"),
-    # STORHHFC is only meaningful when IMERGH2=2 (separate grid/non-grid H2 storage).
-    # The model runs with IMERGH2=1 (merged), where STORHHFC is initialised to 0 and
-    # never read back — optimising it has no effect.  Locked to avoid wasting GA budget.
-    "STORHHFC":    (0.0,          "fixed",     "H2 elec storage hours [inert: IMERGH2=1 overrides to 0]"),
-    # HBTDISCH is overwritten at runtime by HOTINDDEM (industrial hi-temp heat demand)
-    # regardless of the value written to fortran_factors.dat.  Same applies to STORHHBT
-    # (capacity = HBTDISCH × STORHHBT).  Locked so plots and GA reflect reality.
-    "HBTDISCH":    (0.0,          "fixed",     "Heat battery discharge rate [inert: overwritten by HOTINDDEM]"),
-    "STORHHBT":    (15.0,         "fixed",     "Heat battery storage hours [inert: depends on HBTDISCH override]"),
+    # Inert at runtime: STORHHFC is only read when IMERGH2=2 (the model runs
+    # IMERGH2=1), and HBTDISCH (hence STORHHBT) is overwritten from the
+    # industrial high-temperature heat demand.
+    "STORHHFC":    (0.0,          "fixed",     "H2 elec storage hours (inert, IMERGH2=1)"),
+    "HBTDISCH":    (0.0,          "fixed",     "Heat battery discharge rate (inert)"),
+    "STORHHBT":    (15.0,         "fixed",     "Heat battery storage hours (inert)"),
     # --- Industrial heat flexibility ---
     "FRCIHFLEX":   (0.5,          "fixed",     "Flexible industrial heat fraction"),
 }
 
 FACTOR_KEYS: List[str] = [k for k, (_, cat, _) in PARAM_REGISTRY.items() if cat != "fixed"]
 
-_FORTRAN_SRC = Path("fortran/src/powerworld.f")
+CAPACITY_FACTOR_KEYS = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"]
+# Electric generation only: scaled first when bootstrapping feasibility, since
+# electric shortfalls are far more common than heat shortfalls.
+ELECTRIC_CAPACITY_FACTOR_KEYS = [k for k in CAPACITY_FACTOR_KEYS if k != "FACSHT"]
+_STORAGE_CATS = ("tw", "hours", "days")
+_STORAGE_RATE_KEYS = tuple(k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "tw")
+_WIND_KEYS = ("FACONWIN", "FACOFFWIN")
 
+# Relative mutation scale per category (multiplies --ga-mutation-scale).
+_CATEGORY_SCALES = {"capacity": 1.0, "tw": 0.3, "hours": 0.3, "days": 0.3}
+# Mutations are damped by 1 / max(1, |value|)**_MAGNITUDE_DAMPING.
+_MAGNITUDE_DAMPING = 0.5
+# Capacity floor used only when the bootstrap inflates capacity upward.  Design
+# variables themselves are bounded below by zero (technology excluded).
+_INFLATE_FLOOR = 0.05
+
+
+def _clamp(key: str, value: float) -> float:
+    """Design variables are bounded below by zero."""
+    if PARAM_REGISTRY.get(key.upper(), (0, "capacity", ""))[1] == "fixed":
+        return value
+    return max(0.0, value)
+
+
+# ---------------------------------------------------------------------------
+# Starting points
+# ---------------------------------------------------------------------------
 
 def _parse_hardcoded_int(text: str, name: str) -> int:
-    """Return the value of an active (uncommented) integer assignment in powerworld.f."""
-    # Match non-comment lines with exactly this variable name assigned
+    """Value of an active (uncommented) integer assignment in powerworld.f."""
     m = re.search(
         r"^(?!C)\s+" + re.escape(name) + r"\s*=\s*(\d+)",
         text,
@@ -255,376 +239,118 @@ def _parse_hardcoded_int(text: str, name: str) -> int:
 
 
 def extract_fortran_region_defaults(region: str) -> Dict[str, float]:
-    """Parse powerworld.f for the runtime default factor values of a region.
+    """Design-variable values hardcoded in powerworld.f for a region, i.e. the
+    expert trial-and-error solution.
 
-    Correctly evaluates IF/ELSEIF/ELSE/ENDIF blocks conditioned on IMERGH2 and
-    IFEGS (both hardcoded in powerworld.f) so extracted values reflect actual
-    runtime behaviour.  Only the branch that executes at runtime contributes
-    assignments; the ELSE branch of an IF-chain is skipped when a prior branch
-    already matched.  Unknown conditionals (not on IMERGH2 or IFEGS, e.g.
-    FRCLDEGS, IFNEWLOAD) are treated as opaque blocks whose assignments are
-    ignored — this prevents nested sub-branches from overwriting values set by
-    the enclosing recognised branch.  Any key not found falls back to the
-    PARAM_REGISTRY default.
+    Evaluates the IF/ELSEIF/ELSE/ENDIF blocks conditioned on IMERGH2 and IFEGS
+    (both hardcoded in powerworld.f), so only the branch that executes at
+    runtime contributes.  Blocks conditioned on anything else (e.g. FRCLDEGS,
+    IFNEWLOAD) are skipped, so they cannot overwrite values set by an enclosing
+    recognized branch.  Keys not found fall back to the PARAM_REGISTRY default.
     """
     text = _FORTRAN_SRC.read_text()
+    ctrl_val = {"IMERGH2": _parse_hardcoded_int(text, "IMERGH2"),
+                "IFEGS": _parse_hardcoded_int(text, "IFEGS")}
 
-    # Global hardcoded control variables
-    imergh2 = _parse_hardcoded_int(text, "IMERGH2")
-    ifegs   = _parse_hardcoded_int(text, "IFEGS")
-
-    # Find the region block
     block_re = re.compile(
         r"GRIDUSE\.EQ\.'{}'\s*\)(.*?)"
-        r"(?=ELSEIF\s*\(GRIDUSE\.EQ\.|C\s+ENDIF\s+GRIDUSE)".format(
-            re.escape(region)
-        ),
+        r"(?=ELSEIF\s*\(GRIDUSE\.EQ\.|C\s+ENDIF\s+GRIDUSE)".format(re.escape(region)),
         re.DOTALL | re.IGNORECASE | re.MULTILINE,
     )
     m = block_re.search(text)
     if not m:
-        print(
-            "  [WARN] No region block found for '{}' in powerworld.f; "
-            "using PARAM_REGISTRY defaults.".format(region)
-        )
+        print("  [WARN] No region block found for '{}' in powerworld.f; "
+              "using PARAM_REGISTRY defaults.".format(region))
         return {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
 
-    block = m.group(1)
+    cond = r"(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)"
+    if_re = re.compile(r"IF\s*\(\s*" + cond + r"\s*\)\s*THEN", re.IGNORECASE)
+    elif_re = re.compile(r"ELSEIF\s*\(\s*" + cond + r"\s*\)\s*THEN", re.IGNORECASE)
+    if_or_re = re.compile(r"IF\s*\(\s*" + cond + r"\s*\.OR\.\s*" + cond + r"\s*\)\s*THEN",
+                          re.IGNORECASE)
+    elif_or_re = re.compile(r"ELSEIF\s*\(\s*" + cond + r"\s*\.OR\.\s*" + cond
+                            + r"\s*\)\s*THEN", re.IGNORECASE)
+    any_if_re = re.compile(r"^IF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
+    any_elif_re = re.compile(r"^ELSEIF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
+    else_re = re.compile(r"^ELSE\b", re.IGNORECASE)
+    endif_re = re.compile(r"^ENDIF\b", re.IGNORECASE)
+    assign_re = re.compile(
+        r"^\s+([A-Za-z]\w*)\s*=\s*([-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[Ee][-+]?\d+)?)\s*$")
 
-    # --- branch-aware line-by-line parse ---
-    # cond_stack: list of [is_active, any_branch_matched]
-    #   is_active         – this frame's branch is currently executing
-    #   any_branch_matched – some branch in this IF-chain already matched
+    def _holds(groups):
+        """Truth value of one or more (VAR, OP, N) triples joined by .OR."""
+        out = False
+        for i in range(0, len(groups), 3):
+            var, op, val = groups[i].upper(), groups[i + 1].upper(), int(groups[i + 2])
+            out = out or ((ctrl_val[var] == val) if op == "EQ" else (ctrl_val[var] != val))
+        return out
+
+    # cond_stack frames: [branch_active, any_branch_in_chain_matched]
     cond_stack: list = []
-
-    # Tracks nesting depth of IF blocks whose condition variable is NOT in
-    # _ctrl_val (e.g. FRCLDEGS, IFNEWLOAD).  These opaque blocks are skipped:
-    # we neither push a cond_stack frame nor record assignments inside them,
-    # so they cannot overwrite values set by recognised IMERGH2/IFEGS branches.
-    unrecognized_depth: int = 0
-
-    def _currently_active():
-        return all(frame[0] for frame in cond_stack)
-
-    # Regex for recognising known conditionals (IMERGH2 or IFEGS .EQ. / .NE. N)
-    _IF_RE     = re.compile(r"IF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
-                             re.IGNORECASE)
-    _ELIF_RE   = re.compile(r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
-                             re.IGNORECASE)
-    # Compound OR conditional on known variables: IF (VAR.OP.N1.OR.VAR.OP.N2) THEN
-    _IF_OR_RE  = re.compile(
-        r"IF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\.OR\."
-        r"\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
-        re.IGNORECASE,
-    )
-    _ELIF_OR_RE = re.compile(
-        r"ELSEIF\s*\(\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\.OR\."
-        r"\s*(IMERGH2|IFEGS)\s*\.(EQ|NE)\.\s*(\d+)\s*\)\s*THEN",
-        re.IGNORECASE,
-    )
-    # Plain IF(...) THEN only (not ELSEIF) — used to open unrecognized blocks
-    _ANY_PLAIN_IF_RE = re.compile(r"^IF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
-    # Any ELSEIF(...) THEN — used to detect unrecognized continuation branches
-    _ANY_ELIF_RE = re.compile(r"^ELSEIF\s*\(.*\)\s*THEN\b", re.IGNORECASE)
-    _ELSE_RE   = re.compile(r"^ELSE\b", re.IGNORECASE)
-    _ENDIF_RE  = re.compile(r"^ENDIF\b", re.IGNORECASE)
-    _ASSIGN_RE = re.compile(
-        r"^\s+([A-Za-z]\w*)\s*=\s*([-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[Ee][-+]?\d+)?)\s*$"
-    )
-
-    _ctrl_val = {"IMERGH2": imergh2, "IFEGS": ifegs}
-
+    opaque_depth = 0     # nesting depth of skipped (unrecognized) IF blocks
     result: Dict[str, float] = {}
-    _factor_set = set(FACTOR_KEYS)
+    factor_set = set(FACTOR_KEYS)
 
-    for raw_line in block.splitlines():
+    for raw_line in m.group(1).splitlines():
         stripped = raw_line.strip()
-
-        # Skip blank lines and Fortran comments
         if not stripped or stripped.upper().startswith("C"):
             continue
-
         su = stripped.upper()
+        outer_ok = all(frame[0] for frame in cond_stack[:-1])
 
-        # IF (...) THEN on a known variable — only when not inside an opaque block
-        mif = _IF_RE.match(su)
-        if mif and unrecognized_depth == 0:
-            var, op, val = mif.group(1).upper(), mif.group(2).upper(), int(mif.group(3))
-            outer_ok = _currently_active()
-            cond_true = (_ctrl_val[var] == val) if op == "EQ" else (_ctrl_val[var] != val)
-            branch_ok = outer_ok and cond_true
-            cond_stack.append([branch_ok, branch_ok])
+        mif = if_or_re.match(su) or if_re.match(su)
+        if mif and opaque_depth == 0:
+            ok = all(frame[0] for frame in cond_stack) and _holds(mif.groups())
+            cond_stack.append([ok, ok])
             continue
-
-        # IF (VAR.OP.N1.OR.VAR.OP.N2) THEN — compound OR on known variables
-        mif_or = _IF_OR_RE.match(su)
-        if mif_or and unrecognized_depth == 0:
-            var1, op1, val1 = mif_or.group(1).upper(), mif_or.group(2).upper(), int(mif_or.group(3))
-            var2, op2, val2 = mif_or.group(4).upper(), mif_or.group(5).upper(), int(mif_or.group(6))
-            outer_ok = _currently_active()
-            cond1 = (_ctrl_val[var1] == val1) if op1 == "EQ" else (_ctrl_val[var1] != val1)
-            cond2 = (_ctrl_val[var2] == val2) if op2 == "EQ" else (_ctrl_val[var2] != val2)
-            branch_ok = outer_ok and (cond1 or cond2)
-            cond_stack.append([branch_ok, branch_ok])
+        melif = elif_or_re.match(su) or elif_re.match(su)
+        if melif and cond_stack and opaque_depth == 0:
+            ok = outer_ok and not cond_stack[-1][1] and _holds(melif.groups())
+            cond_stack[-1][1] = cond_stack[-1][1] or ok
+            cond_stack[-1][0] = ok
             continue
-
-        # ELSEIF (...) THEN on a known variable — must be inside an open frame
-        melif = _ELIF_RE.match(su)
-        if melif and cond_stack and unrecognized_depth == 0:
-            var, op, val = melif.group(1).upper(), melif.group(2).upper(), int(melif.group(3))
-            already = cond_stack[-1][1]
-            outer_ok = all(frame[0] for frame in cond_stack[:-1])
-            cond_true = (_ctrl_val[var] == val) if op == "EQ" else (_ctrl_val[var] != val)
-            branch_ok = outer_ok and (not already) and cond_true
-            if branch_ok:
-                cond_stack[-1][1] = True
-            cond_stack[-1][0] = branch_ok
+        if any_if_re.match(su):
+            opaque_depth += 1
             continue
-
-        # ELSEIF (VAR.OP.N1.OR.VAR.OP.N2) THEN — compound OR on known variables
-        melif_or = _ELIF_OR_RE.match(su)
-        if melif_or and cond_stack and unrecognized_depth == 0:
-            var1, op1, val1 = melif_or.group(1).upper(), melif_or.group(2).upper(), int(melif_or.group(3))
-            var2, op2, val2 = melif_or.group(4).upper(), melif_or.group(5).upper(), int(melif_or.group(6))
-            already = cond_stack[-1][1]
-            outer_ok = all(frame[0] for frame in cond_stack[:-1])
-            cond1 = (_ctrl_val[var1] == val1) if op1 == "EQ" else (_ctrl_val[var1] != val1)
-            cond2 = (_ctrl_val[var2] == val2) if op2 == "EQ" else (_ctrl_val[var2] != val2)
-            branch_ok = outer_ok and (not already) and (cond1 or cond2)
-            if branch_ok:
-                cond_stack[-1][1] = True
-            cond_stack[-1][0] = branch_ok
+        if any_elif_re.match(su):
             continue
-
-        # Unknown plain IF(...) THEN — opens a new opaque block
-        if _ANY_PLAIN_IF_RE.match(su):
-            unrecognized_depth += 1
+        if else_re.match(su) and opaque_depth == 0 and cond_stack:
+            cond_stack[-1][0] = outer_ok and not cond_stack[-1][1]
             continue
-
-        # Unknown ELSEIF(...) THEN — continuation of an opaque block, no depth change
-        if _ANY_ELIF_RE.match(su):
-            continue
-
-        # ELSE — active only when no prior branch in this chain matched,
-        # and only when we are not inside an opaque unrecognized block
-        if _ELSE_RE.match(su) and unrecognized_depth == 0 and cond_stack:
-            already = cond_stack[-1][1]
-            outer_ok = all(frame[0] for frame in cond_stack[:-1])
-            cond_stack[-1][0] = outer_ok and not already
-            continue
-
-        # ENDIF — close the innermost frame (unrecognized depth first, then cond_stack)
-        if _ENDIF_RE.match(su):
-            if unrecognized_depth > 0:
-                unrecognized_depth -= 1
+        if endif_re.match(su):
+            if opaque_depth > 0:
+                opaque_depth -= 1
             elif cond_stack:
                 cond_stack.pop()
             continue
+        if opaque_depth == 0 and all(frame[0] for frame in cond_stack):
+            ma = assign_re.match(raw_line)
+            if ma and ma.group(1).upper() in factor_set:
+                result[ma.group(1).upper()] = float(ma.group(2))
 
-        # Assignment — record only when in an active context and not inside
-        # an unrecognized (opaque) conditional block
-        if unrecognized_depth == 0 and _currently_active():
-            ma = _ASSIGN_RE.match(raw_line)
-            if ma:
-                key = ma.group(1).upper()
-                if key in _factor_set:
-                    result[key] = float(ma.group(2))
-
-    # Fill any key not found in the block with the PARAM_REGISTRY default
     for k in FACTOR_KEYS:
-        if k not in result:
-            result[k] = PARAM_REGISTRY[k][0]
-
+        result.setdefault(k, PARAM_REGISTRY[k][0])
     found = [k for k in FACTOR_KEYS if result[k] != PARAM_REGISTRY[k][0]]
-    print(
-        "Extracted {} region-specific defaults from powerworld.f for '{}' "
-        "(keys differ from registry: {}).".format(len(found), region, found or "none")
-    )
+    print("Extracted {} region-specific defaults from powerworld.f for '{}' "
+          "(keys differ from registry: {}).".format(len(found), region, found or "none"))
     return result
 
 
-# The capacity-scaling factors (used to decide what inflate_until_feasible touches).
-# CSPTURBFAC is excluded: it is now "fixed" (CSP not a growth tech per the PI), so
-# the bootstrap must not scale it either.
-CAPACITY_FACTOR_KEYS = [
-    "FACONWIN", "FACOFFWIN", "FACUTILPV", "FACRESPV",
-    "FACCOMPV", "FACSHT",
-]
-# Electric-only subset: scale these first during infeasibility expansion since
-# electric-sector shortfalls are far more common than heat-sector shortfalls.
-ELECTRIC_CAPACITY_FACTOR_KEYS = [k for k in CAPACITY_FACTOR_KEYS if k != "FACSHT"]
-
-# Parameters locked by default (not engineering design variables)
-DEFAULT_LOCKED = {"HCDDADD", "FMORTBAU"}
-
-# Per-category default mutation scale multiplier.
-# Scales are relative — they multiply the global --ga-mutation-scale.
-_CATEGORY_SCALES = {
-    "capacity":  1.0,
-    "ratio":     0.5,
-    "factor":    0.5,
-    "hours":     0.3,
-    "days":      0.3,
-    "tw":        0.3,
-    "fraction":  0.5,
-    "cop":       0.2,
-    "fixed":     0.0,   # never mutated (also locked)
-}
-
-DEFAULT_FACTOR_SCALES: Dict[str, float] = {
-    key.lower(): _CATEGORY_SCALES.get(cat, 1.0)
-    for key, (_, cat, _) in PARAM_REGISTRY.items()
-}
-
-# Bounds: (min, max) for each category.  None = no bound.
-_CATEGORY_BOUNDS = {
-    # Capacity factors may reach exactly 0 (technology excluded): the PI's own
-    # trial-and-error solutions use exact zeros (e.g. FACSHT=0.), and the old
-    # MIN_FACTOR floor both biased the search (FACSHT pinned at ~0.05 in 18/30
-    # regions) and was incoherent (seed/crossover values below the floor passed
-    # through unclamped).  MIN_FACTOR is still used as the bootstrap inflation
-    # floor, where building capacity UP is the whole point.
-    "capacity":  (0.0, None),
-    "ratio":     (0.0,        None),
-    "factor":    (0.0,        None),
-    "hours":     (0.0,        None),
-    "days":      (0.0,        None),
-    "tw":        (0.0,        None),
-    "fraction":  (0.0,        1.0),
-    "cop":       (1.0,        6.0),
-    "fixed":     (None,       None),
-}
-
-
-def _clamp(key: str, value: float) -> float:
-    """Clamp *value* to the valid bounds for *key*."""
-    cat = PARAM_REGISTRY.get(key.upper(), (0, "capacity", ""))[1]
-    lo, hi = _CATEGORY_BOUNDS.get(cat, (None, None))
-    if lo is not None and value < lo:
-        value = lo
-    if hi is not None and value > hi:
-        value = hi
-    return value
-
-
-BASELINE_FILE = Path("data/raw/baseline_results.dat")
-
-# Map from baseline_results.dat labels to PARAM_REGISTRY keys.
-# Values that appear on multi-value lines need a positional index.
-_BASELINE_PARSE_MAP = {
-    # (line_prefix, column_index) -> registry key
-    # Line 1: FACONWIN  FACOFFWIN  FACROOFPV  = v0 v1 v2
-    ("FACONWIN", 0): "FACONWIN",
-    ("FACONWIN", 1): "FACOFFWIN",
-    # Line 2: FACRESPV  FACCOMPV   FACUTILPV  = v0 v1 v2
-    ("FACRESPV", 0): "FACRESPV",
-    ("FACRESPV", 1): "FACCOMPV",
-    ("FACRESPV", 2): "FACUTILPV",
-    # Line 3: CSPTURBFAC CSPCHARFAC   FACSHT  = v0 v1 v2
-    ("CSPTURBFAC", 0): "CSPTURBFAC",
-    ("CSPTURBFAC", 2): "FACSHT",
-    # HCHARCSP line
-    ("HCHARCSP", 0): "HCHARCSP",
-    # STORHPHS line
-    ("STORHPHS", 0): "STORHPHS",
-    # STORHCOLD line
-    ("STORHCOLD", 0): "STORHCOLD",
-    # STORHBAT  BATDISCH  STORBTWH
-    ("STORHBAT", 0): "STORHBAT",
-    ("STORHBAT", 1): "BATDISCH",
-    # STORHHFC  H2SDISCH  STORFTWH
-    ("STORHHFC", 0): "STORHHFC",
-    # FCCHARG  FCDISCH
-    ("FCCHARG", 0): "FCCHARG",
-    ("FCCHARG", 1): "FCDISCH",
-    # STORHHBT  HBTDISCH  STOHBTWH
-    ("STORHHBT", 0): "STORHHBT",
-    ("STORHHBT", 1): "HBTDISCH",
-    # STORHHWAT HOTDISCH  STORHTWH
-    ("STORHHWAT", 0): "STORHHWAT",
-    # STORUGDYS  TWINUTES  UTESCHARG
-    ("STORUGDYS", 0): "STORUGDYS",
-    # WARMMAX-TW UGFAC  MXHRDRM
-    ("WARMMAX-TW", 1): "UGFAC",
-    ("WARMMAX-TW", 2): "MXHRDRM",
-    # H2STORMX-TWH HWFAC HPSIZE-TW
-    ("H2STORMX-TWH", 1): "HWFAC",
-    # DAYH2STOR
-    ("DAYH2STOR", 0): "DAYH2STOR",
-    # DAMCAPRAT
-    ("DAMCAPRAT", 0): "DAMCAPRAT",
-    # HPTURBRAT
-    ("HPTURBRAT", 0): "HPTURBRAT",
-}
-
-
-def parse_baseline_factors(path: Path) -> Dict[str, float]:
-    """Parse baseline_results.dat and return a dict of PARAM_REGISTRY keys to values.
-
-    Only parameters that have a mapping in _BASELINE_PARSE_MAP are returned.
-    Remaining parameters should be filled from PARAM_REGISTRY defaults.
-    """
-    factors: Dict[str, float] = {}
-    with open(path, "rb") as f:
-        raw = f.read().decode("ascii", errors="replace")
-
-    for line in raw.replace("\r", "").split("\n"):
-        line = line.strip()
-        if not line or "=" not in line:
-            continue
-        left, right = line.split("=", 1)
-        prefix = left.split()[0] if left.split() else ""
-        values = right.split()
-        for (pfx, col_idx), reg_key in _BASELINE_PARSE_MAP.items():
-            if pfx == prefix and col_idx < len(values):
-                try:
-                    factors[reg_key] = float(values[col_idx])
-                except ValueError:
-                    pass
-    return factors
-
-
 def load_baseline_start(path: Path) -> Dict[str, float]:
-    """Build a complete optimised-param dict from a baseline file.
-
-    Accepts two formats:
-    1. Simple KEY = VALUE format (same as fortran_factors.dat) — preferred for
-       new region files created manually.
-    2. Legacy multi-value format from the original CONUS publication
-       (e.g. 'STORHBAT BATDISCH = 4.0 0.84').
-
-    In both cases, only FACTOR_KEYS (non-fixed) params are loaded from the
-    file.  Fixed params are intentionally excluded — write_factor_files()
-    injects them at their PARAM_REGISTRY defaults so that all four comparison
-    cases (baseline, LP, GA-bl, GA-LP) use identical fixed-param values in
-    every Fortran evaluation.
-    """
-    _factor_key_set = set(FACTOR_KEYS)
-
-    # The PI's xx output files (xx.<CODE> / xxEGS.<REGION>) carry this header and
-    # contain many unrelated "KEY = value" lines.  Route them straight to the
-    # multi-value publication-format parser instead of the simple-format
-    # heuristic below, which is otherwise sensitive to those stray '=' lines.
-    _is_xx = "POWERWORLD.F LOADMATCH" in path.read_text(errors="replace")
-
-    # Try the simple KEY = VALUE format first.
-    # read_dat returns a dict; check how many keys match PARAM_REGISTRY.
-    simple_raw = {} if _is_xx else read_dat(str(path))
-    simple_hits = {k.upper(): float(v) for k, v in simple_raw.items()
-                   if k.upper() in PARAM_REGISTRY}
-
-    if len(simple_hits) >= 5:
-        # Looks like a plain fortran_factors.dat-style file.
-        full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-        # Only overlay FACTOR_KEYS values — skip fixed params from the file.
-        full.update({k: v for k, v in simple_hits.items() if k in _factor_key_set})
-        parsed = {k: v for k, v in simple_hits.items() if k in _factor_key_set}
-    else:
-        # Fall back to legacy multi-value publication format.
-        raw_parsed = parse_baseline_factors(path)
-        full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-        full.update({k: v for k, v in raw_parsed.items() if k in _factor_key_set})
-        parsed = {k: v for k, v in raw_parsed.items() if k in _factor_key_set}
+    """Design-variable dict from a KEY = VALUE factor file (e.g. a saved
+    genetic_factors.dat).  Missing design variables take their registry
+    default; fixed parameters in the file are ignored, so the Fortran keeps
+    its own values for them."""
+    if "POWERWORLD.F LOADMATCH" in path.read_text(errors="replace")[:2000]:
+        raise ValueError("{} is an xx report, not a factor file; seed from the "
+                         "powerworld.f region values with --baseline-start defaults."
+                         .format(path))
+    values = {k.upper(): float(v) for k, v in read_dat(str(path)).items()}
+    parsed = {k: v for k, v in values.items() if k in FACTOR_KEYS}
+    if not parsed:
+        raise ValueError("No design variables found in {}".format(path))
+    full = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
+    full.update(parsed)
 
     print(f"Loaded {len(parsed)} baseline factors from {path}")
     for k, v in sorted(parsed.items()):
@@ -634,27 +360,62 @@ def load_baseline_start(path: Path) -> Dict[str, float]:
     return full
 
 
+def build_scratch_start() -> Dict[str, float]:
+    """Spreadsheet starting point: all capacity factors = 1.0 and all storage
+    design variables = 0, the state that manual LOADMATCH tuning starts from."""
+    factors = {}
+    for key in FACTOR_KEYS:
+        factors[key] = 1.0 if PARAM_REGISTRY[key][1] == "capacity" else 0.0
+    return factors
+
+
 # ---------------------------------------------------------------------------
-# Fortran I/O helpers
+# Fortran I/O
 # ---------------------------------------------------------------------------
 
-def run_single_isolated(label, factors, region, paths):
-    """One Fortran evaluation through an isolated workspace: no global lock, so
-    concurrent jobs (other regions, cases, sweeps) do not serialize on it.
-    Replicates _run_fortran_raw's log side effects from the captured output.
-    Requires explicit factors (cannot express the 'defaults' no-factor-file
-    mode) and assumes supply preprocessing is complete for the region."""
-    preprocess_region(region)
-    _, _, output = run_fortran_worker(label, factors, region)
-    paths["results_dir"].mkdir(parents=True, exist_ok=True)
-    paths["fortran_log"].write_text(output)
-    paths["fortran_err"].write_text("")
-    paths["fortran_out"].write_text(output)
-    return output
+def preprocess_region(region):
+    """Make sure the region's supply file is preprocessed.
+
+    Prerequisites in data/raw/: wwssupworld.<REGION> (aggregated supply) or
+    wwssupworld.dat (raw GATOR-GCMOM supply, reformatted and aggregated here
+    with IFREWRITE=1 and 2).  The first normal run (IFREWRITE=3) then creates
+    wwsmonthly/wwshourly/pkflex.<REGION>.  No-op once wwsmonthly.<REGION>
+    exists.
+    """
+    monthly_file = BASE_RAW_DIR / "wwsmonthly.{}".format(region)
+    supply_agg = BASE_RAW_DIR / "wwssupworld.{}".format(region)
+    supply_raw = BASE_RAW_DIR / "wwssupworld.dat"
+
+    if monthly_file.exists() or supply_agg.exists():
+        return
+    if not supply_raw.exists():
+        raise FileNotFoundError(
+            "Cannot preprocess region '{}': neither {} (aggregated) nor {} (raw "
+            "supply) exists.".format(region, supply_agg, supply_raw))
+    for step, what in (("1", "reformat raw supply"), ("2", "aggregate by region")):
+        print("Preprocessing {}: IFREWRITE={} ({}) ...".format(region, step, what))
+        result = subprocess.run(
+            [str(FORTRAN_EXE), region, step],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+            timeout=FORTRAN_PREP_TIMEOUT_S,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("IFREWRITE={} failed for {}:\n{}".format(
+                step, region, result.stderr))
+
+
+def _fortran_region_args(region):
+    """Command-line arguments for the binary: arg1 = region (always passed; the
+    binary's own default region is AFRICA-EAST); for data-center scenarios also
+    arg2 = IFREWRITE (3, a normal run) and arg3 = IFDATCEN."""
+    args = [region]
+    if _IFDATCEN:
+        args += ["3", str(_IFDATCEN)]
+    return args
 
 
 def _run_fortran_raw(cmd, paths):
-    """Run a Fortran subprocess, capture stdout/stderr, write logs, return stdout."""
+    """Run the binary in the repo root, write the logs, return stdout."""
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -674,150 +435,86 @@ def _run_fortran_raw(cmd, paths):
     return result.stdout
 
 
-def preprocess_region(region):
-    """Run the three-step preprocessing (IFREWRITE=1,2,3) for a new region.
-
-    Prerequisites in data/raw/:
-      - wwssupworld.<REGION>  (raw supply file from GATOR-GCMOM)
-
-    Steps performed:
-      1. IFREWRITE=1 : reformats wwssupworld.<REGION> → wwssupreform.dat
-      2. IFREWRITE=2 : aggregates to wwssupworld.<REGION> (compressed form)
-      3. IFREWRITE=3 : normal model run (also creates wwsmonthly/wwshourly/pkflex)
-
-    Skipped entirely if wwsmonthly.<REGION> already exists (already preprocessed).
-    Only step 1+2 are run if wwssupworld.<REGION> exists but wwsmonthly.<REGION> doesn't.
-    """
-    monthly_file  = BASE_RAW_DIR / "wwsmonthly.{}".format(region)
-    supply_agg    = BASE_RAW_DIR / "wwssupworld.{}".format(region)
-    supply_raw    = BASE_RAW_DIR / "wwssupworld.dat"
-
-    if monthly_file.exists():
-        return  # already fully preprocessed
-
-    if not supply_agg.exists():
-        # Need to run IFREWRITE=1 first to create wwssupreform.dat, then IFREWRITE=2
-        if not supply_raw.exists():
-            raise FileNotFoundError(
-                "Cannot preprocess region '{}': neither\n"
-                "  {}\n  (aggregated, from a previous IFREWRITE=2 run)\nnor\n"
-                "  {}\n  (raw supply file, rename wwssupworld.{} to this)\n"
-                "exists in data/raw/.".format(
-                    region, supply_agg, supply_raw, region
-                )
-            )
-        print("Preprocessing {}: IFREWRITE=1 (reformat raw supply) ...".format(region))
-        paths = _region_paths(region)
-        result = subprocess.run(
-            [str(FORTRAN_EXE), region, "1"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-            timeout=FORTRAN_PREP_TIMEOUT_S,
-        )
-        if result.returncode != 0:
-            raise RuntimeError("IFREWRITE=1 failed for {}:\n{}".format(region, result.stderr))
-
-        print("Preprocessing {}: IFREWRITE=2 (aggregate by region) ...".format(region))
-        result = subprocess.run(
-            [str(FORTRAN_EXE), region, "2"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-            timeout=FORTRAN_PREP_TIMEOUT_S,
-        )
-        if result.returncode != 0:
-            raise RuntimeError("IFREWRITE=2 failed for {}:\n{}".format(region, result.stderr))
-
-    # wwssupworld.<REGION> now exists — proceed to IFREWRITE=3 (normal run).
-    # wwsmonthly.*, wwshourly.*, pkflex.* will be created by that run.
-    print(
-        "Preprocessed supply file wwssupworld.{} found — skipping IFREWRITE=1,2.\n"
-        "  (wwsmonthly.{r}, wwshourly.{r}, pkflex.{r} will be created by the model run.)".format(
-            region, r=region
-        )
-    )
-
-
-def _fortran_region_args(region):
-    """Command-line args for the Fortran binary.
-
-    arg1 = region (GRIDUSE).  The region is ALWAYS passed explicitly: the new
-    powerworld.f defaults to AFRICA-EAST when no argument is given, so relying on
-    the binary's hardcoded default would silently simulate the wrong region.
-    For data-center scenarios we also pass arg2 = IFREWRITE (kept at the country
-    default of 3) and arg3 = IFDATCEN.
-    """
-    args = [region]
-    if _IFDATCEN:
-        args += ["3", str(_IFDATCEN)]
-    return args
-
-
-def run_fortran(region=_DEFAULT_REGION, paths=None):
+def run_fortran(region, paths):
     preprocess_region(region)
-    if paths is None:
-        paths = _region_paths(region)
-    cmd = [str(FORTRAN_EXE)] + _fortran_region_args(region)
-    return _run_fortran_raw(cmd, paths)
+    return _run_fortran_raw([str(FORTRAN_EXE)] + _fortran_region_args(region), paths)
 
 
-def write_factor_files(factors, paths=None):
-    """Write factor files to all three Fortran input paths.
-
-    Only non-fixed params (FACTOR_KEYS) are written.  Fixed params (HPTURBRAT,
-    MXHRDRM, DAMCAPRAT, DAYBASHYD, UGFAC, …) are intentionally omitted so that
-    Fortran falls back to its own region-specific hardcoded values — which differ
-    from the CONUS defaults stored in PARAM_REGISTRY (e.g. HPTURBRAT=1.0 for all
-    non-US regions vs 10.0 for CONUS; MXHRDRM=8 for non-US vs 11 for CONUS).
-
-    This keeps serial evaluations (baseline, LP-eval, GA final) consistent with
-    the parallel workspace evaluations in run_fortran_worker, which also write
-    only FACTOR_KEYS to their workspace-local factor files."""
-    _factor_key_set = set(FACTOR_KEYS)
-    to_write = {k: v for k, v in factors.items() if k in _factor_key_set}
-    # Only write to the two paths that Fortran reads at runtime.
-    factor_paths = [
-        paths["factor_dest"],
-        paths["factor_pathhome"],
-    ] if paths else FACTOR_PATHS
-    for path in factor_paths:
-        write_dat(to_write, path)
+def write_factor_files(factors, paths):
+    """Write the design variables to the factor file the binary reads.  Fixed
+    parameters are omitted so the Fortran keeps its region-specific values
+    (e.g. HPTURBRAT and MXHRDRM differ between the US and other regions)."""
+    write_dat({k: v for k, v in factors.items() if k in FACTOR_KEYS},
+              paths["factor_file"])
 
 
-def _read_factor_file(path: Path) -> Dict[str, float]:
-    if not path.exists():
-        return {}
-    data = read_dat(str(path))
-    return {k.lower(): float(v) for k, v in data.items()}
+def prepare_workspace():
+    """Isolated working directory for one parallel evaluation: data/raw/ inputs
+    are symlinked, while the factor file and every file the model writes
+    (wwsmonthly/wwshourly/pkflex, countrydata.out) stay private."""
+    WORKSPACE_BASE.mkdir(parents=True, exist_ok=True)
+    workspace_path = Path(
+        tempfile.mkdtemp(prefix="loadmatch_run_", dir=str(WORKSPACE_BASE))
+    )
+    data_raw = workspace_path / "data" / "raw"
+    data_raw.mkdir(parents=True, exist_ok=True)
+    for item in BASE_RAW_DIR.iterdir():
+        name = item.name
+        if name == "fortran_factors.dat":
+            continue
+        if (name.startswith("wwsmonthly.")
+                or name.startswith("wwshourly.")
+                or name.startswith("pkflex.")
+                or name == "countrydata.out"):
+            continue
+        target = data_raw / name
+        if target.exists():
+            continue
+        os.symlink(str(item), str(target), target_is_directory=item.is_dir())
+    return workspace_path, data_raw
 
 
-def _verify_factor_files(factors: Dict[str, float], factor_paths=None):
-    if factor_paths is None:
-        factor_paths = FACTOR_PATHS
-    expected = {k.lower(): float(v) for k, v in factors.items()}
-    for path in factor_paths:
-        data = _read_factor_file(path)
-        missing = [k for k in expected if k not in data]
-        if missing:
-            raise RuntimeError(
-                f"Factor file {path} missing keys: {', '.join(missing)}"
-            )
-        for key, val in expected.items():
-            if abs(data.get(key, float("nan")) - val) > 1e-9:
-                raise RuntimeError(
-                    f"Factor mismatch in {path} for {key}: "
-                    f"expected {val}, found {data.get(key)}"
-                )
+def run_fortran_worker(label, factors, region):
+    workspace, data_raw = prepare_workspace()
+    try:
+        write_dat(factors, data_raw / "fortran_factors.dat")
+        result = subprocess.run(
+            [str(FORTRAN_EXE)] + _fortran_region_args(region),
+            cwd=str(workspace),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=FORTRAN_EVAL_TIMEOUT_S,
+        )
+        combined = result.stdout
+        if result.stderr:
+            combined += "\n----- STDERR -----\n" + result.stderr
+        if result.returncode != 0:
+            raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
+        return label, factors, combined
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
-def check_feasibility(fortran_output):
-    text = fortran_output.upper()
-    if "REMAINING INFLEX LOAD" in text or "EXCESIN)>0" in text:
-        return False
-    if "UNMET" in text or "UNSERVED" in text:
-        return False
-    return True
+def run_single_isolated(label, factors, region, paths):
+    """One evaluation in an isolated workspace (no global lock), writing the
+    same logs as a direct run.  Needs explicit factors, so it cannot express
+    the 'defaults' mode (which relies on the factor file being absent)."""
+    preprocess_region(region)
+    _, _, output = run_fortran_worker(label, factors, region)
+    paths["results_dir"].mkdir(parents=True, exist_ok=True)
+    paths["fortran_log"].write_text(output)
+    paths["fortran_err"].write_text("")
+    paths["fortran_out"].write_text(output)
+    return output
 
-def log_candidate(factors, feasible, cost, label="candidate", history_file=None):
-    if history_file is None:
-        history_file = HISTORY_FILE
+
+def parse_cost(stdout):
+    cost = parse_annual_cost(stdout)
+    return float("inf") if cost is None else cost
+
+
+def log_candidate(factors, feasible, cost, label, history_file):
     lines = [
         "LABEL: {}".format(label),
         "FEASIBLE: {}".format(feasible),
@@ -832,39 +529,89 @@ def log_candidate(factors, feasible, cost, label="candidate", history_file=None)
         handle.write("\n".join(lines))
 
 
-def parse_cost(stdout):
-    match = _ANNUAL_COST_PATTERN.search(stdout)
-    if not match:
-        return float("inf")
-    try:
-        return float(match.group(2))
-    except (ValueError, IndexError):
-        return float("inf")
+def _print_tail(label, output):
+    lines = output.strip().splitlines()
+    print("--- Fortran output tail ({}) ---".format(label))
+    print("\n".join(lines[-20:]) if lines else "")
+    print("----------------------------------------")
 
 
-def evaluate_factors(factors, label="candidate", region=_DEFAULT_REGION, paths=None):
-    if paths is None:
-        paths = _region_paths(region)
+def evaluate_factors(factors, label, region, paths):
+    """One direct (locked) evaluation; returns (feasible, cost, stdout)."""
     with _fortran_global_lock():
         write_factor_files(factors, paths)
-        stdout = run_fortran(region=region, paths=paths)
+        stdout = run_fortran(region, paths)
     feasible = check_feasibility(stdout)
     cost = _apply_land_cap(parse_cost(stdout), stdout)
-    log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
-    print("--- Fortran output tail ({}) ---".format(label))
-    lines = stdout.strip().splitlines()
-    tail = "\n".join(lines[-20:]) if lines else ""
-    print(tail)
-    print("----------------------------------------")
+    log_candidate(factors, feasible, cost, label, paths["history_file"])
+    _print_tail(label, stdout)
     return feasible, cost, stdout
 
 
+def evaluate_trials_sequential(specs, region, paths):
+    results = []
+    for spec in specs:
+        feasible, cost, _ = evaluate_factors(spec["factors"], spec["label"], region, paths)
+        results.append({"feasible": feasible, "cost": cost})
+    return results
+
+
+def _worker_init(ifdatcen):
+    """Per-worker initializer: spawned workers re-import this module, so the
+    data-center scenario must be re-established or they would run the base
+    case."""
+    global _IFDATCEN
+    _IFDATCEN = ifdatcen
+
+
+def evaluate_trials_parallel(specs, max_workers, region, paths):
+    results = []
+    with ProcessPoolExecutor(max_workers=max_workers,
+                             initializer=_worker_init,
+                             initargs=(_IFDATCEN,)) as pool:
+        futures = [
+            pool.submit(run_fortran_worker, spec["label"], spec["factors"], region)
+            for spec in specs
+        ]
+        for spec, future in zip(specs, futures):
+            try:
+                label, factors, output = future.result()
+            except Exception as exc:
+                # A failed or timed-out evaluation (e.g. a transient shared-
+                # filesystem error while preparing the workspace) counts as
+                # infeasible, so one bad candidate cannot abort the whole GA.
+                label = spec["label"]
+                print("WARNING: evaluation '{}' failed: {}: {} -- treating as "
+                      "infeasible (run continues).".format(
+                          label, type(exc).__name__, exc))
+                log_candidate(spec["factors"], False, float("inf"), label,
+                              paths["history_file"])
+                results.append({"feasible": False, "cost": float("inf")})
+                continue
+            feasible = check_feasibility(output)
+            cost = _apply_land_cap(parse_cost(output), output)
+            log_candidate(factors, feasible, cost, label, paths["history_file"])
+            _print_tail(label, output)
+            results.append({"feasible": feasible, "cost": cost})
+    return results
+
+
+def _eval_batch(specs, parallel_evals, region, paths):
+    """Evaluate candidate specs in parallel isolated workspaces when
+    parallel_evals > 1, otherwise one after another.  Returns
+    [{feasible, cost}, ...] in specs order."""
+    if parallel_evals > 1 and len(specs) > 1:
+        return evaluate_trials_parallel(specs, min(parallel_evals, len(specs)),
+                                        region, paths)
+    return evaluate_trials_sequential(specs, region, paths)
+
+
 # ---------------------------------------------------------------------------
-# Feasibility inflation  (only touches the original capacity factors)
+# Feasibility bootstrap: find a first feasible point from an infeasible start
 # ---------------------------------------------------------------------------
 
 def inflate_factors(factors, step, locked=()):
-    """Inflate only the capacity-scaling factors; leave others untouched."""
+    """Inflate the unlocked capacity factors by (1 + step)."""
     locked_lower = {k.lower() for k in locked}
     inflated = factors.copy()
     for key in CAPACITY_FACTOR_KEYS:
@@ -872,14 +619,14 @@ def inflate_factors(factors, step, locked=()):
             continue
         value = inflated.get(key, 1.0)
         if value > 0:
-            inflated[key] = max(MIN_FACTOR, value * (1.0 + step))
+            inflated[key] = max(_INFLATE_FLOOR, value * (1.0 + step))
         else:
-            inflated[key] = max(step, MIN_FACTOR)
+            inflated[key] = max(step, _INFLATE_FLOOR)
     return inflated
 
 
 def raise_subunity_factors(factors, step, locked=()):
-    """Raise sub-unity capacity factors toward 1.0; leave others untouched."""
+    """Raise the unlocked sub-unity capacity factors toward 1.0."""
     locked_lower = {k.lower() for k in locked}
     updated = factors.copy()
     changed = False
@@ -888,7 +635,7 @@ def raise_subunity_factors(factors, step, locked=()):
             continue
         value = updated.get(key, 1.0)
         if value <= 0:
-            updated[key] = max(step, MIN_FACTOR)
+            updated[key] = max(step, _INFLATE_FLOOR)
             changed = True
         elif value < 1.0:
             updated[key] = min(1.0, value * (1.0 + step))
@@ -898,11 +645,13 @@ def raise_subunity_factors(factors, step, locked=()):
 
 def _inflation_candidates(base_factors, initial_step, growth, max_attempts,
                           locked, extra_keys):
-    """The (deterministic) candidate sequence of the sequential inflation phases.
+    """The deterministic candidate schedule of the inflation bootstrap.
 
-    The step schedule does not depend on evaluation outcomes, only the stopping
-    point does — so the whole sequence can be precomputed and evaluated in
-    parallel batches, taking the earliest feasible candidate."""
+    Phase 1 raises sub-unity capacity factors toward 1.0; phase 2A scales the
+    electric generation factors; phase 2B scales all capacity factors.  In both
+    phase-2 stages the extra keys (free storage of a data-center case) grow
+    with the same step.  The schedule does not depend on evaluation outcomes,
+    so it can be evaluated in parallel batches."""
     locked_lower = {k.lower() for k in locked}
 
     def _scale_extra(cand, step_val):
@@ -911,31 +660,29 @@ def _inflation_candidates(base_factors, initial_step, growth, max_attempts,
             if val > 0:
                 cand[key] = _clamp(key, val * (1.0 + step_val))
             else:
+                # A zero seed cannot grow multiplicatively; start it from a
+                # fraction of its default.
                 cand[key] = _clamp(key, PARAM_REGISTRY[key][0] * step_val)
 
     cands = []
-    # Phase 1: raise sub-unity capacity factors toward 1.0
     c = base_factors.copy()
     for i in range(max_attempts):
         c, changed = raise_subunity_factors(c, initial_step, locked)
         if not changed:
             break
         cands.append(("inflate-subunity{}".format(i + 1), c.copy()))
-    # Snap unlocked capacity factors to >= 1.0 before scaling
     c = c.copy()
     for key in CAPACITY_FACTOR_KEYS:
         if key.lower() not in locked_lower:
             c[key] = max(1.0, c.get(key, 1.0))
-    # Phase 2A: electric generation factors (+ free storage)
     step = initial_step
     for i in range(max(max_attempts // 2, 4)):
         for key in ELECTRIC_CAPACITY_FACTOR_KEYS:
             if key.lower() not in locked_lower:
-                c[key] = max(MIN_FACTOR, c.get(key, 1.0) * (1.0 + step))
+                c[key] = max(_INFLATE_FLOOR, c.get(key, 1.0) * (1.0 + step))
         _scale_extra(c, step)
         cands.append(("inflate-electric{}".format(i + 1), c.copy()))
         step *= growth
-    # Phase 2B: all capacity factors (+ free storage)
     step = initial_step
     for i in range(max_attempts):
         c = inflate_factors(c, step, locked)
@@ -945,11 +692,40 @@ def _inflation_candidates(base_factors, initial_step, growth, max_attempts,
     return cands
 
 
-def _inflate_until_feasible_parallel(base_factors, initial_step, growth, max_attempts,
-                                     region, paths, locked, extra_keys, parallel_evals):
-    """Batched inflation: evaluate the deterministic candidate schedule in
-    chunks of parallel_evals, stop at the earliest feasible candidate, then
-    refine back toward its (infeasible) predecessor in one more batch."""
+def _refine_between(infeasible_factors, feasible_factors, region, paths,
+                    parallel_evals, points=8):
+    """Evaluate evenly spaced points between a known-infeasible and a known-
+    feasible factor dict in one batch; return the leanest feasible one as
+    (factors, cost, None), or None.  Trims the overshoot of the geometric
+    bootstrap steps."""
+    n = max(3, min(points, parallel_evals if parallel_evals > 1 else points))
+    alphas = [(i + 1) / (n + 1) for i in range(n)]
+    specs = []
+    for i, a in enumerate(alphas):
+        cand = {
+            k: _clamp(k, infeasible_factors.get(k, v) + a * (v - infeasible_factors.get(k, v)))
+            for k, v in feasible_factors.items()
+        }
+        specs.append({"label": "bootstrap-refine{}".format(i + 1), "factors": cand})
+    results = _eval_batch(specs, parallel_evals, region, paths)
+    for spec, res in zip(specs, results):
+        if res["feasible"]:
+            return spec["factors"], res["cost"], None
+    return None
+
+
+def inflate_until_feasible(base_factors, region, paths, locked=(), scale_extra_keys=(),
+                           parallel_evals=1, initial_step=0.1, growth=1.5, max_attempts=25):
+    """Raise capacity factors (and *scale_extra_keys*, e.g. the free storage
+    of a data-center case) until the model is feasible, then refine back toward
+    the last infeasible candidate.  Returns (factors, cost, stdout_or_None).
+
+    scale_extra_keys matters when the shortfall is storage POWER: a constant
+    added load cannot be served by more generation alone once the battery/H2
+    discharge rate is saturated."""
+    locked = tuple(locked or ())
+    locked_lower = {k.lower() for k in locked}
+    extra_keys = [k for k in (scale_extra_keys or ()) if k.lower() not in locked_lower]
     cands = _inflation_candidates(base_factors, initial_step, growth, max_attempts,
                                   locked, extra_keys)
     for start in range(0, len(cands), parallel_evals):
@@ -966,111 +742,14 @@ def _inflate_until_feasible_parallel(base_factors, initial_step, growth, max_att
     raise RuntimeError("Unable to inflate factors to achieve feasibility.")
 
 
-def inflate_until_feasible(base_factors, initial_step=0.1, growth=1.5, max_attempts=25,
-                           region=_DEFAULT_REGION, paths=None, locked=(),
-                           scale_extra_keys=(), parallel_evals=1):
-    """Raise capacity factors (and optionally *scale_extra_keys*, e.g. the free
-    storage variables of a data-center case) until the model is feasible.
-
-    scale_extra_keys matters when the infeasibility is a nighttime storage-POWER
-    shortfall: constant added load (data centers) cannot be served by more PV or
-    wind alone once the seed's battery/H2 discharge rate is saturated, so those
-    keys must grow with the capacity factors or inflation dead-ends."""
-    if paths is None:
-        paths = _region_paths(region)
-    locked = tuple(locked or ())
-    locked_lower = {k.lower() for k in locked}
-    extra_keys = [k for k in (scale_extra_keys or ())
-                  if k.lower() not in locked_lower]
-
-    if parallel_evals and parallel_evals > 1:
-        # Batched evaluation of the same candidate schedule in isolated
-        # workspaces: no global lock, chunk-parallel within the region.
-        return _inflate_until_feasible_parallel(
-            base_factors, initial_step, growth, max_attempts,
-            region, paths, locked, extra_keys, parallel_evals)
-
-    def _scale_extra(cand, step_val):
-        for key in extra_keys:
-            val = cand.get(key, PARAM_REGISTRY[key][0])
-            if val > 0:
-                cand[key] = _clamp(key, val * (1.0 + step_val))
-            else:
-                # A zero seed (e.g. FCDISCH=0 at the no-dc optimum) can never
-                # grow multiplicatively; start it from a fraction of its default.
-                cand[key] = _clamp(key, PARAM_REGISTRY[key][0] * step_val)
-
-    candidate = base_factors.copy()
-    step = initial_step
-
-    # Phase 1: raise sub-unity capacity factors toward 1.0
-    for attempt in range(1, max_attempts + 1):
-        candidate, changed = raise_subunity_factors(candidate, step, locked)
-        label = "inflate-subunity{}".format(attempt)
-        feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
-        if feasible:
-            return candidate, cost, stdout
-        if not changed:
-            break
-
-    # Ensure all capacity factors are at least 1.0 before scaling
-    for key in CAPACITY_FACTOR_KEYS:
-        if key.lower() in locked_lower:
-            continue
-        candidate[key] = max(1.0, candidate.get(key, 1.0))
-
-    # Phase 2A: scale only electric generation factors (wind/PV/CSP).
-    # Electric shortfalls are much more common than heat shortfalls; targeting
-    # electric factors first avoids inflating solar-thermal unnecessarily.
-    # Uses its own step schedule, independent of Phase 2B.
-    half = max(max_attempts // 2, 4)
-    step_elec = initial_step
-    for attempt in range(1, half + 1):
-        for key in ELECTRIC_CAPACITY_FACTOR_KEYS:
-            if key.lower() in locked_lower:
-                continue
-            val = candidate.get(key, 1.0)
-            candidate[key] = max(MIN_FACTOR, val * (1.0 + step_elec))
-        _scale_extra(candidate, step_elec)
-        label = "inflate-electric{}".format(attempt)
-        feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
-        if feasible:
-            return candidate, cost, stdout
-        step_elec *= growth
-
-    # Phase 2B: scale all 7 capacity factors together (electric + heat).
-    # Gets a full max_attempts budget with a fresh step schedule so that a heat-
-    # sector shortfall (requiring FACSHT inflation) never runs out of attempts.
-    step_all = initial_step
-    for attempt in range(1, max_attempts + 1):
-        candidate = inflate_factors(candidate, step_all, locked)
-        _scale_extra(candidate, step_all)
-        label = "inflate-all{}".format(attempt)
-        feasible, cost, stdout = evaluate_factors(candidate, label=label, region=region, paths=paths)
-        if feasible:
-            return candidate, cost, stdout
-        step_all *= growth
-
-    raise RuntimeError("Unable to inflate factors to achieve feasibility.")
-
-
-# ---------------------------------------------------------------------------
-# Scratch start (spreadsheet values): FAC* = 1, storage design variables = 0
-# ---------------------------------------------------------------------------
-
-_SCRATCH_STORAGE_CATS = ("tw", "hours", "days")
-
-# Storage anchors for the scratch bootstrap — fully independent of the
-# trial-and-error solution:
-#   * Power capacities (TW) scale with the region's average all-purpose 2050
-#     load L (summed from countrystats.dat TLOADTOT, an input file):
-#       battery discharge  ~ 1.0 x L   (peak load is ~1.5-2x average and
-#                                       batteries share peak duty with
-#                                       hydro/PHS/CSP)
-#       H2 fuel cell / electrolyser ~ 0.1 x L  (long-duration backup scale)
-#   * Durations are region-independent technology-typical values:
-#       battery 4 h; PHS / cold / hot thermal 12 h (diurnal duty);
-#       H2 30 days and UTES 90 days (seasonal duty).
+# Storage anchors for the scratch bootstrap, derived from input data only
+# (independent of the trial-and-error solution):
+#   * power (TW) scales with the region's average all-purpose 2050 load L
+#     (sum of countrystats.dat TLOADTOT): battery discharge ~ 1.0 x L (peak load
+#     is ~1.5-2x average and batteries share peak duty with hydro/PHS/CSP);
+#     H2 fuel cell / electrolyser ~ 0.1 x L (long-duration backup);
+#   * durations are technology-typical: battery 4 h; PHS / cold / hot-water
+#     12 h (diurnal); H2 30 days and UTES 90 days (seasonal).
 _SCRATCH_TW_PER_AVG_LOAD = {"BATDISCH": 1.0, "FCDISCH": 0.10, "FCCHARG": 0.10}
 _SCRATCH_DURATION_ANCHOR = {
     "STORHBAT": 4.0, "STORHPHS": 12.0, "STORHCOLD": 12.0, "STORHHWAT": 12.0,
@@ -1079,10 +758,10 @@ _SCRATCH_DURATION_ANCHOR = {
 
 
 def _region_avg_load_tw(region: str):
-    """Average all-purpose 2050 load (TW) of a region: sum of the TLOADTOT
-    column (GW) over the region's member countries in countrystats.dat.
-    Region matching truncates to 14 characters (Fortran CHARACTER(14), e.g.
-    CENTRAL-AMERICA -> CENTRAL-AMERIC).  Returns None if unavailable."""
+    """Average all-purpose 2050 load (TW): sum of TLOADTOT (GW) over the
+    region's countries in countrystats.dat.  Region names are matched on 14
+    characters (Fortran CHARACTER(14), e.g. CENTRAL-AMERICA -> CENTRAL-AMERIC).
+    Returns None if unavailable."""
     stats = BASE_RAW_DIR / "countrystats.dat"
     if not stats.exists():
         return None
@@ -1106,19 +785,16 @@ def _region_avg_load_tw(region: str):
 
 
 def _scratch_storage_anchor(region: str) -> Dict[str, float]:
-    """Anchor values for every storage design variable, used by the scratch
-    bootstrap ramp.  Falls back to registry defaults (with a warning) only if
-    the region's load cannot be derived from countrystats.dat."""
+    """Anchor value of every storage design variable for the scratch ramp."""
     avg_load_tw = _region_avg_load_tw(region)
     anchors: Dict[str, float] = {}
     for key in FACTOR_KEYS:
         cat = PARAM_REGISTRY[key][1]
-        if cat not in _SCRATCH_STORAGE_CATS:
+        if cat not in _STORAGE_CATS:
             continue
         if cat == "tw":
             if avg_load_tw is not None:
-                coeff = _SCRATCH_TW_PER_AVG_LOAD.get(key, 0.5)
-                anchors[key] = coeff * avg_load_tw
+                anchors[key] = _SCRATCH_TW_PER_AVG_LOAD.get(key, 0.5) * avg_load_tw
             else:
                 anchors[key] = PARAM_REGISTRY[key][0]
         else:
@@ -1133,163 +809,50 @@ def _scratch_storage_anchor(region: str) -> Dict[str, float]:
     return anchors
 
 
-def _scratch_seed_population(feasible_factors: Dict[str, float],
-                             locked: Sequence[str] = (),
-                             rate_up: bool = False) -> List[Dict[str, float]]:
-    """Deliberately spread starting individuals for the scratch GA.
-
-    A population made only of small mutations of one bootstrap point collapses
-    onto that point's storage/capacity levels (elitist truncation plus blend
-    crossover cannot create material that no individual carries).  These
-    variants scale the storage block down and the capacity factors up/down
-    around the bootstrap point.  Infeasible variants simply die in generation
-    one; feasible ones give the search genuine downward diversity.
-
-    Locked keys are left untouched: scaling a locked variable here would seed
-    the population with off-seed values that crossover then propagates (mutation
-    never resets a locked key), letting the "locked" value drift.  This matters
-    for the WSB/WSH data-center cases, which pin batteries or the H2 pair.
-    """
-    locked_lower = {k.lower() for k in (locked or ())}
-    storage_keys = [k for k in FACTOR_KEYS
-                    if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS
-                    and k.lower() not in locked_lower]
-    capacity_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"
-                     and k.lower() not in locked_lower]
-    rate_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "tw"
-                 and k.lower() not in locked_lower]
-
-    def scaled(s_mult=1.0, f_mult=1.0):
-        v = feasible_factors.copy()
-        for k in storage_keys:
-            v[k] = _clamp(k, v[k] * s_mult)
-        for k in capacity_keys:
-            v[k] = _clamp(k, v[k] * f_mult)
-        return v
-
-    def rate_scaled(variant, r_mult):
-        v = variant.copy()
-        for k in rate_keys:
-            v[k] = _clamp(k, v[k] * r_mult)
-        return v
-
-    variants = []
-    for s in (0.25, 0.5, 0.75):
-        variants.append(scaled(s_mult=s))
-    for f in (0.7, 0.85, 1.15, 1.3):
-        variants.append(scaled(f_mult=f))
-    for s, f in ((0.5, 1.2), (0.25, 1.4), (0.75, 0.9), (0.5, 0.8)):
-        variants.append(scaled(s_mult=s, f_mult=f))
-
-    # Data-center runs: storage-POWER-up variants.  The PI's hand solutions meet
-    # the added load by raising the discharge/charge RATE (plus a little
-    # generation), a direction ordinary mutation cannot climb because the rate
-    # levers start near zero, so multiplicative steps crawl -- and the storage
-    # block above is otherwise only scaled DOWN.  Injecting high-rate genetic
-    # material (alone, and paired with the capacity spread) lets elitist
-    # selection and crossover combine it with the bootstrap's generation to
-    # reach the cheap basin.  Locked rate levers (WSB pins the H2 pair, WSH pins
-    # the battery) are excluded, so this never drifts a locked value.
-    if rate_up and rate_keys:
-        for r in (2.0, 4.0, 8.0):
-            variants.append(rate_scaled(feasible_factors, r))
-        variants.append(rate_scaled(scaled(f_mult=0.7), 8.0))   # power up, capacity down
-        variants.append(rate_scaled(scaled(f_mult=1.3), 4.0))   # power up, capacity up
-    return variants
-
-
-def _zero_mutation_refs(region: str) -> Dict[str, float]:
-    """Reference magnitudes for mutating a parameter away from exactly zero.
-
-    Storage-POWER (tw) keys scale with the region's average load instead of the
-    US-scale registry default: a first step of ~0.09 TW is reasonable for the
-    United States but is ~50x the entire load of Greenland, which is how the GA
-    once grew a 47x-load electrolyzer there.  Duration (hours/days) and
-    dimensionless capacity keys keep the registry default (region-independent).
-    Returns an empty dict when the region load cannot be derived."""
-    refs: Dict[str, float] = {}
-    avg_load_tw = _region_avg_load_tw(region)
-    if avg_load_tw:
-        for key in FACTOR_KEYS:
-            if PARAM_REGISTRY[key][1] == "tw":
-                coeff = _SCRATCH_TW_PER_AVG_LOAD.get(key, 0.5)
-                refs[key] = coeff * avg_load_tw
-    return refs
-
-
-def build_scratch_start() -> Dict[str, float]:
-    """Spreadsheet starting point (per the PI): all capacity factors = 1.0 and
-    all storage design variables = 0; the remaining design variable (heat-pump
-    COP) stays at its registry default.  This is the pre-trial-and-error state
-    the PI starts from when tuning a region by hand."""
-    factors = {k: PARAM_REGISTRY[k][0] for k in FACTOR_KEYS}
-    for key in FACTOR_KEYS:
-        cat = PARAM_REGISTRY[key][1]
-        if cat == "capacity":
-            factors[key] = 1.0
-        elif cat in _SCRATCH_STORAGE_CATS:
-            factors[key] = 0.0
-    return factors
-
-
-def _eval_batch(specs, parallel_evals, region, paths):
-    """Evaluate a list of candidate specs, in parallel isolated workspaces when
-    parallel_evals > 1 (no global Fortran lock), sequentially otherwise.
-    Returns [{feasible, cost}, ...] in specs order."""
-    if parallel_evals and parallel_evals > 1 and len(specs) > 1:
-        return evaluate_trials_parallel(specs, min(parallel_evals, len(specs)),
-                                        region=region, paths=paths)
-    return evaluate_trials_sequential(specs, region=region, paths=paths)
-
-
-def _refine_between(infeasible_factors, feasible_factors, region, paths,
-                    parallel_evals, points=8):
-    """Parallel counterpart of _bisect_between: evaluate an evenly spaced grid
-    of interpolation points between a known-infeasible and a known-feasible
-    factor dict in ONE batch, and return the leanest feasible point found
-    (None if no interpolated point is feasible)."""
-    n = max(3, min(points, parallel_evals if parallel_evals > 1 else points))
-    alphas = [(i + 1) / (n + 1) for i in range(n)]
+def scratch_bootstrap(base_factors, region, paths, parallel_evals=1,
+                      ramp=(0.25, 0.5, 1.0, 1.5, 2.0)):
+    """First feasible point from the scratch start, following the manual
+    procedure: ramp storage toward the load-derived anchors with capacity
+    factors held at 1.0 (all ramp steps in one batch), refine back toward the
+    last infeasible step; if the whole ramp is infeasible, keep storage at the
+    top of the ramp and inflate capacity factors."""
+    anchors = _scratch_storage_anchor(region)
+    ramp_cands = []
     specs = []
-    for i, a in enumerate(alphas):
-        cand = {
-            k: _clamp(k, infeasible_factors.get(k, v) + a * (v - infeasible_factors.get(k, v)))
-            for k, v in feasible_factors.items()
-        }
-        specs.append({"label": "bootstrap-refine{}".format(i + 1), "factors": cand})
+    for frac in ramp:
+        cand = base_factors.copy()
+        for key, anchor in anchors.items():
+            cand[key] = anchor * frac
+        ramp_cands.append(cand)
+        specs.append({"label": "scratch-storage-ramp{:g}".format(frac), "factors": cand})
     results = _eval_batch(specs, parallel_evals, region, paths)
-    for spec, res in zip(specs, results):
+    for i, res in enumerate(results):
         if res["feasible"]:
-            return spec["factors"], res["cost"], None
-    return None
+            lo = base_factors if i == 0 else ramp_cands[i - 1]
+            leaner = _refine_between(lo, ramp_cands[i], region, paths, parallel_evals)
+            return leaner if leaner else (ramp_cands[i], res["cost"], None)
+    return inflate_until_feasible(ramp_cands[-1], region, paths,
+                                  parallel_evals=parallel_evals)
 
 
-# Data-center feasibility probes: power-first, then wind, then generation (PI
-# insight: the added data-center load is constant and is met cheaply by more
-# storage discharge/charge RATE, or by wind, which matches the constant load far
-# better than solar; the PI's hand solutions raise the rate plus a little
-# generation and sit at ~10-20% added cost).  The generic inflation bootstrap
-# raises ALL free variables together, which never visits these directions and
-# strands the GA in an overbuilt-generation basin with the rate levers unused.
+# Data-center feasibility probes.  The added data-center load is constant, and
+# hand-tuned solutions meet it cheaply by raising the storage discharge/charge
+# rate (plus a little generation) or with wind, whose output matches a constant
+# load better than solar.  The generic inflation raises all free variables
+# together and never visits these directions, so they are probed first.
 _DC_PROBE_STEPS = (1.15, 1.3, 1.5, 1.75, 2.0, 2.5, 3.0)
-# Storage-power (discharge/charge rate) levers start near zero, so reaching
-# feasibility on them needs much larger multiplicative steps than generation.
+# Rate levers start near zero, so they need larger multiplicative steps.
 _DC_RATE_PROBE_STEPS = (1.5, 2.0, 3.0, 5.0, 8.0, 12.0)
-_WIND_KEYS = ("FACONWIN", "FACOFFWIN")
-_STORAGE_RATE_KEYS = tuple(k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "tw")
 
 
 def _dc_directional_bootstrap(base_factors, locked, region, paths, parallel_evals):
     """Directional feasibility search for data-center runs.
 
-    Scales one lever group of the seed at a time through per-stage probe steps
-    (one parallel batch each), cheapest lever first: the free storage-power
-    (discharge/charge rate) keys, then the free wind factors, then all free
-    electric generation factors jointly.  Storage energy is left untouched.  The
-    first feasible candidate is grid-refined back toward its predecessor.
-    Returns (factors, cost, stdout_or_None), or None when no single-group
-    candidate is feasible (caller falls back to the generic inflation
-    bootstrap)."""
+    Scales one lever group of the seed at a time (one batch per stage): the
+    free storage rate keys, then the free wind factors, then all free electric
+    generation factors.  Storage energy is left untouched.  The first feasible
+    candidate is refined toward its predecessor.  Returns (factors, cost,
+    None), or None when no stage reaches feasibility."""
     locked_lower = {k.lower() for k in (locked or ())}
     stages = [
         ("rate", [k for k in _STORAGE_RATE_KEYS if k.lower() not in locked_lower],
@@ -1319,15 +882,195 @@ def _dc_directional_bootstrap(base_factors, locked, region, paths, parallel_eval
     return None
 
 
-# Vestigial-capacity groups: parameters the search can leave at small nonzero
-# values even when the corresponding technology is unused, so that capital is
-# paid for idle hardware (PI finding, 2026-07-08).  The GA mutates multiplicatively
-# from a nonzero value, so a shrinking factor approaches 0 asymptotically but
-# essentially never lands on exactly 0 (the 0.05 lower bound was removed, but this
-# is unchanged).  FCCHARG/FCDISCH are zeroed as a PAIR (an electrolyzer without
-# fuel cells, or vice versa, is useless, and the GA mutates the two independently
-# so it won't zero them in lockstep).  The polish makes those discrete jumps
-# deterministically, adopting one only when it is feasible and cheaper.
+# ---------------------------------------------------------------------------
+# Genetic algorithm
+# ---------------------------------------------------------------------------
+
+def _scratch_seed_population(feasible_factors: Dict[str, float],
+                             locked: Sequence[str] = (),
+                             rate_up: bool = False) -> List[Dict[str, float]]:
+    """Deliberately spread starting individuals around a bootstrap point.
+
+    A population of small mutants of one bootstrap point collapses onto its
+    storage/capacity levels (elitist truncation plus blend crossover cannot
+    create material no individual carries).  These variants scale the storage
+    block down and the capacity factors up/down; infeasible ones die in the
+    first generation.  With rate_up (data-center runs) they also raise the
+    storage discharge/charge rate, a direction mutation climbs only slowly
+    because the rate levers start near zero.  Locked keys are never changed.
+    """
+    locked_lower = {k.lower() for k in (locked or ())}
+    storage_keys = [k for k in FACTOR_KEYS
+                    if PARAM_REGISTRY[k][1] in _STORAGE_CATS
+                    and k.lower() not in locked_lower]
+    capacity_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "capacity"
+                     and k.lower() not in locked_lower]
+    rate_keys = [k for k in FACTOR_KEYS if PARAM_REGISTRY[k][1] == "tw"
+                 and k.lower() not in locked_lower]
+
+    def scaled(s_mult=1.0, f_mult=1.0):
+        v = feasible_factors.copy()
+        for k in storage_keys:
+            v[k] = _clamp(k, v[k] * s_mult)
+        for k in capacity_keys:
+            v[k] = _clamp(k, v[k] * f_mult)
+        return v
+
+    def rate_scaled(variant, r_mult):
+        v = variant.copy()
+        for k in rate_keys:
+            v[k] = _clamp(k, v[k] * r_mult)
+        return v
+
+    variants = []
+    for s in (0.25, 0.5, 0.75):
+        variants.append(scaled(s_mult=s))
+    for f in (0.7, 0.85, 1.15, 1.3):
+        variants.append(scaled(f_mult=f))
+    for s, f in ((0.5, 1.2), (0.25, 1.4), (0.75, 0.9), (0.5, 0.8)):
+        variants.append(scaled(s_mult=s, f_mult=f))
+    if rate_up and rate_keys:
+        for r in (2.0, 4.0, 8.0):
+            variants.append(rate_scaled(feasible_factors, r))
+        variants.append(rate_scaled(scaled(f_mult=0.7), 8.0))   # power up, capacity down
+        variants.append(rate_scaled(scaled(f_mult=1.3), 4.0))   # power up, capacity up
+    return variants
+
+
+def _zero_mutation_refs(region: str) -> Dict[str, float]:
+    """Reference magnitudes for mutating a variable away from exactly zero.
+
+    Storage-power (tw) keys scale with the region's average load, so the first
+    step is proportionate in regions spanning orders of magnitude in size
+    (a US-scale 0.09 TW step is ~50x Greenland's entire load).  Other keys use
+    the registry default.  Empty when the region load cannot be derived."""
+    refs: Dict[str, float] = {}
+    avg_load_tw = _region_avg_load_tw(region)
+    if avg_load_tw:
+        for key in FACTOR_KEYS:
+            if PARAM_REGISTRY[key][1] == "tw":
+                refs[key] = _SCRATCH_TW_PER_AVG_LOAD.get(key, 0.5) * avg_load_tw
+    return refs
+
+
+def _mutation_step(key, current, mutation_scale, zero_refs):
+    """Magnitude of one mutation of *key* at value *current*: relative to the
+    value itself, or to a reference magnitude when the value is zero, damped
+    for large values."""
+    scale = _CATEGORY_SCALES.get(PARAM_REGISTRY[key][1], 1.0)
+    damping = 1.0 / (max(1.0, abs(current)) ** _MAGNITUDE_DAMPING)
+    if abs(current) < 1e-12:
+        ref = zero_refs.get(key)
+        if ref is None:
+            ref = max(abs(PARAM_REGISTRY[key][0]), 0.01)
+        return max(ref, 1e-9) * mutation_scale * scale * damping
+    return abs(current) * mutation_scale * scale * damping
+
+
+def mutate_factors(base, mutation_rate, mutation_scale, locked, zero_refs):
+    """Mutate each unlocked design variable with probability mutation_rate by
+    a random-sign step; if none was mutated, nudge one random variable up."""
+    mutated = base.copy()
+    keys = [k for k in FACTOR_KEYS if k.lower() not in locked]
+    changed = False
+    for key in keys:
+        if random.random() < mutation_rate:
+            current = mutated.get(key, PARAM_REGISTRY[key][0])
+            delta = _mutation_step(key, current, mutation_scale, zero_refs)
+            delta = delta if random.random() < 0.5 else -delta
+            mutated[key] = _clamp(key, current + delta)
+            changed = True
+    if not changed and keys:
+        key = random.choice(keys)
+        current = mutated.get(key, PARAM_REGISTRY[key][0])
+        delta = _mutation_step(key, current, mutation_scale, zero_refs)
+        mutated[key] = _clamp(key, current + delta)
+    return mutated
+
+
+def crossover_factors(parent1: Dict[str, float], parent2: Dict[str, float]) -> Dict[str, float]:
+    """Arithmetic (blend) crossover with an independent weight per variable."""
+    child = {}
+    for key in FACTOR_KEYS:
+        default = PARAM_REGISTRY[key][0]
+        w = random.random()
+        child[key] = w * parent1.get(key, default) + (1 - w) * parent2.get(key, default)
+    return child
+
+
+def genetic_search(
+    feasible_factors: Dict[str, float],
+    feasible_cost: float,
+    region: str,
+    paths: dict,
+    population_size: int = 24,
+    generations: int = 50,
+    mutation_rate: float = 0.15,
+    mutation_scale: float = 0.2,
+    elite_frac: float = 0.2,
+    mutation_cooling: float = 0.98,
+    parallel_evals: int = 1,
+    locked_factors: Sequence[str] = (),
+    seed_population: Sequence[Dict[str, float]] = None,
+) -> Tuple[Dict[str, float], float]:
+    """Elitist GA from a feasible seed.  Infeasible individuals get infinite
+    cost; the best elite_frac survive, and the rest of each generation is
+    blend crossover of two random elites plus mutation.  Mutation rate and
+    scale decay by mutation_cooling per generation."""
+    locked = {f.lower() for f in locked_factors or []}
+    zero_refs = _zero_mutation_refs(region)
+    population: List[Dict[str, float]] = [feasible_factors.copy()]
+    for extra in (seed_population or []):
+        if len(population) < population_size:
+            population.append(extra.copy())
+    while len(population) < population_size:
+        population.append(mutate_factors(feasible_factors, mutation_rate, mutation_scale,
+                                         locked, zero_refs))
+
+    best_factors = feasible_factors.copy()
+    best_cost = feasible_cost
+
+    for gen in range(generations):
+        cooling_factor = mutation_cooling ** gen
+        eff_rate = max(0.0, min(1.0, mutation_rate * cooling_factor))
+        eff_scale = mutation_scale * cooling_factor
+
+        specs = [{"label": f"GA-gen{gen+1}-ind{idx+1}", "factors": indiv}
+                 for idx, indiv in enumerate(population)]
+        if parallel_evals > 1:
+            evals = evaluate_trials_parallel(specs, parallel_evals, region, paths)
+        else:
+            evals = evaluate_trials_sequential(specs, region, paths)
+
+        scored = []
+        for spec, res in zip(specs, evals):
+            cost = res["cost"] if res["feasible"] else float("inf")
+            scored.append((cost, spec["factors"]))
+            if res["feasible"] and cost < best_cost:
+                best_cost = cost
+                best_factors = spec["factors"].copy()
+
+        scored.sort(key=lambda x: x[0])
+        elites = [f for c, f in scored if c < float("inf")]
+        elites = elites[:max(1, int(elite_frac * population_size))]
+        if not elites:
+            elites = [best_factors.copy()]
+
+        new_population: List[Dict[str, float]] = elites.copy()
+        while len(new_population) < population_size:
+            parents = random.sample(elites, 2) if len(elites) >= 2 else elites * 2
+            child = crossover_factors(parents[0], parents[1])
+            new_population.append(mutate_factors(child, eff_rate, eff_scale,
+                                                 locked, zero_refs))
+        population = new_population
+
+    return best_factors, best_cost
+
+
+# Vestigial capacity: the GA mutates multiplicatively, so a shrinking variable
+# approaches zero but essentially never reaches it, leaving capital paid for
+# idle hardware.  The polish tests the discrete jumps to zero.  FCCHARG and
+# FCDISCH are zeroed as a pair (the GA mutates them independently).
 _POLISH_GROUPS = [
     ("h2fc",   ("FCCHARG", "FCDISCH")),
     ("soltherm", ("FACSHT",)),
@@ -1336,25 +1079,18 @@ _POLISH_GROUPS = [
 
 def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
                    seed_factors=None, locked=()):
-    """Cheap improvement tests on the found optimum, one parallel batch.
+    """Cheap improvement tests on the GA optimum, in one batch.
 
     Always: zero-out variants for vestigial capacity (H2 pair, solar-thermal
-    factor, both).  When *seed_factors* is given (data-center runs, where the
-    seed is the no-dc optimum): revert-to-seed variants that undo the storage
-    increase, the non-wind generation increase, and both — testing the PI's
-    observation that a wind-only increase often suffices for the added load.
-
-    Locked keys are never zeroed or reverted: the WSB/WSH data-center cases pin
-    the H2 fuel-cell pair (FCCHARG/FCDISCH) or the batteries (BATDISCH/STORHBAT)
-    at the no-dc optimum, and this polish must not move them.
-
-    Safe by construction: variants are adopted only when feasible AND cheaper,
-    so genuinely needed capacity always survives.  Returns (factors, cost,
-    adopted_label) with adopted_label None when the original stands.
+    factor, both).  With *seed_factors* (data-center runs, seeded from the
+    no-data-center optimum): revert-to-seed variants that undo the storage
+    increase, the non-wind generation increase, or both, and power-for-energy
+    variants that raise the storage rate with storage energy held at the seed.
+    Locked keys are never changed.  A variant is adopted only when it is
+    feasible and cheaper.  Returns (factors, cost, adopted_label_or_None).
     """
     locked_lower = {k.lower() for k in (locked or ())}
     combos = []
-    # Skip any zero-group with a locked member (e.g. the H2 pair in WSB).
     active = [(name, keys) for name, keys in _POLISH_GROUPS
               if any(best_factors.get(k, 0.0) > 0.0 for k in keys)
               and not any(k.lower() in locked_lower for k in keys)]
@@ -1375,7 +1111,7 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
                     if PARAM_REGISTRY[k][1] in cats and k not in exclude
                     and k.lower() not in locked_lower
                     and abs(best_factors.get(k, 0.0) - seed_factors.get(k, 0.0)) > 1e-12]
-        storage_keys = _changed(_SCRATCH_STORAGE_CATS)
+        storage_keys = _changed(_STORAGE_CATS)
         nonwind_keys = _changed(("capacity",), exclude=_WIND_KEYS)
         revert_groups = []
         if storage_keys:
@@ -1390,12 +1126,6 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
                 variant[k] = seed_factors[k]
             specs.append({"label": "polish-revert-{}".format(name), "factors": variant})
 
-        # Power-for-energy swap (PI insight): raise the free discharge/charge
-        # rate while holding storage energy at the seed, testing whether more
-        # storage POWER lets the added load be served without the extra storage
-        # energy the GA piled on.  Locked rate levers are never moved.  The rate
-        # is boosted from the seed value (the GA leaves it near base), and any
-        # changed storage-energy keys are first reverted to the seed.
         rate_keys = [k for k in _STORAGE_RATE_KEYS if k.lower() not in locked_lower]
         if rate_keys and storage_keys:
             for rmult in (2.0, 4.0):
@@ -1418,521 +1148,21 @@ def polish_optimum(best_factors, best_cost, region, paths, parallel_evals,
     return factors, cost, adopted
 
 
-def _bisect_between(infeasible_factors, feasible_factors, region=_DEFAULT_REGION,
-                    paths=None, attempts=4):
-    """Binary-search along the straight line between a known-INFEASIBLE and a
-    known-FEASIBLE factor dict for a leaner feasible point.
-
-    The bootstrap's geometric steps (storage ramp x1.5-2, capacity inflation
-    x1.5 growth) can overshoot the feasibility boundary by 50% or more; every
-    unit of overshoot is distance the GA must later claw back with small cooled
-    mutations.  A few interpolation evaluations recover most of that overshoot
-    up front.  Returns (factors, cost, stdout) of the leanest feasible point
-    found, or None if no interpolated point was feasible.
-    """
-    if paths is None:
-        paths = _region_paths(region)
-    best = None
-    lo_a, hi_a = 0.0, 1.0   # alpha=0 -> infeasible point, alpha=1 -> feasible point
-    for i in range(attempts):
-        mid = (lo_a + hi_a) / 2.0
-        cand = {
-            k: _clamp(k, infeasible_factors.get(k, v) + mid * (v - infeasible_factors.get(k, v)))
-            for k, v in feasible_factors.items()
-        }
-        feasible, cost, stdout = evaluate_factors(
-            cand, label="bootstrap-bisect{}".format(i + 1), region=region, paths=paths)
-        if feasible:
-            best = (cand, cost, stdout)
-            hi_a = mid
-        else:
-            lo_a = mid
-    return best
-
-
-def scratch_bootstrap(base_factors, region=_DEFAULT_REGION, paths=None,
-                      ramp=(0.25, 0.5, 1.0, 1.5, 2.0), parallel_evals=1):
-    """Find a first feasible point from the spreadsheet scratch start.
-
-    Mirrors the PI's manual procedure ("that set of assumptions fails
-    immediately, so I start ramping up storage and values for FACONWIND, ..."):
-    storage design variables are raised in steps toward load-derived anchors
-    (see _scratch_storage_anchor — battery power ~ average regional load, H2
-    power ~ 10% of it, technology-typical durations) with capacity factors held
-    at 1.0; if storage alone does not reach feasibility, capacity factors are
-    inflated as usual on top of anchor-scale storage.  After the first feasible
-    point is found (on either path), a short bisection back toward the last
-    infeasible point trims the overshoot, so the GA starts as close to the
-    feasibility boundary as a handful of evaluations can get it.  The anchors
-    are derived from input data only (countrystats.dat), keeping the scratch
-    experiment fully independent of the trial-and-error solution.
-    """
-    if paths is None:
-        paths = _region_paths(region)
-    anchors = _scratch_storage_anchor(region)
-
-    if parallel_evals and parallel_evals > 1:
-        # All ramp steps are predetermined: evaluate them in ONE parallel batch,
-        # take the leanest feasible, refine toward its predecessor, and only
-        # fall back to (batched) inflation if the whole ramp is infeasible.
-        ramp_cands = []
-        specs = []
-        for frac in ramp:
-            cand = base_factors.copy()
-            for key, anchor in anchors.items():
-                cand[key] = anchor * frac
-            ramp_cands.append(cand)
-            specs.append({"label": "scratch-storage-ramp{:g}".format(frac),
-                          "factors": cand})
-        results = _eval_batch(specs, parallel_evals, region, paths)
-        for i, res in enumerate(results):
-            if res["feasible"]:
-                lo = base_factors if i == 0 else ramp_cands[i - 1]
-                leaner = _refine_between(lo, ramp_cands[i], region, paths, parallel_evals)
-                return leaner if leaner else (ramp_cands[i], res["cost"], None)
-        candidate = base_factors.copy()
-        for key, anchor in anchors.items():
-            candidate[key] = anchor * ramp[-1]
-        # Parallel inflation refines internally, so no extra bisection needed.
-        return inflate_until_feasible(candidate, region=region, paths=paths,
-                                      parallel_evals=parallel_evals)
-
-    candidate = base_factors.copy()
-    prev = base_factors.copy()   # caller only invokes this when base is infeasible
-    for frac in ramp:
-        for key, anchor in anchors.items():
-            candidate[key] = anchor * frac
-        label = "scratch-storage-ramp{:g}".format(frac)
-        feasible, cost, stdout = evaluate_factors(candidate, label=label,
-                                                  region=region, paths=paths)
-        if feasible:
-            leaner = _bisect_between(prev, candidate, region=region, paths=paths)
-            return leaner if leaner else (candidate, cost, stdout)
-        prev = candidate.copy()
-    # Storage ramp alone was not enough: keep storage at the top of the ramp
-    # and inflate capacity factors as in the standard bootstrap, then bisect
-    # back toward the pre-inflation point to trim the (often large) overshoot.
-    for key, anchor in anchors.items():
-        candidate[key] = anchor * ramp[-1]
-    pre_inflation = candidate.copy()
-    inflated, cost, stdout = inflate_until_feasible(candidate, region=region, paths=paths)
-    leaner = _bisect_between(pre_inflation, inflated, region=region, paths=paths,
-                             attempts=5)
-    return leaner if leaner else (inflated, cost, stdout)
-
-
-# ---------------------------------------------------------------------------
-# Parallel workspace helpers
-# ---------------------------------------------------------------------------
-
-def prepare_workspace():
-    WORKSPACE_BASE.mkdir(parents=True, exist_ok=True)
-    workspace_path = Path(
-        tempfile.mkdtemp(prefix="loadmatch_run_", dir=str(WORKSPACE_BASE))
-    )
-    data_raw = workspace_path / "data" / "raw"
-    data_raw.mkdir(parents=True, exist_ok=True)
-    for item in BASE_RAW_DIR.iterdir():
-        # Skip fortran_factors.dat (written per-worker) and all Fortran OUTPUT
-        # files that the model writes during each run.  Symlinking output files
-        # causes all parallel workers to write through the same physical file,
-        # corrupting every worker's state simultaneously.
-        name = item.name
-        if name == "fortran_factors.dat":
-            continue
-        if (name.startswith("wwsmonthly.")
-                or name.startswith("wwshourly.")
-                or name.startswith("pkflex.")
-                or name == "countrydata.out"):
-            continue
-        target = data_raw / name
-        if target.exists():
-            continue
-        if item.is_dir():
-            os.symlink(str(item), str(target), target_is_directory=True)
-        else:
-            os.symlink(str(item), str(target))
-    return workspace_path, data_raw
-
-
-def run_fortran_worker(label, factors, region=_DEFAULT_REGION):
-    workspace, data_raw = prepare_workspace()
-    try:
-        write_dat(factors, data_raw / "fortran_factors.dat")
-        cmd = [str(FORTRAN_EXE)] + _fortran_region_args(region)
-        result = subprocess.run(
-            cmd,
-            cwd=str(workspace),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=FORTRAN_EVAL_TIMEOUT_S,
-        )
-        combined = result.stdout
-        if result.stderr:
-            combined += "\n----- STDERR -----\n" + result.stderr
-        if result.returncode != 0:
-            raise RuntimeError("Fortran run failed:\n{}".format(result.stderr))
-        return label, factors, combined
-    finally:
-        shutil.rmtree(workspace, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# Hooke-Jeeves search
-# ---------------------------------------------------------------------------
-
-def hooke_jeeves_search(
-    feasible_factors,
-    feasible_cost,
-    initial_step=0.2,
-    shrink=0.7,
-    max_iter=40,
-    min_step=1e-5,
-    parallel_evals=1,
-    direction="both",
-    locked_factors=None,
-    region=_DEFAULT_REGION,
-    paths=None,
-):
-    if paths is None:
-        paths = _region_paths(region)
-    step = initial_step
-    candidate = feasible_factors.copy()
-    best_cost = feasible_cost
-    best_factors = feasible_factors.copy()
-    locked = {name.lower() for name in (locked_factors or [])}
-
-    for iteration in range(max_iter):
-        print("Hooke-Jeeves iteration {} step {:.4f}".format(iteration + 1, step))
-        improved = False
-        trial_specs = []
-        for key in FACTOR_KEYS:
-            if key.lower() in locked:
-                continue
-            current = candidate.get(key, 0.0)
-            deltas = []
-            if direction in ("dec", "both") and current > 0:
-                deltas.append(-current * step)
-            if direction in ("inc", "both"):
-                deltas.append(current * step if current > 0 else step)
-
-            for delta in deltas:
-                trial_value = current + delta
-                if trial_value <= 0:
-                    continue
-                trial = candidate.copy()
-                trial[key] = trial_value
-                label = "HJ-iter{}-{}-{}".format(
-                    iteration + 1, key, "inc" if delta > 0 else "dec"
-                )
-                trial_specs.append(
-                    {"key": key, "label": label, "factors": trial}
-                )
-
-        if not trial_specs:
-            break
-
-        if parallel_evals > 1:
-            evaluation_results = evaluate_trials_parallel(
-                trial_specs, parallel_evals, region=region, paths=paths
-            )
-        else:
-            evaluation_results = evaluate_trials_sequential(trial_specs, region=region, paths=paths)
-
-        for spec, result in zip(trial_specs, evaluation_results):
-            feasible = result["feasible"]
-            cost = result["cost"]
-            trial = spec["factors"]
-            if feasible and cost < best_cost:
-                candidate = trial
-                best_cost = cost
-                best_factors = trial.copy()
-                improved = True
-                print(
-                    "  Improved {} -> {:.6f}, cost {:.3f}".format(
-                        spec["key"], trial[spec["key"]], cost
-                    )
-                )
-                break
-
-        if not improved:
-            step *= shrink
-            if step < min_step:
-                break
-    return best_factors, best_cost
-
-
-def evaluate_trials_sequential(specs, region=_DEFAULT_REGION, paths=None):
-    if paths is None:
-        paths = _region_paths(region)
-    results = []
-    for spec in specs:
-        feasible, cost, _ = evaluate_factors(spec["factors"], label=spec["label"],
-                                             region=region, paths=paths)
-        results.append({"feasible": feasible, "cost": cost})
-    return results
-
-
-def _worker_init(ifdatcen):
-    """Runs once per spawned GA worker.  With the 'spawn' start method the module
-    is re-imported in each child, resetting module globals — so the data-center
-    scenario (_IFDATCEN) must be re-established here or parallel evals would
-    silently run the base case."""
-    global _IFDATCEN
-    _IFDATCEN = ifdatcen
-
-
-def evaluate_trials_parallel(specs, max_workers, region=_DEFAULT_REGION, paths=None):
-    if paths is None:
-        paths = _region_paths(region)
-    results = []
-    with ProcessPoolExecutor(max_workers=max_workers,
-                             initializer=_worker_init,
-                             initargs=(_IFDATCEN,)) as pool:
-        futures = [
-            pool.submit(run_fortran_worker, spec["label"], spec["factors"], region)
-            for spec in specs
-        ]
-        for spec, future in zip(specs, futures):
-            try:
-                label, factors, output = future.result()
-            except Exception as exc:
-                # One worker failed — most often a transient shared-filesystem
-                # error while preparing its isolated workspace (EACCES/ESTALE/
-                # ENOENT on data/tmp_workspaces under heavy concurrent load),
-                # occasionally a Fortran crash on a single candidate.  Treat this
-                # candidate as infeasible so ONE failed evaluation cannot abort
-                # the entire (multi-hour) GA: the search keeps its elites and
-                # moves on.  Previously this exception propagated out of
-                # future.result() and killed the whole region's run.
-                label = spec["label"]
-                print("WARNING: evaluation '{}' failed: {}: {} -- treating as "
-                      "infeasible (run continues).".format(
-                          label, type(exc).__name__, exc))
-                log_candidate(spec["factors"], False, float("inf"), label,
-                              history_file=paths["history_file"])
-                results.append({"feasible": False, "cost": float("inf")})
-                continue
-            feasible = check_feasibility(output)
-            cost = _apply_land_cap(parse_cost(output), output)
-            log_candidate(factors, feasible, cost, label, history_file=paths["history_file"])
-            lines = output.strip().splitlines()
-            tail = "\n".join(lines[-20:]) if lines else ""
-            print("--- Fortran output tail ({}) ---".format(label))
-            print(tail)
-            print("----------------------------------------")
-            results.append({"feasible": feasible, "cost": cost})
-    return results
-
-
-# ---------------------------------------------------------------------------
-# GA: mutation, crossover, search
-# ---------------------------------------------------------------------------
-
-def mutate_factors(
-    base: Dict[str, float],
-    mutation_rate: float,
-    mutation_scale: float,
-    direction: str,
-    locked: set,
-    factor_scales: Dict[str, float],
-    magnitude_damping: float,
-    zero_refs: Dict[str, float] = None,
-) -> Dict[str, float]:
-    mutated = base.copy()
-    keys = [k for k in FACTOR_KEYS if k.lower() not in locked]
-    changed = False
-    for key in keys:
-        if random.random() < mutation_rate:
-            current = mutated.get(key, PARAM_REGISTRY[key][0])
-            scale = factor_scales.get(key.lower(), DEFAULT_FACTOR_SCALES.get(key.lower(), 1.0))
-            if scale == 0.0:
-                continue  # locked via scale
-            magnitude_scale = 1.0 / (max(1.0, abs(current)) ** magnitude_damping)
-            # Use the parameter default as reference when current is near zero
-            if abs(current) < 1e-12:
-                ref = (zero_refs or {}).get(key)
-                if ref is None:
-                    ref = max(abs(PARAM_REGISTRY.get(key, (1.0,))[0]), 0.01)
-                ref = max(ref, 1e-9)
-                delta = ref * mutation_scale * scale * magnitude_scale
-            else:
-                delta = abs(current) * mutation_scale * scale * magnitude_scale
-            if direction == "dec":
-                delta = -abs(delta)
-            elif direction == "inc":
-                delta = abs(delta)
-            else:
-                delta = delta if random.random() < 0.5 else -delta
-            trial = current + delta
-            trial = _clamp(key, trial)
-            mutated[key] = trial
-            changed = True
-    if not changed and keys:
-        key = random.choice(keys)
-        current = mutated.get(key, PARAM_REGISTRY[key][0])
-        scale = factor_scales.get(key.lower(), DEFAULT_FACTOR_SCALES.get(key.lower(), 1.0))
-        if scale == 0.0:
-            return mutated
-        magnitude_scale = 1.0 / (max(1.0, abs(current)) ** magnitude_damping)
-        if abs(current) < 1e-12:
-            ref = (zero_refs or {}).get(key)
-            if ref is None:
-                ref = max(abs(PARAM_REGISTRY.get(key, (1.0,))[0]), 0.01)
-            ref = max(ref, 1e-9)
-            delta = ref * mutation_scale * scale * magnitude_scale
-        else:
-            delta = abs(current) * mutation_scale * scale * magnitude_scale
-        delta = -abs(delta) if direction == "dec" else abs(delta)
-        trial = current + delta
-        trial = _clamp(key, trial)
-        mutated[key] = trial
-    return mutated
-
-
-def crossover_factors(parent1: Dict[str, float], parent2: Dict[str, float]) -> Dict[str, float]:
-    child = {}
-    for key in FACTOR_KEYS:
-        default = PARAM_REGISTRY[key][0]
-        w = random.random()
-        child[key] = w * parent1.get(key, default) + (1 - w) * parent2.get(key, default)
-    return child
-
-
-def genetic_search(
-    feasible_factors: Dict[str, float],
-    feasible_cost: float,
-    population_size: int = 24,
-    generations: int = 50,
-    mutation_rate: float = 0.15,
-    mutation_scale: float = 0.2,
-    elite_frac: float = 0.2,
-    direction: str = "both",
-    parallel_evals: int = 1,
-    locked_factors: Sequence[str] = (),
-    mutation_cooling: float = 0.98,
-    factor_scales: Dict[str, float] = None,
-    magnitude_damping: float = 0.5,
-    region: str = _DEFAULT_REGION,
-    paths: dict = None,
-    seed_population: Sequence[Dict[str, float]] = None,
-) -> Tuple[Dict[str, float], float]:
-    if paths is None:
-        paths = _region_paths(region)
-    locked = {f.lower() for f in locked_factors or []}
-    # Merge user-supplied scales on top of category defaults
-    merged_scales = DEFAULT_FACTOR_SCALES.copy()
-    if factor_scales:
-        merged_scales.update({k.lower(): v for k, v in factor_scales.items()})
-    # Region-scaled references for mutations away from exactly zero (storage
-    # power keys); prevents US-scale first steps in small regions.
-    zero_refs = _zero_mutation_refs(region)
-    population: List[Dict[str, float]] = [feasible_factors.copy()]
-    # Optional deliberately-spread individuals (e.g. scratch-start diversity);
-    # the remainder of the population is filled with mutants of the seed.
-    for extra in (seed_population or []):
-        if len(population) < population_size:
-            population.append(extra.copy())
-    while len(population) < population_size:
-        population.append(
-            mutate_factors(
-                feasible_factors,
-                mutation_rate,
-                mutation_scale,
-                direction,
-                locked,
-                merged_scales,
-                magnitude_damping,
-                zero_refs=zero_refs,
-            )
-        )
-
-    best_factors = feasible_factors.copy()
-    best_cost = feasible_cost
-
-    for gen in range(generations):
-        cooling_factor = mutation_cooling ** gen
-        eff_rate = max(0.0, min(1.0, mutation_rate * cooling_factor))
-        eff_scale = mutation_scale * cooling_factor
-
-        specs = []
-        for idx, indiv in enumerate(population):
-            specs.append(
-                {
-                    "key": "GA",
-                    "label": f"GA-gen{gen+1}-ind{idx+1}",
-                    "factors": indiv,
-                }
-            )
-
-        if parallel_evals > 1:
-            evals = evaluate_trials_parallel(specs, parallel_evals, region=region, paths=paths)
-        else:
-            evals = evaluate_trials_sequential(specs, region=region, paths=paths)
-
-        scored = []
-        for spec, res in zip(specs, evals):
-            cost = res["cost"]
-            feasible = res["feasible"]
-            if not feasible:
-                cost = float("inf")
-            scored.append((cost, spec["factors"]))
-            if feasible and cost < best_cost:
-                best_cost = cost
-                best_factors = spec["factors"].copy()
-
-        scored.sort(key=lambda x: x[0])
-        elites = [f for c, f in scored if c < float("inf")]
-        elite_count = max(1, int(elite_frac * population_size))
-        elites = elites[:elite_count]
-        if not elites:
-            elites = [best_factors.copy()]
-
-        new_population: List[Dict[str, float]] = elites.copy()
-        while len(new_population) < population_size:
-            parents = random.sample(elites, 2) if len(elites) >= 2 else elites * 2
-            child = crossover_factors(parents[0], parents[1])
-            child = mutate_factors(
-                child,
-                eff_rate,
-                eff_scale,
-                direction,
-                locked,
-                merged_scales,
-                magnitude_damping,
-                zero_refs=zero_refs,
-            )
-            new_population.append(child)
-        population = new_population
-
-    return best_factors, best_cost
-
-
 # ---------------------------------------------------------------------------
 # Main workflow
 # ---------------------------------------------------------------------------
 
 def run_workflow(
-    region="UNITED-STATES",
+    region,
+    baseline_start,
     parallel_evals=1,
-    hj_initial_step=0.2,
-    hj_shrink=0.7,
-    hj_max_iter=40,
-    hj_min_step=1e-5,
-    hj_direction="both",
-    hj_locked_factors=None,
-    optimizer="hj",
+    locked=(),
     ga_population=24,
     ga_generations=50,
     ga_mutation_rate=0.15,
     ga_mutation_scale=0.2,
     ga_elite_frac=0.2,
     ga_mutation_cooling=0.98,
-    ga_factor_scales=None,
-    ga_magnitude_damping=0.5,
-    baseline_start=None,
-    generate_plots=True,
     datacenter=0,
     evaluate_only=False,
     scratch_label="scratch",
@@ -1950,61 +1180,44 @@ def run_workflow(
         print("Land-use cap active: new spacing+footprint <= {:.2f}% of regional "
               "land (graded cost penalty, slope {:.1f}x/pp).".format(
                   _MAX_LAND_PCT, _LAND_PENALTY_PER_PP))
-    _t_workflow_start = time.perf_counter()
-    # Alternative runs (scratch start, data-center scenarios) write to isolated
-    # results dirs and xx_optimized folders so they never overwrite the
-    # base-case results.  The real region name is still passed to the Fortran
-    # binary; only the output paths change.
-    _scratch = (baseline_start == "scratch")
-    # scratch_label lets successive scratch campaigns coexist (e.g. "scratch" =
-    # first campaign at the base GA budget, "scratch2" = improved algorithm) —
-    # results dirs and xx folders are keyed on it, so nothing is overwritten.
-    # dc_label distinguishes data-center cases that share the same IFDATCEN but
-    # differ in which design variables may change (e.g. _dc2 = utility build-out,
-    # _dc2rc = rooftop build-out, _dc2bat / _dc2h2 = storage sensitivities).
+    locked = tuple(locked or ())
+    t_workflow_start = time.perf_counter()
+
+    # Scratch starts and data-center scenarios write to isolated results dirs
+    # (the real region name is still passed to the binary).  dc_label
+    # distinguishes data-center cases sharing an IFDATCEN value (_dc2, _dc2rc,
+    # _dc2bat, _dc2h2); out_suffix overrides the suffix entirely, e.g. to
+    # re-evaluate a saved optimum into its own directory.
+    scratch = (baseline_start == "scratch")
     if out_suffix:
-        # Explicit override of the output suffix.  Used to re-evaluate a saved
-        # optimum in evaluate-only mode into its own dir when the normal suffix
-        # logic wouldn't apply — e.g. re-costing a scratch2 optimum from its
-        # genetic_factors.dat (baseline_start is a file, not "scratch", so the
-        # scratch label would otherwise be dropped and it would clobber base).
         _RUN_SUFFIX = "_" + out_suffix
     else:
-        _RUN_SUFFIX = (("_" + scratch_label if _scratch else "")
+        _RUN_SUFFIX = (("_" + scratch_label if scratch else "")
                        + ("_dc{}{}".format(_IFDATCEN, dc_label) if _IFDATCEN else ""))
-    results_label = region + _RUN_SUFFIX
-    paths = _region_paths(results_label)
+    paths = _region_paths(region + _RUN_SUFFIX)
     paths["results_dir"].mkdir(parents=True, exist_ok=True)
 
-    # ── Preserve prior factor history; only a fresh GA run starts a new log ───
-    # evaluate-only mode runs NO GA, so it must never clear the history.  This
-    # guard is why the convergence logs were lost: an evaluate-only re-cost/
-    # re-eval into the base <REGION>/ dir used to unlink factor_history.log and
-    # then never regenerate it.  A fresh GA run archives (not deletes) the old
-    # log to factor_history.log.prev so a prior optimization is never silently
-    # destroyed.
+    # A new GA run starts a new history; the previous one is kept as .prev.
+    # Evaluate-only runs append to (never replace) an existing history.
     if not evaluate_only and paths["history_file"].exists():
-        _prev = paths["history_file"].with_suffix(".log.prev")
-        paths["history_file"].replace(_prev)
-        print("Archived previous factor history to {}".format(_prev))
+        prev = paths["history_file"].with_suffix(".log.prev")
+        paths["history_file"].replace(prev)
+        print("Archived previous factor history to {}".format(prev))
 
-    # ── Parse canonical baseline output if present ────────────────────────────
-    # data/raw/xx.<SHORTCODE> is the PI's pristine baseline output (his exact
-    # trial-and-error result).  It is never modified here; we only read/summarise
-    # it as an extra cross-check.  Absent is fine (the "defaults" baseline run is
-    # the authoritative PI-baseline reference for the comparison).
-    _canonical_bl = BASE_RAW_DIR / "xx.{}".format(REGION_SHORTCODE.get(region, region))
-    if _canonical_bl.exists():
-        print(f"Parsing canonical baseline: {_canonical_bl.name}")
-        _parse_and_save(
-            _canonical_bl.read_text(),
+    # Reference xx report (the expert trial-and-error result), if present:
+    # summarized for cross-checks only, never modified.
+    reference_xx = BASE_RAW_DIR / "xx.{}".format(REGION_SHORTCODE.get(region, region))
+    if reference_xx.exists():
+        print(f"Parsing reference xx report: {reference_xx.name}")
+        parse_and_save(
+            reference_xx.read_text(),
             factors=None,
             region=region,
             run_type="canonical_baseline",
             out_path=paths["results_dir"] / "canonical_baseline_summary.json",
         )
     else:
-        print(f"  [INFO] No canonical baseline found at {_canonical_bl} — skipping.")
+        print(f"  [INFO] No reference xx report at {reference_xx}; skipping.")
 
     if baseline_start == "defaults":
         base_factors = extract_fortran_region_defaults(region)
@@ -2013,309 +1226,186 @@ def run_workflow(
         base_factors = build_scratch_start()
         print("Using spreadsheet scratch start (capacity factors = 1.0, "
               "storage design variables = 0).")
-    elif baseline_start:
+    else:
         baseline_path = Path(baseline_start)
         if not baseline_path.exists():
             raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
         print(f"Using baseline factors from {baseline_path}.")
         base_factors = load_baseline_start(baseline_path)
-    else:
-        raise ValueError(
-            "No baseline start specified. The LP warm-start path has been "
-            "removed; pass --baseline-start <file|scratch|defaults>."
-        )
+
+    # In evaluate-only mode the seeded factors ARE the result, so the run goes
+    # to the optimal output and the baseline files are left untouched.
     baseline_paths = dict(paths)
-    # In evaluate-only mode the seeded factors ARE the result: write the run to
-    # the OPTIMAL output and never touch the baseline files.  This stops a seeded
-    # re-evaluation (a seeded re-evaluation that reuses each region's
-    # genetic_factors.dat) from overwriting the PI trial-and-error baseline.
     baseline_paths["fortran_out"] = (paths["fortran_optimal_out"] if evaluate_only
                                      else paths["fortran_baseline_out"])
-    _t_bl = time.perf_counter()
-    if parallel_evals > 1 and baseline_start not in (None, "defaults"):
-        # Explicit-factor baselines (file seeds, scratch) run in an isolated
-        # workspace: no global lock, so concurrent array tasks don't serialize.
-        # The "defaults" mode must stay on the direct path — it relies on the
-        # ABSENCE of a factor file so the Fortran hardcoded values rule.
+    t_bl = time.perf_counter()
+    if parallel_evals > 1 and baseline_start != "defaults":
         stdout = run_single_isolated("baseline", base_factors, region, baseline_paths)
-        _baseline_eval_seconds = time.perf_counter() - _t_bl
     else:
         with _fortran_global_lock():
             if baseline_start == "defaults":
-                # Let Fortran use its hardcoded regional values — delete any stale factor
-                # file so READ_FACTOR_OVERRIDES exits early and nothing is overridden.
-                for _fp in [paths["factor_dest"], paths["factor_pathhome"]]:
-                    if _fp.exists():
-                        _fp.unlink()
+                # No factor file: the binary keeps its hardcoded region values.
+                if paths["factor_file"].exists():
+                    paths["factor_file"].unlink()
             else:
                 write_factor_files(base_factors, paths)
-            # Run the baseline Fortran evaluation, writing output to fortran_baseline_run.out
-            # so that fortran_last_run.out is reserved for the final optimal evaluation.
-            stdout = run_fortran(region=region, paths=baseline_paths)
-            _baseline_eval_seconds = time.perf_counter() - _t_bl
+            stdout = run_fortran(region, baseline_paths)
+    baseline_eval_seconds = time.perf_counter() - t_bl
     print("Fortran output written to {}".format(baseline_paths["fortran_out"]))
 
-    if not evaluate_only:
-        # Parse and save the baseline summary for all warm-start modes.  Skipped
-        # in evaluate-only mode so a seeded re-evaluation never overwrites the
-        # trial-and-error baseline_summary.json / fortran_baseline_run.out.
-        _parse_and_save(
-            stdout,
-            factors=base_factors,
-            region=region,
-            run_type="baseline",
-            out_path=paths["baseline_summary"],
-        )
-        print(
-            "Compare {} against data/raw/xx.{} to verify correctness.".format(
-                paths["fortran_baseline_out"], REGION_SHORTCODE.get(region, region)
-            )
-        )
-
     if evaluate_only:
-        # Evaluate-only mode (e.g. IFDATCEN=1: EGS covers the constant data-center
-        # load directly, so no re-optimization is needed).  The single Fortran run
-        # of the seeded factors IS the result — save it as the optimal output + xx.
+        # Single evaluation of the seeded factors (e.g. the EGS data-center
+        # case, where the Fortran adds EGS supply and no re-optimization is
+        # needed): save it as the optimal output and xx report.
         paths["fortran_optimal_out"].write_text(stdout)
-        _xx_out = _xx_deliverable_path(region)
-        _xx_out.write_text(_strip_override_echo(stdout))
-        opt_data = _parse_and_save(
+        xx_out = _xx_report_path(region)
+        xx_out.write_text(strip_override_echo(stdout))
+        opt_data = parse_and_save(
             stdout, factors=base_factors, region=region,
             run_type="evaluate", out_path=paths["optimal_summary"],
         )
         opt_data["timing"] = {
             "datacenter_scenario":   _IFDATCEN,
-            "start_mode":            "scratch" if _scratch else (baseline_start or "baseline"),
+            "start_mode":            "scratch" if scratch else baseline_start,
             "optimizer":             "evaluate",
-            "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
+            "baseline_eval_seconds": round(baseline_eval_seconds, 3),
             "optimize_seconds":      0.0,
             "final_eval_seconds":    0.0,
-            "total_seconds":         round(time.perf_counter() - _t_workflow_start, 3),
+            "total_seconds":         round(time.perf_counter() - t_workflow_start, 3),
             "n_evaluations":         1,
             "ga_population":         None,
             "ga_generations":        None,
             "parallel_evals":        parallel_evals,
         }
-        _save_summary(opt_data, paths["optimal_summary"])
+        save_summary(opt_data, paths["optimal_summary"])
         print("Evaluate-only: cost {:.3f} $B/yr  →  {}  (xx: {})".format(
-            parse_cost(stdout), paths["optimal_summary"], _xx_out))
+            parse_cost(stdout), paths["optimal_summary"], xx_out))
         return
+
+    parse_and_save(stdout, factors=base_factors, region=region,
+                   run_type="baseline", out_path=paths["baseline_summary"])
 
     feasible_initial = check_feasibility(stdout)
     initial_cost = _apply_land_cap(parse_cost(stdout), stdout)
-    log_candidate(base_factors, feasible_initial, initial_cost, label="baseline",
-                  history_file=paths["history_file"])
-    if feasible_initial and baseline_start is None:
-        # Baseline is already feasible — no further optimisation needed.
-        print(
-            "Fortran verification succeeded with baseline factors (cost {:.3f}).".format(
-                initial_cost
-            )
-        )
-        return
-    if not feasible_initial and baseline_start == "defaults":
-        print("Default baseline factors are infeasible for region '{}'; "
-              "inflating capacity factors before starting optimiser.".format(region))
+    log_candidate(base_factors, feasible_initial, initial_cost, "baseline",
+                  paths["history_file"])
 
     if feasible_initial:
-        # baseline_start provided and feasible — use it directly as starting point.
-        print(
-            "Baseline feasible (cost {:.3f}). Proceeding to {} optimisation.".format(
-                initial_cost, optimizer.upper()
-            )
-        )
+        print("Baseline feasible (cost {:.3f}). Proceeding to GA optimisation.".format(
+            initial_cost))
         candidate, cost = base_factors.copy(), initial_cost
-    elif _scratch:
-        # Expected for the spreadsheet start: no storage cannot match load at
-        # every time step.  Ramp storage first (the PI's manual procedure),
-        # then inflate capacity factors only if still needed.
+    elif scratch:
         print("Scratch start infeasible (expected); ramping storage toward feasibility.")
-        candidate, cost, _ = scratch_bootstrap(base_factors, region=region, paths=paths,
+        candidate, cost, _ = scratch_bootstrap(base_factors, region, paths,
                                                parallel_evals=parallel_evals)
     else:
-        # Data-center runs: try generation-first directions before the generic
-        # bootstrap.  Wind output matches the constant added load far better
-        # than solar, and wind-only feasible points at ~10-20% added cost exist
-        # (PI hand solutions) that the joint inflation below never visits.
-        _probe = None
+        probe = None
         if _IFDATCEN:
-            print("Starting point infeasible; probing generation-first "
-                  "(wind, then all free generation) before joint inflation.")
-            _probe = _dc_directional_bootstrap(base_factors, hj_locked_factors or (),
-                                               region, paths, parallel_evals)
-        if _probe:
-            candidate, cost, _ = _probe
-            print("Generation-first bootstrap found feasibility (cost {:.3f}).".format(cost))
+            print("Starting point infeasible; probing storage rate, wind, then all "
+                  "free generation before joint inflation.")
+            probe = _dc_directional_bootstrap(base_factors, locked, region, paths,
+                                              parallel_evals)
+        if probe:
+            candidate, cost, _ = probe
+            print("Directional bootstrap found feasibility (cost {:.3f}).".format(cost))
         else:
-            # Joint inflation fallback.  For data-center runs the free storage
-            # variables must grow with the capacity factors: once the seed's
-            # battery/H2 discharge power saturates, more PV/wind alone can
-            # never reach feasibility.
-            _extra_scale = ()
+            # For data-center runs the free storage variables grow with the
+            # capacity factors (see inflate_until_feasible).
+            extra_scale = ()
             if _IFDATCEN:
-                _locked_lower = {f.lower() for f in (hj_locked_factors or ())}
-                _extra_scale = [k for k in FACTOR_KEYS
-                                if PARAM_REGISTRY[k][1] in _SCRATCH_STORAGE_CATS
-                                and k.lower() not in _locked_lower]
-                print("Generation-only probes infeasible; inflating capacity factors "
-                      "and free storage variables: {}".format(" ".join(_extra_scale)))
+                locked_lower = {f.lower() for f in locked}
+                extra_scale = [k for k in FACTOR_KEYS
+                               if PARAM_REGISTRY[k][1] in _STORAGE_CATS
+                               and k.lower() not in locked_lower]
+                print("Directional probes infeasible; inflating capacity factors "
+                      "and free storage variables: {}".format(" ".join(extra_scale)))
             else:
                 print("Starting point infeasible; inflating capacity factors.")
-            candidate, cost, _ = inflate_until_feasible(base_factors, region=region, paths=paths,
-                                                        locked=hj_locked_factors or (),
-                                                        scale_extra_keys=_extra_scale,
-                                                        parallel_evals=parallel_evals)
-        if _probe is None and _IFDATCEN and parallel_evals <= 1:
-            # Trim the geometric-step overshoot back toward the feasibility
-            # boundary (base_factors is the known-infeasible seed).  The
-            # parallel inflation path and the directional probes refine
-            # internally, so this only applies to sequential inflation runs.
-            leaner = _bisect_between(base_factors, candidate, region=region, paths=paths)
-            if leaner:
-                candidate, cost, _ = leaner
+            candidate, cost, _ = inflate_until_feasible(
+                base_factors, region, paths, locked=locked,
+                scale_extra_keys=extra_scale, parallel_evals=parallel_evals)
 
-    print(
-        "{} starting from feasible point (cost {:.3f}).".format(
-            "Genetic algorithm" if optimizer == "ga" else "Hooke-Jeeves", cost
-        )
+    print("Genetic algorithm starting from feasible point (cost {:.3f}).".format(cost))
+
+    t_opt = time.perf_counter()
+    # Scratch and data-center runs seed part of the population with spread
+    # variants of the bootstrap point.
+    seed_pop = (_scratch_seed_population(candidate, locked, rate_up=bool(_IFDATCEN))
+                if (scratch or _IFDATCEN) else None)
+    best_factors, best_cost = genetic_search(
+        candidate,
+        cost,
+        region,
+        paths,
+        population_size=ga_population,
+        generations=ga_generations,
+        mutation_rate=ga_mutation_rate,
+        mutation_scale=ga_mutation_scale,
+        elite_frac=ga_elite_frac,
+        mutation_cooling=ga_mutation_cooling,
+        parallel_evals=parallel_evals,
+        locked_factors=locked,
+        seed_population=seed_pop,
     )
+    print("GA produced best feasible solution (cost {:.3f}).".format(best_cost))
+    best_factors, best_cost, polish_label = polish_optimum(
+        best_factors, best_cost, region, paths, parallel_evals,
+        seed_factors=base_factors if _IFDATCEN else None, locked=locked)
+    if polish_label:
+        print("Polish adopted {} (cost {:.3f}).".format(polish_label, best_cost))
+    write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
+    optimize_seconds = time.perf_counter() - t_opt
 
-    _t_opt = time.perf_counter()
-    _polish_label = None
-    if optimizer == "ga":
-        # Scratch and data-center runs seed part of the population with
-        # deliberately-spread variants of the bootstrap point (storage down /
-        # capacity up-down) so the search has genetic material in the cheap
-        # directions from generation one.
-        _seed_pop = (_scratch_seed_population(candidate, hj_locked_factors or (),
-                                              rate_up=bool(_IFDATCEN))
-                     if (_scratch or _IFDATCEN) else None)
-        best_factors, best_cost = genetic_search(
-            candidate,
-            cost,
-            seed_population=_seed_pop,
-            population_size=ga_population,
-            generations=ga_generations,
-            mutation_rate=ga_mutation_rate,
-            mutation_scale=ga_mutation_scale,
-            elite_frac=ga_elite_frac,
-            direction=hj_direction,
-            parallel_evals=parallel_evals,
-            locked_factors=hj_locked_factors,
-            mutation_cooling=ga_mutation_cooling,
-            factor_scales=ga_factor_scales,
-            magnitude_damping=ga_magnitude_damping,
-            region=region,
-            paths=paths,
-        )
-        print("GA produced best feasible solution (cost {:.3f}).".format(best_cost))
-        # Vestigial-capacity polish: zero out unused H2 / solar-thermal capacity
-        # if that is feasible and cheaper (one extra parallel batch).
-        best_factors, best_cost, _polish_label = polish_optimum(
-            best_factors, best_cost, region, paths, parallel_evals,
-            seed_factors=base_factors if _IFDATCEN else None,
-            locked=hj_locked_factors or ())
-        if _polish_label:
-            print("Polish adopted {} (cost {:.3f}).".format(_polish_label, best_cost))
-        write_dat(best_factors, paths["results_dir"] / "genetic_factors.dat")
-    else:
-        best_factors, best_cost = hooke_jeeves_search(
-            candidate,
-            cost,
-            initial_step=hj_initial_step,
-            shrink=hj_shrink,
-            max_iter=hj_max_iter,
-            min_step=hj_min_step,
-            parallel_evals=parallel_evals,
-            direction=hj_direction,
-            locked_factors=hj_locked_factors,
-            region=region,
-            paths=paths,
-        )
-        print("Hooke-Jeeves produced best feasible solution (cost {:.3f}).".format(best_cost))
-        write_dat(best_factors, paths["results_dir"] / "hooke_jeeves_factors.dat")
-    _optimize_seconds = time.perf_counter() - _t_opt
-
-    # ── Final evaluation with optimal factors ─────────────────────────────────
-    # Run Fortran once more with the best-found factors so that:
-    #   1. fortran_optimal_run.out is always present for plot_results.py
-    #   2. optimal_summary.json captures the full structured results
-    # The raw .out file and JSON are both saved; nothing is deleted.
+    # Final evaluation of the optimum: fortran_optimal_run.out, the summary
+    # JSON and the xx report all come from this run.
     print("Running final Fortran evaluation with optimal factors...")
-    _t_fin = time.perf_counter()
+    t_fin = time.perf_counter()
     if parallel_evals > 1:
         final_stdout = run_single_isolated("final-optimal", best_factors, region, paths)
     else:
         with _fortran_global_lock():
             write_factor_files(best_factors, paths)
-            final_stdout = run_fortran(region=region, paths=paths)
-    _final_eval_seconds = time.perf_counter() - _t_fin
+            final_stdout = run_fortran(region, paths)
+    final_eval_seconds = time.perf_counter() - t_fin
     paths["fortran_optimal_out"].write_text(final_stdout)
 
-    # Deliverable: the GA-optimal Fortran output IS an xx file (the binary writes
-    # the "xx" report to stdout, IOUT=6).  Save it under the PI's xx.<SHORTCODE>
-    # naming, in a dedicated folder that never overwrites his pristine baselines.
-    _xx_out = _xx_deliverable_path(region)
-    _xx_out.write_text(_strip_override_echo(final_stdout))
+    xx_out = _xx_report_path(region)
+    xx_out.write_text(strip_override_echo(final_stdout))
 
-    opt_data = _parse_and_save(
+    opt_data = parse_and_save(
         final_stdout,
         factors=best_factors,
         region=region,
-        run_type=f"{optimizer}_optimal",
+        run_type="ga_optimal",
         out_path=paths["optimal_summary"],
     )
 
-    # ── Solve-time instrumentation (paper deliverable: sum over 30 regions) ────
     try:
-        _n_evals = paths["history_file"].read_text().count("COST_MN_BIL_PER_YEAR")
+        n_evals = paths["history_file"].read_text().count("COST_MN_BIL_PER_YEAR")
     except OSError:
-        _n_evals = None
+        n_evals = None
     opt_data["timing"] = {
         "datacenter_scenario":   _IFDATCEN,
-        "start_mode":            "scratch" if _scratch else (baseline_start or "baseline"),
+        "start_mode":            "scratch" if scratch else baseline_start,
         "max_land_pct":          _MAX_LAND_PCT,
         "land_penalty_per_pp":   _LAND_PENALTY_PER_PP if _MAX_LAND_PCT is not None else None,
-        "polish":                _polish_label if optimizer == "ga" else None,
-        "optimizer":             optimizer,
-        "baseline_eval_seconds": round(_baseline_eval_seconds, 3),
-        "optimize_seconds":      round(_optimize_seconds, 3),
-        "final_eval_seconds":    round(_final_eval_seconds, 3),
-        "total_seconds":         round(time.perf_counter() - _t_workflow_start, 3),
-        "n_evaluations":         _n_evals,
-        "ga_population":         ga_population if optimizer == "ga" else None,
-        "ga_generations":        ga_generations if optimizer == "ga" else None,
+        "polish":                polish_label,
+        "optimizer":             "ga",
+        "baseline_eval_seconds": round(baseline_eval_seconds, 3),
+        "optimize_seconds":      round(optimize_seconds, 3),
+        "final_eval_seconds":    round(final_eval_seconds, 3),
+        "total_seconds":         round(time.perf_counter() - t_workflow_start, 3),
+        "n_evaluations":         n_evals,
+        "ga_population":         ga_population,
+        "ga_generations":        ga_generations,
         "parallel_evals":        parallel_evals,
     }
-    _save_summary(opt_data, paths["optimal_summary"])
+    save_summary(opt_data, paths["optimal_summary"])
 
-    print(
-        "Final evaluation cost: {:.3f} $B/yr  →  {}".format(
-            parse_cost(final_stdout), paths["optimal_summary"]
-        )
-    )
+    print("Final evaluation cost: {:.3f} $B/yr  →  {}".format(
+        parse_cost(final_stdout), paths["optimal_summary"]))
     print("Solve time: optimize={:.1f}s  total={:.1f}s  evals={}  →  xx file: {}".format(
-        _optimize_seconds, opt_data["timing"]["total_seconds"], _n_evals, _xx_out))
-
-    # ── Generate plots ────────────────────────────────────────────────────────
-    if generate_plots and _RUN_SUFFIX:
-        # Per-region plotting keys off the real region name (for factor extraction)
-        # but scratch/scenario results live in isolated <region><suffix> folders,
-        # so the two don't line up.  These runs are covered by cross-region
-        # reporting (export_comparison / plot_comparison).
-        print("Skipping per-region plots for isolated run '{}{}' "
-              "(covered by cross-region reporting).".format(region, _RUN_SUFFIX))
-    elif generate_plots:
-        print("Generating plots for region {}...".format(region))
-        try:
-            import scripts.plot_results as _plot_results  # lazy to avoid circular import
-            _plot_results.main(region=region)
-            print("Plots saved to {}".format(paths["results_dir"]))
-        except Exception as exc:
-            print("  [WARN] Plot generation failed: {}".format(exc))
-    else:
-        print("Skipping plot generation (--no-plots). "
-              "Run 'python -m scripts.plot_results --region {}' separately.".format(region))
+        optimize_seconds, opt_data["timing"]["total_seconds"], n_evals, xx_out))
 
 
 # ---------------------------------------------------------------------------
@@ -2324,292 +1414,94 @@ def run_workflow(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description=(
-            "Run the Fortran grid model under a genetic algorithm (or Hooke-Jeeves),\n"
-            "seeded from a baseline factor file via --baseline-start.\n\n"
-            "GA STRATEGY WITH MANY PARAMETERS:\n"
-            "  The model exposes ~35 tunable parameters. For staged optimisation:\n"
-            "  Phase 1: Lock new params, optimise capacity factors only:\n"
-            "    --hj-lock CSPSTORGAT MXHRDRM BATDISCH ... (all non-capacity params)\n"
-            "  Phase 2: Lock capacity factors, optimise storage/DR params.\n"
-            "  Phase 3: Unlock all.\n"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+        description="Optimize the LOADMATCH design variables of one region with a "
+                    "genetic algorithm, seeded via --baseline-start.")
     parser.add_argument(
-        "--region",
-        type=str,
-        default=_DEFAULT_REGION,
-        metavar="REGION",
-        help=(
-            "Grid region to simulate (default: UNITED-STATES).  "
-            "Must match a GRIDUSE name in powerworld.f, e.g. CHINA, EUROPE, INDIA.  "
-            "Results are written to data/results_verification/<REGION>/ for non-US regions."
-        ),
-    )
+        "--region", required=True, metavar="REGION",
+        help="Grid region (a GRIDUSE name in powerworld.f, e.g. EUROPE, CHINA).")
     parser.add_argument(
-        "--parallel-evals",
-        type=int,
-        default=1,
-        help="Number of simultaneous Fortran evaluations (default: 1).",
-    )
+        "--baseline-start", required=True, metavar="defaults|scratch|PATH",
+        help="Starting point: 'defaults' = the region values hardcoded in "
+             "powerworld.f (the expert trial-and-error solution); 'scratch' = the "
+             "spreadsheet start (capacity factors 1, storage 0), results in "
+             "<REGION>_<scratch-label>/; PATH = a KEY = VALUE factor file, e.g. a "
+             "saved genetic_factors.dat.")
     parser.add_argument(
-        "--hj-initial-step",
-        type=float,
-        default=0.2,
-        help="Initial relative step size for Hooke-Jeeves (default: 0.2).",
-    )
+        "--parallel-evals", type=int, default=1,
+        help="Simultaneous Fortran evaluations (default: %(default)s).")
     parser.add_argument(
-        "--hj-shrink",
-        type=float,
-        default=0.7,
-        help="Shrink factor applied when no improvement is found (default: 0.7).",
-    )
+        "--lock", nargs="*", default=[], metavar="FACTOR",
+        help="Design variables held at their starting value (case-insensitive).")
+    parser.add_argument("--ga-population", type=int, default=24,
+                        help="Population size (default: %(default)s).")
+    parser.add_argument("--ga-generations", type=int, default=50,
+                        help="Number of generations (default: %(default)s).")
+    parser.add_argument("--ga-mutation-rate", type=float, default=0.15,
+                        help="Per-variable mutation probability (default: %(default)s).")
+    parser.add_argument("--ga-mutation-scale", type=float, default=0.2,
+                        help="Relative mutation scale (default: %(default)s).")
+    parser.add_argument("--ga-elite-frac", type=float, default=0.2,
+                        help="Elite fraction kept each generation (default: %(default)s).")
+    parser.add_argument("--ga-mutation-cooling", type=float, default=0.98,
+                        help="Per-generation decay of mutation rate and scale "
+                             "(default: %(default)s).")
     parser.add_argument(
-        "--hj-max-iter",
-        type=int,
-        default=40,
-        help="Maximum Hooke-Jeeves iterations (default: 40).",
-    )
+        "--seed", type=int, default=12345,
+        help="Random seed of the GA; the Fortran evaluations are deterministic, so "
+             "a fixed seed makes a run reproducible (default: %(default)s).")
     parser.add_argument(
-        "--hj-min-step",
-        type=float,
-        default=1e-5,
-        help="Minimum step size before terminating Hooke-Jeeves (default: 1e-5).",
-    )
+        "--max-land-pct", type=float, default=None,
+        help="Cap on new land (wind spacing + footprint, %% of regional land), "
+             "enforced as a graded cost penalty on the selection cost; reported "
+             "costs stay unpenalized.  Default: no cap.")
     parser.add_argument(
-        "--hj-direction",
-        choices=["inc", "dec", "both"],
-        default="both",
-        help="Direction of factor perturbations (default: both).",
-    )
+        "--land-penalty-per-pp", type=float, default=None,
+        help="Penalty slope: each percentage point above --max-land-pct multiplies "
+             "the selection cost by (1 + slope x pp) (default {}).".format(
+                 _LAND_PENALTY_PER_PP))
     parser.add_argument(
-        "--hj-lock",
-        nargs="*",
-        default=list(DEFAULT_LOCKED),
-        metavar="FACTOR",
-        help="Factor names to keep fixed during optimisation. "
-        "Case-insensitive. Default: %(default)s.",
-    )
+        "--datacenter", type=int, choices=[0, 1, 2], default=0,
+        help="Data-center scenario (Fortran IFDATCEN): 0 = none, 1 = EGS-powered, "
+             "2 = WWS-powered.  Results in <REGION>_dc<N><LABEL>/.")
     parser.add_argument(
-        "--optimizer",
-        choices=["hj", "ga"],
-        default="hj",
-        help="Optimizer: hj (Hooke-Jeeves) or ga (genetic algorithm). Default: hj.",
-    )
+        "--dc-label", type=str, default="",
+        help="Label appended to the data-center suffix, e.g. --datacenter 2 "
+             "--dc-label rc -> _dc2rc.")
     parser.add_argument(
-        "--ga-population",
-        type=int,
-        default=24,
-        help="GA population size (default: 24).",
-    )
+        "--scratch-label", type=str, default="scratch",
+        help="Suffix label for --baseline-start scratch runs (default: %(default)s).")
     parser.add_argument(
-        "--ga-generations",
-        type=int,
-        default=50,
-        help="GA generations (default: 50).",
-    )
+        "--out-suffix", type=str, default="",
+        help="Force the output suffix (<REGION>_<SUFFIX>/, xx_optimized_<SUFFIX>/), "
+             "overriding the scratch/data-center suffix.")
     parser.add_argument(
-        "--ga-mutation-rate",
-        type=float,
-        default=0.15,
-        help="GA per-factor mutation probability (default: 0.15). "
-        "With ~35 params, 0.15 -> ~5 mutations per individual.",
-    )
-    parser.add_argument(
-        "--ga-mutation-scale",
-        type=float,
-        default=0.2,
-        help="Relative mutation scale (default: 0.2).",
-    )
-    parser.add_argument(
-        "--ga-elite-frac",
-        type=float,
-        default=0.2,
-        help="Elite fraction preserved each GA generation (default: 0.2).",
-    )
-    parser.add_argument(
-        "--ga-mutation-cooling",
-        type=float,
-        default=0.98,
-        help="Per-generation decay applied to GA mutation rate/scale (default: 0.98).",
-    )
-    parser.add_argument(
-        "--ga-factor-scale",
-        action="append",
-        default=[],
-        metavar="NAME=SCALE",
-        help="Per-factor mutation scale multiplier, e.g., FACONWIN=0.5. "
-        "Overrides category defaults. May be repeated.",
-    )
-    parser.add_argument(
-        "--ga-magnitude-damping",
-        type=float,
-        default=0.5,
-        help="Exponent for 1/max(1,value) to damp mutations on large values (default: 0.5).",
-    )
-    parser.add_argument(
-        "--baseline-start",
-        type=str,
-        default=None,
-        metavar="PATH|defaults",
-        help="Starting point for the GA/HJ optimiser (required). Three options: "
-        "(1) 'defaults': the Fortran hardcoded region values (the PI's "
-        "trial-and-error solution), the standard base-case start; "
-        "(2) 'scratch': the spreadsheet starting point (all capacity factors=1, "
-        "storage design variables=0); results go to isolated <REGION>_scratch/ "
-        "dirs and xx_optimized_scratch/ so the base case is never overwritten; "
-        "(3) PATH to a baseline_results.dat / factors file: load factors from "
-        "that file. Default: %(default)s.",
-    )
-    parser.add_argument(
-        "--no-plots",
-        action="store_true",
-        default=False,
-        help="Skip figure generation after the GA run. "
-             "Useful when plots are handled as a separate Snakemake rule. "
-             "Run 'python -m scripts.plot_results --region REGION' to generate figures later.",
-    )
-    parser.add_argument(
-        "--datacenter",
-        type=int,
-        choices=[0, 1, 2],
-        default=0,
-        help="Data-center scenario (Fortran IFDATCEN): 0 = base WWS (default), "
-             "1 = EGS-powered data centers, 2 = WWS-powered data centers. "
-             "Scenarios 1/2 write to data/results_verification/<REGION>_dc<N>/ so "
-             "they never overwrite the base-case results.",
-    )
-    parser.add_argument(
-        "--dc-label",
-        type=str,
-        default="",
-        help="Extra isolation label for data-center runs sharing an IFDATCEN "
-             "value: results go to <REGION>_dc<N><LABEL>/ (e.g. --datacenter 2 "
-             "--dc-label rc -> _dc2rc). Default: empty.",
-    )
-    parser.add_argument(
-        "--max-land-pct",
-        type=float,
-        default=None,
-        help="Cap on NEW land use (wind spacing + footprint) as percent of "
-             "regional land area, enforced during optimization as a graded cost "
-             "penalty: the effective (selection) cost is multiplied by "
-             "(1 + land-penalty-per-pp * excess_pp). Reported costs stay "
-             "unpenalized. Default: no cap.",
-    )
-    parser.add_argument(
-        "--land-penalty-per-pp",
-        type=float,
-        default=None,
-        help="Slope of the land-use penalty: each percentage point above "
-             "--max-land-pct multiplies the effective cost by this much "
-             "(default {}). Raise it to more strongly deter over-cap solutions."
-             .format(_LAND_PENALTY_PER_PP),
-    )
-    parser.add_argument(
-        "--scratch-label",
-        type=str,
-        default="scratch",
-        help="Isolation label for --baseline-start scratch runs: results go to "
-             "<REGION>_<LABEL>/ and xx_optimized_<LABEL>/. Use a distinct label "
-             "per campaign (e.g. scratch2) so earlier campaigns are preserved. "
-             "Default: %(default)s.",
-    )
-    parser.add_argument(
-        "--out-suffix",
-        type=str,
-        default="",
-        help="Force the output suffix directly: results go to <REGION>_<SUFFIX>/ "
-             "and xx_optimized_<SUFFIX>/, overriding the scratch/dc suffix logic. "
-             "Use when re-evaluating a saved optimum in --evaluate-only mode into "
-             "its own dir (e.g. --out-suffix scratch2 to re-cost a scratch2 "
-             "optimum without clobbering the base results). Default: none.",
-    )
-    parser.add_argument(
-        "--evaluate-only",
-        action="store_true",
-        default=False,
-        help="Evaluate the --baseline-start factors once and stop (no optimization). "
-             "Use for the EGS data-center scenario (--datacenter 1), where the "
-             "Fortran adds EGS supply directly and no re-tuning is needed. Writes "
-             "optimal_summary.json + xx.<REGION> from the single evaluation.",
-    )
-    parser.add_argument(
-        "--preprocess-only",
-        action="store_true",
-        default=False,
-        help="Run supply-file preprocessing (IFREWRITE=1,2) for the region and exit. "
-             "If data/raw/wwssupworld.<REGION> already exists the step is a no-op. "
-             "Used by the Snakemake preprocess_supply rule.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=12345,
-        help="Random seed for the GA (mutation, crossover, selection, and the "
-             "spread of the initial population). Fixed by default so runs are "
-             "reproducible; the Fortran evaluations are already deterministic. "
-             "Pass a different integer to explore alternative GA trajectories. "
-             "Default: %(default)s.",
-    )
-    return parser.parse_args()
-
-def _parse_factor_scales(raw_list: List[str]) -> Dict[str, float]:
-    scales: Dict[str, float] = {}
-    for item in raw_list:
-        if "=" not in item:
-            raise ValueError(f"Invalid --ga-factor-scale entry '{item}'. Expected NAME=SCALE.")
-        name, val = item.split("=", 1)
-        name = name.strip()
-        try:
-            scales[name.lower()] = float(val)
-        except ValueError:
-            raise ValueError(f"Invalid scale '{val}' for factor '{name}'.")
-    return scales
+        "--evaluate-only", action="store_true",
+        help="Evaluate the --baseline-start factors once and stop (no GA); writes "
+             "optimal_summary.json and the xx report from that run.")
+    args = parser.parse_args()
+    unknown = [k for k in args.lock if k.upper() not in PARAM_REGISTRY]
+    if unknown:
+        parser.error("--lock: unknown parameter(s): {}".format(" ".join(unknown)))
+    return args
 
 
 def main():
     args = parse_args()
-
-    # Seed Python's RNG so the GA (mutation/crossover/selection and the initial
-    # population spread) is reproducible run-to-run.  Fortran evaluations are
-    # already deterministic, so this makes an entire optimization repeatable.
-    # Child eval processes are spawned and do no RNG work, so seeding the parent
-    # once here is sufficient.
+    # Seeding the parent process makes the GA reproducible: the Fortran runs are
+    # deterministic and the spawned evaluation workers draw no random numbers.
     random.seed(args.seed)
     print(f"[ga] random seed = {args.seed}")
-
-    # ── Early-exit modes used by Snakemake rules ──────────────────────────────
-
-    if args.preprocess_only:
-        # Run IFREWRITE=1,2 if wwssupworld.<REGION> is missing; otherwise no-op.
-        # The Snakemake preprocess_supply rule touches the sentinel on success.
-        preprocess_region(args.region)
-        return
-
-    # ── Normal GA/HJ workflow ─────────────────────────────────────────────────
-    factor_scales = _parse_factor_scales(args.ga_factor_scale)
     run_workflow(
         region=args.region,
+        baseline_start=args.baseline_start,
         parallel_evals=max(1, args.parallel_evals),
-        hj_initial_step=args.hj_initial_step,
-        hj_shrink=args.hj_shrink,
-        hj_max_iter=args.hj_max_iter,
-        hj_min_step=args.hj_min_step,
-        hj_direction=args.hj_direction,
-        hj_locked_factors=args.hj_lock,
-        optimizer=args.optimizer,
+        locked=args.lock,
         ga_population=args.ga_population,
         ga_generations=args.ga_generations,
         ga_mutation_rate=args.ga_mutation_rate,
         ga_mutation_scale=args.ga_mutation_scale,
         ga_elite_frac=args.ga_elite_frac,
         ga_mutation_cooling=args.ga_mutation_cooling,
-        ga_factor_scales=factor_scales,
-        ga_magnitude_damping=args.ga_magnitude_damping,
-        baseline_start=args.baseline_start,
-        generate_plots=not args.no_plots,
         datacenter=args.datacenter,
         evaluate_only=args.evaluate_only,
         scratch_label=args.scratch_label,

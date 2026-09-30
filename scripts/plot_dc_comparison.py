@@ -1,22 +1,17 @@
-"""Publication figures for the data-center cases.
+"""Data-center cost figure (fig_dc_combined).
 
 Reads data/results_verification/dc_comparison_summary.csv (written by
-export_dc_comparison.py) and produces two landscape, journal-style figures:
+export_dc_comparison.py) and draws one landscape figure:
 
-  fig_dc_cost_by_region   dodged dot plot, regions on the x-axis (largest system
-                          cost first): cost increase of powering the data centers
-                          vs the no-data-center optimum, per region and supply
-                          strategy.  The +10% added-load share is drawn as the
-                          "proportional cost" reference.  A handful of very-high-
-                          latitude rooftop-PV cases run to several thousand %
-                          (feasibility statements, not meaningful costs); they are
-                          drawn off the top with an up-arrow so the linear axis
-                          resolves the rest.
-  fig_dc_strategy_summary two panels: per-strategy distribution of the cost
-                          increase across regions (median marked), and the total
-                          added cost over all 30 regions.
-  fig_dc_combined         the two above stacked into one figure: (a) the strategy
-                          summary on top, (b) the per-region cost plot below.
+  (a) per supply strategy: the distribution across regions of the cost increase
+      of powering the data centers vs the no-data-center optimum (median and
+      cost-weighted mean marked), and the total added cost over all regions;
+  (b) per region (alphabetical) and strategy: the cost increase as a dodged dot
+      plot, with the +10% added-demand share as the "proportional cost"
+      reference.  Points above the axis cap are drawn as labelled up-arrows.
+
+Greenland and Iceland are excluded from the rooftop (RBH) case, which is not
+applicable at those latitudes; the exclusion is stated in the caption.
 
 Strategy identity is encoded redundantly (colour + marker shape), so the figures
 survive greyscale printing and colour-vision deficiency.  No titles or on-figure
@@ -51,13 +46,13 @@ apply_style()
 OUTLIER_PCT = 30.0
 # Left summary panel: distribution x-axis clip (a few extreme tails go off-scale).
 DIST_XMAX = 42.0
-# PI decision: exclude Greenland & Iceland rooftop (case 3 / dc2rc) results from
-# the figures entirely; the exclusion is acknowledged in the caption.
+# Greenland & Iceland rooftop (case 3 / dc2rc) results are excluded from the
+# figures entirely; the exclusion is acknowledged in the caption.
 EXCLUDE = {"dc2rc": {"GREENLAND", "ICELAND"}}
 
 
 def _case_delta(df, case, suffix):
-    """A strategy's per-region column with the PI-excluded regions blanked out."""
+    """A strategy's per-region column with the excluded regions blanked out."""
     s = df[f"{case}_{suffix}"]
     drop = EXCLUDE.get(case, set())
     return s.where(~df["region"].isin(drop)) if drop else s
@@ -65,8 +60,8 @@ def _case_delta(df, case, suffix):
 
 def _mean_pct(df, case):
     """Cost-weighted (system) mean % cost increase for a strategy = total added
-    cost / total base cost over the same non-excluded regions.  Matches the PI's
-    reported aggregate % increases (e.g. EGS 8.00%, RBH 27.59% excl. Ic/Gr)."""
+    cost / total base cost over the same non-excluded regions (the aggregate %
+    increase of the post-processed tables)."""
     d = _case_delta(df, case, "delta_bil_per_yr")
     base = pd.to_numeric(df["base_cost_bil_per_yr"], errors="coerce").where(d.notna())
     den = base.sum()
@@ -104,7 +99,7 @@ def _draw_cost_by_region(ax, df):
 
     cap = OUTLIER_PCT
     offscale = []  # (region, strategy label, value)
-    excluded = []  # (region, strategy label) - dropped per PI, noted in caption
+    excluded = []  # (region, strategy label) - excluded, noted in caption
     ymin = 0.0     # extend the axis if any case lowers cost (negative delta)
     for (case, label, color, marker), dx in zip(DC_STRATEGIES, offsets):
         vals = df[f"{case}_delta_pct"].to_numpy(dtype=float)
@@ -161,7 +156,7 @@ def _draw_strategy_dist(axL, df):
         axL.scatter(shown, y + jitter, s=34, color=color, marker=marker,
                     alpha=0.8, edgecolors="white", linewidths=0.6, zorder=3)
         med = vals.median()
-        mean = _mean_pct(df, case)   # cost-weighted system mean (PI's aggregate %)
+        mean = _mean_pct(df, case)   # cost-weighted system mean (aggregate %)
         # labels sit to the RIGHT of their tick (not centred on it) with a light
         # white backing so they stay readable over the dots.
         lbl = dict(fontsize=8.5, color=INK, ha="left", va="center", zorder=5,

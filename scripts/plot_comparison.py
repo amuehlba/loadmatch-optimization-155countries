@@ -19,8 +19,8 @@ the regions on the x-axis (shared region order = largest system cost first):
                         land use.
   fig_solve_time       two panels:
                         (a) GA solve time per region (hours, linear): GA-from-
-                            trial-and-error vs GA-from-scratch, with the PI's
-                            mean trial-and-error time per region as a reference;
+                            trial-and-error vs GA-from-scratch, with the mean
+                            trial-and-error time per region as a reference;
                         (b) time to solve all 30 regions (hours, log) per model:
                             one simulation at a time on one core vs (GA only)
                             one region at a time on 24 cores vs as run (~3
@@ -64,8 +64,8 @@ apply_style()
 _MARKER = dict(edgecolors="white", linewidths=0.9, zorder=4)
 SZ_BASE, SZ_GA, SZ_SCRATCH = 88, 46, 60
 
-# LOADMATCH trial-and-error effort, as reported by the PI (2026-09) for the 30
-# regions: ~30 simulations per region at 75.3 s each on one core (Intel Xeon
+# LOADMATCH trial-and-error effort for the 30 regions, as recorded by the model
+# developer: ~30 simulations per region at 75.3 s each on one core (Intel Xeon
 # Gold 6154) plus ~45 s of expert time per simulation to inspect, adjust and
 # resubmit; run with ~3 jobs overlapping, the tuning took ~17.5 h of expert-
 # attended wall-clock.  75.3 s is also the single-core reference used for the
@@ -270,8 +270,8 @@ def _solve_time_totals(d: pd.DataFrame, n_regions: int):
 
 
 def _h(v):
-    """Hours label: 1 decimal below 100 h (rounded half-up, so 11.25 -> 11.3 as
-    in the PI's text), thousands-separated whole hours above."""
+    """Hours label: 1 decimal below 100 h (rounded half-up, so 11.25 -> 11.3),
+    thousands-separated whole hours above."""
     return f"{v:,.0f} h" if v >= 100 else f"{v + 1e-9:.1f} h"
 
 

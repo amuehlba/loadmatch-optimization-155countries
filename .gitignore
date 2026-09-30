@@ -1,37 +1,20 @@
 __pycache__/
 *.pyc
-*.pyo
-.env
-.venv
-.ipynb_checkpoints/
+.venv/
 .DS_Store
-data/processed/*
-data/results_python/*
-data/results_fortran/*
 .vscode/
+.claude/
+CLAUDE.md
 
-# Build artifacts
+# Fortran build
 fortran/build/
 fortran/bin/
 *.o
 *.mod
 
-# Data
-data/*
-
-fortran/fortran_factors.dat
-
-logs/*
-
-.claude/
-
-.snakemake/
-
-# Gurobi auto-generated log (recreated on each LP run)
-gurobi.log
-
-CLAUDE.md
-
-figures/
-
+# Inputs, results, logs and exports (not versioned)
+data/
+logs/
 docs/
+wwshourly_US/
+*.tgz

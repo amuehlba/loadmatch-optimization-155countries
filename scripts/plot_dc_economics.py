@@ -1,15 +1,15 @@
-"""Economic figures for the data-center paper (draft Tables 1, 2, 3).
+"""Data-center economics figures from the post-processed tables.
 
-DATA-CENTER PAPER ONLY.  Same PI house style (Times New Roman, capitalized
-region names) as scripts/plot_dc_tables.py, reading the same per-case workbooks
-in data/results_verification/Tables/.
+Same data-center figure style (Times New Roman, capitalized region names) as
+scripts/plot_dc_tables.py, reading the same per-case workbooks in
+data/results_verification/Tables/.
 
-  Table 1  fig_dc_lcoe_by_region     total LCOE per region + aggregate, base vs 5 DC cases
-           dc_lcoe_comparison.csv    the same numbers as a table (regional + total)
-  Table 2  fig_dc_nameplate_total    2050 nameplate capacity by technology, summed
-                                     over all regions, base vs 5 DC cases (stacked bar)
-           fig_dc_nameplate_by_region  % increase in total nameplate vs base, per region
-  Table 3  fig_dc_lcoe_breakdown     LCOE split into cost components (stacked bar), aggregate
+  fig_dc_nameplate      (a) 2050 generation and storage nameplate capacity by
+                        technology, summed over all regions, base vs 5 DC cases
+                        (stacked bars); (b) per-region % change per technology
+  fig_dc_lcoe           (a) aggregate LCOE split into cost components (stacked
+                        bars); (b) total LCOE per region + aggregate
+  dc_lcoe_comparison.csv  the per-region and total LCOE numbers as a table
 
 The LCOE sheet is a matrix (30 region columns + an "All regions" column, one row
 per cost component labelled in column 33); the Nameplate sheet has a
@@ -31,7 +31,7 @@ import openpyxl
 
 from scripts.plot_style import (
     apply_dc_style as apply_style, DC_STRATEGIES, C_BASELINE,
-    add_region_bands, style_region_axis, cap_region, minor_ticks, region_sort_key,
+    add_region_bands, cap_region, minor_ticks, region_sort_key,
     GRID, MUTED, INK, INK_SECONDARY,
 )
 from scripts.plot_dc_tables import BASE_FILE, CASES, EXCLUDE, _num
@@ -80,7 +80,7 @@ NP_GROUPS = [
 ]
 
 # Storage nameplate = discharge power (GW) from the ChargeDisch per-region blocks.
-# Order is bottom -> top as the PI specified.  (label, colour, [ChargeDisch keys])
+# Stacked bottom -> top.  (label, colour, [ChargeDisch keys])
 STORAGE_GROUPS = [
     ("Firebrick",     "#b22222", ["HEAT-BRICKS"]),
     ("UTES",          "#8c6d31", ["UTES-HEAT", "UTES-ELEC"]),
@@ -153,8 +153,8 @@ def _agg_series(wb, exclude_grl_isl):
 
     The default aggregate is the "All regions" column (index 31 / Excel col AF).
     The RBH workbook also carries an "All regions except Greenland & Iceland"
-    column (index 34 / Excel col AI); when exclude_grl_isl is set we read that
-    one, so the RBH totals match the PI's tables (which drop GRL/ISL rooftop).
+    column (index 34 / Excel col AI); when exclude_grl_isl is set that column is
+    read, consistent with excluding GRL/ISL rooftop everywhere else.
     The two columns differ almost entirely in Li-battery storage, because
     GRL/ISL rooftop carries an outsized battery build."""
     rows = list(wb["LCOE"].iter_rows(values_only=True))

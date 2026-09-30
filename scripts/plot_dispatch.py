@@ -1,15 +1,15 @@
 """SI dispatch + storage state-of-charge plots, per region, from the Fortran output.
 
-Each region's ``fortran_optimal_run.out`` (the LoadMatch stdout) carries, besides
-the summary sections, the hourly time series the PI exports to the
-``wwshourly.<REGION>`` xlsx and plots:
+Each region's ``fortran_optimal_run.out`` (the LOADMATCH stdout) carries, besides
+the summary sections, the hourly time series that the model also writes to
+``wwshourly.<REGION>``:
 
   * hourly dispatch rows   ``X   <GMTDAY> <hour> ...``  (powerworld.f FORMAT 262)
   * daily storage-SOC rows ``XGMTD <day> ...``          (powerworld.f FORMAT 210)
 
 For each region this writes:
 
-  <REGION>_dispatch.{pdf,png}  the PI's four-row dispatch figure (see below)
+  <REGION>_dispatch.{pdf,png}  the four-row dispatch figure (see below)
   <REGION>_soc.{pdf,png}       storage state of charge (TWh) by technology, daily
 
 The four-row dispatch figure (all series in energy-each-hour = TWh/h = TW):
@@ -22,11 +22,12 @@ The four-row dispatch figure (all series in energy-each-hour = TWh/h = TW):
 
 Column order is taken verbatim from powerworld.f (FORMAT 261/262 and 208/210).
 Reading the retained ``.out`` means every optimized region can be plotted with no
-need to regenerate ``wwshourly``.  Pass ``--wwshourly`` to read the dedicated file
-instead (same ``X`` rows); the SOC always comes from the ``.out``.
+need to regenerate ``wwshourly``.  Pass ``--wwshourly`` to read such a file
+instead (same ``X`` rows, e.g. the data-center cases written by
+regen_wwshourly_us_dc.sh); the SOC always comes from the ``.out``.
 
-Usage (from repo root, on Sherlock)
------------------------------------
+Usage (from the repo root, with the per-region results present)
+---------------------------------------------------------------
     python -m scripts.plot_dispatch                          # all regions found
     python -m scripts.plot_dispatch --regions EUROPE CHINA
     python -m scripts.plot_dispatch --window-start 100 --window-days 100
@@ -68,7 +69,7 @@ _SOC_SERIES = [
     ("Cold / PCM",           "storf",   "#17becf"),
 ]
 
-# Row 3 — WWS generation by source (all >= 0; sum to sup_bef_td).
+# Row 3: WWS generation by source (all >= 0; sum to sup_bef_td).
 _GEN_SOURCES = [
     ("Onshore + offshore wind", "wind",        "#3b7dd8"),
     ("Solar PV + CSP",          "solpv_csp",   "#f2a900"),
@@ -90,7 +91,7 @@ def _display_region(name: str) -> str:
 
 def parse_out(path: Path):
     """Parse the hourly dispatch (X rows) and daily SOC (XGMTD rows) from a
-    LoadMatch stdout/.out file.  Returns (disp, soc) dicts of column -> list."""
+    LOADMATCH stdout/.out file.  Returns (disp, soc) dicts of column -> list."""
     disp = {k: [] for k in _DISP}
     soc = {k: [] for k in _SOC}
     with open(path, errors="replace") as fh:
@@ -158,7 +159,7 @@ def _stack_signed(ax, x, comps):
 
 
 def fig_dispatch(disp, region, outdir, window_start=100.0, window_days=100.0):
-    """PI four-row dispatch figure (see module docstring)."""
+    """Four-row dispatch figure (see module docstring)."""
     day = np.asarray(disp["gmtday"], dtype=float)
     if day.size == 0:
         return False
@@ -176,7 +177,7 @@ def fig_dispatch(disp, region, outdir, window_start=100.0, window_days=100.0):
 
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(13.5, 13.5))
 
-    # Row 1 — full three-year period
+    # Row 1: full three-year period
     ax1.scatter(day, blue, s=1.5, color=C_BLUE, linewidths=0, zorder=3,
                 label="Demand + storage changes + losses (storage, T&D, curtailment)")
     ax1.plot(day, red, color=C_RED, lw=0.4, zorder=2,
@@ -184,19 +185,19 @@ def fig_dispatch(disp, region, outdir, window_start=100.0, window_days=100.0):
     ax1.set_xlim(0, day.max())
     ax1.legend(loc="upper left", fontsize=7.5, markerscale=5, framealpha=0.9)
 
-    # Row 2 — window, same two series
+    # Row 2: window, same two series
     ax2.scatter(day[m], blue[m], s=6, color=C_BLUE, linewidths=0, zorder=3,
                 label="Demand + storage changes + losses")
     ax2.plot(day[m], red[m], color=C_RED, lw=0.8, zorder=2,
              label="Total WWS generation before losses")
     ax2.legend(loc="upper left", fontsize=7.5, markerscale=3, framealpha=0.9)
 
-    # Row 3 — generation by source, window (stack sums to red)
+    # Row 3: generation by source, window (stack sums to red)
     _stack_pos(ax3, day[m], [(lab, A[key][m], col) for lab, key, col in _GEN_SOURCES])
     ax3.plot(day[m], red[m], color=C_RED, lw=0.5, alpha=0.6, zorder=3)
     ax3.legend(loc="upper left", fontsize=7.5, ncol=3, framealpha=0.9)
 
-    # Row 4 — demand/storage/losses by component, window (signed stack, sums to blue)
+    # Row 4: demand/storage/losses by component, window (signed stack, sums to blue)
     _stack_signed(ax4, day[m], [(lab, y[m], col) for lab, y, col in _demand_components(A)])
     ax4.plot(day[m], red[m], color=C_RED, lw=0.5, alpha=0.6, zorder=3)
     ax4.axhline(0, color="#888888", lw=0.5, zorder=1)

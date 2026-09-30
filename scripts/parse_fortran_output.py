@@ -1,22 +1,16 @@
-"""
-parse_fortran_output.py
------------------------
-Parse a LoadMatch Fortran output file and save a structured JSON summary.
+"""Parse a LOADMATCH xx report (Fortran stdout) into a structured JSON summary.
 
-Both the raw output file and the JSON summary are preserved so that nothing
-is lost — the JSON is purely for fast downstream access (plotting, CSV export,
-comparisons).
-
-Public API used by run_full_workflow.py:
+The raw report is always kept next to the JSON; the JSON only speeds up the
+downstream exports and figures.
 
     from scripts.parse_fortran_output import parse_and_save
 
     parse_and_save(
-        text       = stdout_text,        # full Fortran stdout string
-        factors    = best_factors_dict,  # factor dict used for this run (or None)
-        region     = "UNITED-STATES",
-        run_type   = "ga_optimal",       # label stored in the JSON
-        out_path   = Path(".../optimal_summary.json"),
+        text     = stdout_text,          # full Fortran stdout
+        factors  = best_factors_dict,    # factors used for this run (or None)
+        region   = "UNITED-STATES",
+        run_type = "ga_optimal",         # label stored in the JSON
+        out_path = Path(".../optimal_summary.json"),
     )
 """
 import json
@@ -27,7 +21,7 @@ from typing import Dict, Optional
 
 
 # ---------------------------------------------------------------------------
-# Scalar patterns — each captures one float value
+# Scalar patterns, each captures one float value
 # ---------------------------------------------------------------------------
 _SCALAR: Dict[str, str] = {
 
@@ -96,8 +90,8 @@ _ANNUAL_COST_RE = re.compile(
     r'ANNUAL TOT ENERGY COST.*?LO MN HI=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)'
 )
 
-# Non-grid H2 production capacity diagnostics (printed by powerworld.f versions
-# from 2026-07-09 on; absent in older xx files -> fields stay None).
+# Non-grid H2 production capacity diagnostics (absent in older xx files, in
+# which case the fields stay None).
 _H2PEAKLD_RE = re.compile(
     r'HCDDADD,H2PEAKLD,EUSEFACMIN\s*=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)'
 )
@@ -121,9 +115,9 @@ def parse_land_area(text: str) -> dict:
     """Extract new-land percentages from the xx land-area table.
 
     Returns (all in percent of regional land area, may be None if absent):
-      new_spacing_pct_regland   — ONSHORE WIND row (wind spacing area)
-      new_footprint_pct_regland — TOTAL ELEC+HEAT-FPRINT row (footprint area)
-      new_land_pct_regland      — their sum (total new spacing + footprint)
+      new_spacing_pct_regland   : ONSHORE WIND row (wind spacing area)
+      new_footprint_pct_regland : TOTAL ELEC+HEAT-FPRINT row (footprint area)
+      new_land_pct_regland      : their sum (total new spacing + footprint)
 
     The ONSHORE WIND new-land value equals the %NEWSPACING and the total
     footprint value equals the %NEWFPRIN reported on the regional-summary line.
@@ -162,8 +156,8 @@ def parse_land_area(text: str) -> dict:
 # ---------------------------------------------------------------------------
 # powerworld.f prints three region-level blocks (FORMAT 286/287/301): each is a
 # header line followed by one line of space-separated floats, mapped positionally
-# to named keys.  Field order is fixed by the Fortran WRITE statements, so we key
-# off a stable substring of each header and read the value line.
+# to named keys.  Field order is fixed by the Fortran WRITE statements, so the
+# parser keys off a stable substring of each header and reads the value line.
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?")
 
 _BAU_BLOCKS = [
@@ -219,7 +213,9 @@ def parse_bau_comparison(text: str) -> dict:
 # Core parsing
 # ---------------------------------------------------------------------------
 
-def _check_feasibility(text: str) -> bool:
+def check_feasibility(text: str) -> bool:
+    """False if the run reported unmet load (the simulation stops on the first
+    time step that cannot be balanced)."""
     upper = text.upper()
     return not (
         "REMAINING INFLEX LOAD" in upper
@@ -227,6 +223,18 @@ def _check_feasibility(text: str) -> bool:
         or "UNMET" in upper
         or "UNSERVED" in upper
     )
+
+
+def parse_annual_cost(text: str) -> Optional[float]:
+    """Mean annual total energy cost ($B/yr), or None if the run did not
+    reach the cost summary."""
+    m = _ANNUAL_COST_RE.search(text)
+    if not m:
+        return None
+    try:
+        return float(m.group(2))
+    except ValueError:
+        return None
 
 
 def parse_output(
@@ -242,8 +250,8 @@ def parse_output(
     ----------
     text:      Complete Fortran output text.
     factors:   Dict of parameter values used in this run (written to JSON).
-               Pass None for runs where the factors are not known (e.g. the
-               canonical Jacobson baseline file).
+               Pass None where the factors are not known (e.g. a reference xx
+               file).
     region:    Region label (e.g. "UNITED-STATES").
     run_type:  Short label stored in the JSON (e.g. "baseline", "ga_optimal").
     """
@@ -251,7 +259,7 @@ def parse_output(
         "region":    region,
         "run_type":  run_type,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "feasible":  _check_feasibility(text),
+        "feasible":  check_feasibility(text),
     }
 
     # ── Scalar fields ─────────────────────────────────────────────────────────
@@ -282,7 +290,7 @@ def parse_output(
     # ── WWS-vs-BAU comparison (region level) ─────────────────────────────────
     summary["bau"] = parse_bau_comparison(text)
 
-    # ── Non-grid H2 production capacity (xx versions from 2026-07-09 on) ──────
+    # ── Non-grid H2 production capacity ──────────────────────────────────────
     m = _H2PEAKLD_RE.search(text)
     summary["h2peakld_tw"] = float(m.group(2)) if m else None
     summary["eusefacmin"] = float(m.group(3)) if m else None

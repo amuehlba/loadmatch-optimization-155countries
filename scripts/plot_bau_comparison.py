@@ -1,8 +1,8 @@
-"""BAU-vs-WWS figure (base optimization paper), 2023 USD, two panels.
+"""BAU-vs-WWS figure (fig_wws_vs_bau), 2023 USD, two panels.
 
-Reads the PI's provided tables in data/results_verification/Tables/, sheet
-BAULCOE (per-region source block), and draws two aligned per-region panels
-(same region order in both):
+Reads the post-processed LOADMATCH tables in data/results_verification/Tables/
+(sheet BAULCOE, per-region source block) and draws two aligned per-region
+panels (same region order in both):
 
   A) per unit energy (2023 US cents/kWh): 2050 business-as-usual social cost
      decomposed into private energy + air-pollution health + climate, with the
@@ -143,7 +143,7 @@ def _draw_perkwh(ax, df: pd.DataFrame) -> None:
 
 
 def _draw_reductions(ax, df: pd.DataFrame) -> None:
-    """Panel B: per-region relative reductions vs BAU (%) — aggregate energy
+    """Panel B: per-region relative reductions vs BAU (%): aggregate energy
     cost for both WWS scenarios, plus end-use energy demand."""
     n = len(df)
     x = list(range(n))
@@ -213,7 +213,7 @@ def main(argv=None) -> None:
     args = ap.parse_args(argv)
     for p in (args.opt_table, args.tae_table):
         if not p.exists():
-            print("Missing PI table:", p)
+            print("Missing table:", p)
             return
     df, agg = _load(args.opt_table, args.tae_table)
     args.outdir.mkdir(parents=True, exist_ok=True)

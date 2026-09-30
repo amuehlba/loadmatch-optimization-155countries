@@ -1,8 +1,8 @@
 """
 export_results.py
 -----------------
-Export all LoadMatch regional optimisation results to a single colour-coded
-XLSX file for easy inspection in Excel / LibreOffice Calc.
+Export all regional optimization results to one colour-coded XLSX workbook
+(and optionally a flat CSV).
 
 Layout
 ------
@@ -10,14 +10,12 @@ Layout
 • Two frozen header rows
     Row 1 – colour-coded group label (merged across the group's columns)
     Row 2 – individual column names
-• Data rows: five consecutive rows per region
-    (Baseline | GA (trial-error) | Scratch start | GA (scratch) | GA (scratch2))
-  with alternating light-gray / white row-band shading so each region block
-  is visually distinct.  The "region" column is always filled → fully
-  machine-readable (no merged cells, no empty key columns).
+• Data rows: four consecutive rows per region
+    (Baseline | GA (trial-error) | Scratch start | GA (scratch2))
+  with alternating light-gray / white row-band shading per region.  The
+  "region" column is always filled, so the sheet stays machine-readable.
   Baseline / GA (trial-error) come from <REGION>/; the scratch pair comes from
-  the isolated <REGION>_scratch/ results (--baseline-start scratch).  LP-based
-  cases are not exported (LP warm start unused in this project).
+  <REGION>_scratch2/ (--baseline-start scratch --scratch-label scratch2).
 • Frozen panes at row 3 / column 3 so headers and the two ID columns stay
   visible while scrolling.
 
@@ -28,6 +26,7 @@ Column groups
   Optimised factors  |  Fixed factors
 
 Missing cases (e.g. scratch runs not yet made) produce blank data rows.
+The structural-change figures (plot_structure.py) read this workbook.
 
 Usage
 -----
@@ -40,43 +39,22 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+from scripts.parse_fortran_output import parse_land_area
+from scripts.run_full_workflow import PARAM_REGISTRY, FACTOR_KEYS
+from src.regions import config_regions
+
 REPO_ROOT    = Path(__file__).resolve().parent.parent
 RESULTS_DIR  = REPO_ROOT / "data" / "results_verification"
 DEFAULT_OUT  = RESULTS_DIR / "results_export.xlsx"
 
-# ---------------------------------------------------------------------------
-# Import PARAM_REGISTRY to get factor metadata
-# ---------------------------------------------------------------------------
-try:
-    from scripts.run_full_workflow import PARAM_REGISTRY, FACTOR_KEYS
-except ImportError:
-    # Fallback: minimal stub so the script can still be imported stand-alone
-    PARAM_REGISTRY = {}
-    FACTOR_KEYS    = []
-
 # Separate optimised vs fixed parameters (preserving registry order)
 _OPT_KEYS   = [k for k in PARAM_REGISTRY if k in set(FACTOR_KEYS)]
 _FIXED_KEYS = [k for k in PARAM_REGISTRY if k not in set(FACTOR_KEYS)]
-
-# ---------------------------------------------------------------------------
-# Default region list (same as Snakefile)
-# ---------------------------------------------------------------------------
-ALL_REGIONS = [
-    "AFRICA-EAST",    "AFRICA-NORTH",   "AFRICA-SOUTH",  "AFRICA-WEST",
-    "AUSTRALIA",      "CANADA",         "CENTRAL-AMERIC","CENTRAL-ASIA",
-    "CHINA",          "CUBA",           "EUROPE",        "GREENLAND",
-    "HAITI",          "ICELAND",        "INDIA",         "ISRAEL",
-    "JAMAICA",
-    "JAPAN",          "MADAGASCAR",     "MAURITIUS",     "MIDEAST",
-    "NEW-ZEALAND",    "PHILIPPINES",    "RUSSIA",        "SOUTHAM-NW",
-    "SOUTHAM-SE",     "SOUTHEAST-ASIA", "SOUTH-KOREA",   "TAIWAN",
-    "UNITED-STATES",
-]
 
 # ---------------------------------------------------------------------------
 # Column specification
@@ -107,7 +85,7 @@ _LAND_COLS = [
     ("New land (% of region)", "new_land_pct_regland",      "Spacing+footprint (new)",  "0.00000"),
 ]
 
-# cost_per_kwh_by_category is a nested dict — handled dynamically
+# cost_per_kwh_by_category is a nested dict, handled dynamically
 # placeholder group name; actual columns discovered at runtime
 _COST_CAT_GROUP = "Cost by category (c/kWh, MN)"
 
@@ -184,13 +162,6 @@ _GROUP_FILL = {
     "Optimised factors":            "D0E4F0",   # teal-blue
     "Fixed factors":                "EEEEEE",   # light gray
 }
-_GROUP_FILL_DARK = {k: _darken(v) for k, v in _GROUP_FILL.items()} if False else {}
-
-
-def _hex_fill(hex6: str) -> "PatternFill":
-    from openpyxl.styles import PatternFill
-    return PatternFill("solid", fgColor=hex6)
-
 
 # Alternating row bands per region group
 _BAND_EVEN = "F7F7F7"   # very light gray
@@ -209,69 +180,6 @@ def _load_json(path: Path) -> Optional[dict]:
         return None
 
 
-def _first_feasible_from_log(rdir: Path) -> Optional[dict]:
-    """Build a minimal summary dict from lp_ga_factor_history.log.
-
-    Used as a fallback when first_feasible_summary.json hasn't been written yet
-    (i.e. the workflow ran before this feature was added).  Only factors and
-    cost are populated; all other fields are absent (export shows blanks).
-    """
-    log_path = rdir / "lp_ga_factor_history.log"
-    if not log_path.exists():
-        return None
-    try:
-        from scripts.factor_history_tools import parse_factor_history
-    except ModuleNotFoundError:
-        from factor_history_tools import parse_factor_history
-    recs = parse_factor_history(log_path)
-    ff_rec = next((r for r in recs if r.get("feasible")), None)
-    if ff_rec is None:
-        return None
-    factors = {
-        k.upper(): float(v)
-        for k, v in ff_rec.items()
-        if k not in ("label", "feasible", "cost_mn_bil_per_year")
-        and isinstance(v, (int, float))
-    }
-    cost = ff_rec.get("cost_mn_bil_per_year")
-    return {
-        "feasible": True,
-        "annual_cost_mn_bil_per_yr": float(cost) if cost is not None else None,
-        "factors": factors,
-        "run_type": "first_feasible_from_log",
-    }
-
-
-def _lp_eval_cost_from_log(rdir: Path) -> Optional[float]:
-    """Read the LP-eval cost from lp_ga_factor_history.log.
-
-    The lp_summary.json produced by older workflow runs may have
-    annual_cost_mn_bil_per_yr=null even though the value was logged correctly.
-    This fallback reads the cost directly from the log.
-
-    Searches for a record with label "LP-eval" (the exact label written by
-    run_ga_from_lp) so it works correctly even if the log was appended to
-    across multiple manual runs.
-    """
-    log_path = rdir / "lp_ga_factor_history.log"
-    if not log_path.exists():
-        return None
-    try:
-        from scripts.factor_history_tools import parse_factor_history
-    except ModuleNotFoundError:
-        from factor_history_tools import parse_factor_history
-    for rec in parse_factor_history(log_path):
-        label = str(rec.get("label", "")).strip()
-        # "LP-eval" is the canonical label; "LP" catches older log formats
-        if label == "LP-eval" or label == "LP":
-            cost = rec.get("cost_mn_bil_per_year")
-            if cost is not None and not (isinstance(cost, float) and cost != cost):
-                c = float(cost)
-                if not (c == float("inf") or c == float("-inf")):
-                    return c
-    return None
-
-
 def _with_land(data: Optional[dict], rdir: Path, raw_name: str) -> Optional[dict]:
     """Backfill new-land percentages from the case's raw output if absent."""
     if data is None or data.get("new_land_pct_regland") is not None:
@@ -279,27 +187,20 @@ def _with_land(data: Optional[dict], rdir: Path, raw_name: str) -> Optional[dict
     raw = rdir / raw_name
     if not raw.exists():
         return data
-    try:
-        from scripts.parse_fortran_output import parse_land_area
-        land = parse_land_area(raw.read_text(encoding="ascii", errors="replace"))
-    except Exception:
-        return data
     data = dict(data)   # don't mutate cached dict
-    data.update(land)
+    data.update(parse_land_area(raw.read_text(encoding="ascii", errors="replace")))
     return data
 
 
 def _baseline_case(rdir: Path) -> Optional[dict]:
-    """Baseline row data, with a PI-file fallback.
+    """Baseline row data, with a reference-report fallback.
 
-    Prefer our own re-run (baseline_summary.json).  When that run is infeasible or
-    missing (so it has no cost / generation), fall back to the PI's pristine
-    result (canonical_baseline_summary.json, parsed from data/raw/xx.<code>) for
-    the physical metrics - cost, generation, cost-by-category, land - while
-    KEEPING the region's seed factor values and STILL flagging the row infeasible.
-    This lets the structural-difference plots use the PI baseline even where our
-    re-run did not converge (e.g. AFRICA-NORTH), the same PI source the cross-
-    region cost table already falls back to.
+    Prefer the re-run of the trial-and-error solution (baseline_summary.json).
+    When that run is infeasible or missing, take the physical metrics (cost,
+    generation, cost by category, land) from the reference xx report
+    (canonical_baseline_summary.json, parsed from data/raw/xx.<SHORTCODE>),
+    keeping the region's seed factors and the re-run's infeasible flag, so the
+    structural-change figures still have a baseline for that region.
     """
     base = _load_json(rdir / "baseline_summary.json")
     if base and base.get("feasible"):
@@ -307,37 +208,31 @@ def _baseline_case(rdir: Path) -> Optional[dict]:
     canon = _load_json(rdir / "canonical_baseline_summary.json")
     if not canon:
         return base
-    merged = dict(canon)                                 # PI physical metrics
-    merged["factors"] = (base or {}).get("factors")      # region-specific PI seed
-    merged["feasible"] = (base or {}).get("feasible", False)  # keep re-run's flag
-    merged["run_type"] = "baseline (PI-file backfill)"
+    merged = dict(canon)
+    merged["factors"] = (base or {}).get("factors")
+    merged["feasible"] = (base or {}).get("feasible", False)
+    merged["run_type"] = "baseline (reference xx backfill)"
     return merged
 
 
 def _cases_for_region(region: str) -> List[Tuple[str, Optional[dict]]]:
-    """Return (case_label, data_dict_or_None) for the four reported cases.
+    """(case_label, data_dict_or_None) for the four reported cases.
 
-    LP-based cases are intentionally not exported (the LP warm start is not used
-    in this project).  The scratch cases come from the isolated results of
-    --baseline-start scratch campaigns:
-      Scratch start  = the spreadsheet values (FAC*=1, storage=0) evaluated once,
-      GA (scratch)   = GA optimum from that start, first campaign (equal budget,
-                       <REGION>_scratch/),
-      GA (scratch2)  = GA optimum from the improved algorithm / extended budget
-                       campaign (<REGION>_scratch2/).
+      Baseline          trial-and-error solution (<REGION>/ baseline run)
+      GA (trial-error)  GA optimum seeded from it (<REGION>/)
+      Scratch start     the spreadsheet start (capacity factors 1, storage 0),
+                        evaluated once (<REGION>_scratch2/)
+      GA (scratch2)     GA optimum from the scratch start (<REGION>_scratch2/)
     """
     rdir = RESULTS_DIR / region
-    sdir = RESULTS_DIR / (region + "_scratch")
     s2dir = RESULTS_DIR / (region + "_scratch2")
     cases = [
         ("Baseline",           rdir, "fortran_baseline_run.out",
          _baseline_case(rdir)),
         ("GA (trial-error)",   rdir, "fortran_optimal_run.out",
          _load_json(rdir / "optimal_summary.json")),
-        ("Scratch start",      sdir, "fortran_baseline_run.out",
-         _load_json(sdir / "baseline_summary.json")),
-        ("GA (scratch)",       sdir, "fortran_optimal_run.out",
-         _load_json(sdir / "optimal_summary.json")),
+        ("Scratch start",      s2dir, "fortran_baseline_run.out",
+         _load_json(s2dir / "baseline_summary.json")),
         ("GA (scratch2)",      s2dir, "fortran_optimal_run.out",
          _load_json(s2dir / "optimal_summary.json")),
     ]
@@ -366,8 +261,7 @@ def _collect_cost_categories(regions: List[str]) -> List[str]:
     """Scan all JSON files to discover the union of cost category names."""
     cats: dict = {}   # preserve insertion order, de-duplicate
     for region in regions:
-        for rdir in (RESULTS_DIR / region, RESULTS_DIR / (region + "_scratch"),
-                     RESULTS_DIR / (region + "_scratch2")):
+        for rdir in (RESULTS_DIR / region, RESULTS_DIR / (region + "_scratch2")):
             for fname in ("baseline_summary.json", "optimal_summary.json"):
                 data = _load_json(rdir / fname)
                 if data:
@@ -390,11 +284,9 @@ def _build_col_spec(cost_categories: List[str]) -> List[Tuple[str, str, str, str
     spec += list(_GEN_COLS) + list(_ENDUSE_COLS) + list(_LOSS_COLS) + list(_NET_COLS)
 
     for k in _OPT_KEYS:
-        desc = PARAM_REGISTRY[k][2] if k in PARAM_REGISTRY else k
         spec.append(("Optimised factors", f"factor:{k}", k, "0.0000"))
 
     for k in _FIXED_KEYS:
-        desc = PARAM_REGISTRY[k][2] if k in PARAM_REGISTRY else k
         spec.append(("Fixed factors", f"factor:{k}", k, "0.0000"))
 
     return spec
@@ -557,7 +449,7 @@ def _write_xlsx(regions: List[str], out_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _write_csv(regions: List[str], out_path: Path) -> None:
-    """Write a flat CSV with one header row and four data rows per region."""
+    """Write a flat CSV with one header row and one data row per region and case."""
     import csv
 
     cost_cats = _collect_cost_categories(regions)
@@ -573,9 +465,11 @@ def _write_csv(regions: List[str], out_path: Path) -> None:
             header.append(f"{grp}/{disp}")
         writer.writerow(header)
 
+        n_rows = 0
         for region in regions:
             cases = _cases_for_region(region)
             for case_label, data in cases:
+                n_rows += 1
                 row = []
                 for grp, key, disp, _ in col_spec:
                     if key == "region":
@@ -589,7 +483,6 @@ def _write_csv(regions: List[str], out_path: Path) -> None:
                         row.append("" if val is None else val)
                 writer.writerow(row)
 
-    n_rows = len(regions) * 5
     print(f"Saved {out_path}  ({n_rows} data rows, {len(col_spec)} columns)")
 
 
@@ -599,7 +492,7 @@ def _write_csv(regions: List[str], out_path: Path) -> None:
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Export LoadMatch results to XLSX and/or CSV."
+        description="Export the regional results to XLSX and/or CSV."
     )
     parser.add_argument(
         "--regions", nargs="+", default=None,
@@ -621,9 +514,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.regions:
         regions = args.regions
     else:
-        # Auto-discover: include any region that has at least a baseline_summary
+        # Every configured region that has at least one summary
         regions = [
-            r for r in ALL_REGIONS
+            r for r in config_regions()
             if (RESULTS_DIR / r / "baseline_summary.json").exists()
                or (RESULTS_DIR / r / "optimal_summary.json").exists()
         ]

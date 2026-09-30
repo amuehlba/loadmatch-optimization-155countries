@@ -9,7 +9,7 @@ prints (parsed by parse_bau_comparison) from each WWS scenario and tabulates the
   * BAU total social cost ($B/yr), avoided air-pollution mortality (2050), and
     2050 CO2e emissions
   * WWS energy cost and the WWS:BAU overall social-cost ratio for each scenario
-    (baseline = PI trial-and-error, GA = optimized, scratch = from-scratch GA)
+    (baseline = trial-and-error, GA = optimized, scratch = from-scratch GA)
 
 BAU is a fixed 2050 reference (read from countrystats.dat) and is identical
 across the WWS scenarios; only the WWS side and the ratios change.  The BAU
@@ -104,10 +104,9 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
             continue
         region = rdir.name
         # Only the base regions are rows: their optimal_summary.json holds the
-        # baseline-optimization WWS and their _scratch2/_scratch sibling holds
-        # the from-scratch WWS.  Region names use hyphens, never underscores, so
-        # an underscore marks a scenario/experiment dir (_scratch*, _dc*, or a
-        # throwaway seed run) that must not appear as its own region.
+        # baseline-optimization WWS and their _scratch2 sibling holds the
+        # from-scratch WWS.  Region names never contain underscores, so an
+        # underscore marks an isolated run (_scratch2, _dc*, ...).
         if "_" in region:
             continue
         if regions and region not in regions:
@@ -118,19 +117,13 @@ def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dic
 
         ga = _bau_stats(opt, rdir, "fortran_optimal_run.out")
         if not _has_bau(ga):
-            continue  # no BAU reference for this region — skip
+            continue  # no BAU reference for this region, skip
 
         bl = _load(rdir / "baseline_summary.json")
         base = _bau_stats(bl, rdir, "fortran_baseline_run.out")
-        # From-scratch WWS: prefer the improved _scratch2 campaign, else _scratch.
-        scr = {}
-        for sfx in ("_scratch2", "_scratch"):
-            sdir = results_root / (region + sfx)
-            cand = _bau_stats(_load(sdir / "optimal_summary.json"), sdir,
-                              "fortran_optimal_run.out")
-            if _has_bau(cand):
-                scr = cand
-                break
+        sdir = results_root / (region + "_scratch2")
+        scr = _bau_stats(_load(sdir / "optimal_summary.json"), sdir,
+                         "fortran_optimal_run.out")
 
         rows.append({
             "region":                     region,

@@ -1,10 +1,10 @@
-"""Figures from the PI's post-processed Tables/ (DATA-CENTER PAPER ONLY).
+"""Data-center land-use and jobs figures from the post-processed tables.
 
-The PI drops one Excel workbook per optimized case into
-data/results_verification/Tables/.  This script compares the optimized
-no-data-center case against the five data-center supply cases on the
-post-processed metrics, using the same house style as the other reporting
-figures (scripts/plot_style.py).
+The LOADMATCH post-processing program turns the xx reports of one case (all
+regions) into one Excel workbook, placed in data/results_verification/Tables/.
+This script compares the optimized no-data-center case against the five
+data-center supply cases on the post-processed metrics, in the data-center
+figure style (scripts/plot_style.py).
 
 Cases (optimized only):
     Opt   -> no data center (optimized)      Tables-155Countries-Opt.xlsx
@@ -55,8 +55,8 @@ apply_style()
 _DC_COLOR = {k: c for k, _, c, _ in DC_STRATEGIES}
 BASE_FILE = "Tables-155Countries-Opt.xlsx"   # optimized no-DC base (WWS Baseline)
 
-# PI decision: exclude Greenland & Iceland rooftop (case 3, RBH) results from the
-# figures (aggregate total and per-region distribution); noted in the caption.
+# Greenland & Iceland rooftop (case 3, RBH) results are excluded from the figures
+# (aggregate total and per-region distribution); noted in the caption.
 EXCLUDE = {"Tables-155-DC-RBH.xlsx": {"Greenland", "Iceland"}}
 
 CASES = [
@@ -137,7 +137,7 @@ def collect(tables_dir: Path):
               land_abs[], land_wmean, jobs_wmean), ...].
 
     land_abs   = footprint+spacing land as % of each region's area (per-region
-                 distribution the PI asked to show around a mean line).
+                 distribution, shown around a mean line).
     land_wmean = AREA-WEIGHTED mean = sum(footprint+spacing km^2) / sum(regional
                  land area km^2) x 100 (the true "mean across all countries";
                  the simple mean of per-region % overweights small dense regions).
@@ -157,7 +157,7 @@ def collect(tables_dir: Path):
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         km2, pct, landreg = _land_block(wb)
         net, _g = _jobs_block(wb)
-        for reg in EXCLUDE.get(fn, ()):        # drop PI-excluded regions for this case
+        for reg in EXCLUDE.get(fn, ()):        # drop excluded regions for this case
             km2.pop(reg, None); pct.pop(reg, None); landreg.pop(reg, None); net.pop(reg, None)
         land_dpp = np.array([pct[k] - b_pct[k] for k in b_pct if k in pct])
         # per-region dicts so each region can be drawn at a fixed (alphabetical) slot

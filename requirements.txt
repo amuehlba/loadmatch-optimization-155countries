@@ -1,11 +1,6 @@
-pyomo
-pandas>=2.0,<3.0
+# The optimization driver (scripts/run_full_workflow.py) needs only the Python
+# standard library; these packages are for the exports and figures.
 numpy
-matplotlib
-seaborn
-h5py
-pytest
-openpyxl>=3.1      # XLSX export (results_export.xlsx)
-# Workflow orchestration
-snakemake>=7.0,<8.0
-pulp==2.7.0        # snakemake 7.x requires pulp 2.7; pulp 2.8+ removed list_solvers
+pandas>=2.0,<3.0
+matplotlib>=3.6
+openpyxl>=3.1

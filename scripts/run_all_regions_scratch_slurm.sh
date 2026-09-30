@@ -2,30 +2,20 @@
 # ============================================================================
 # run_all_regions_scratch_slurm.sh
 #
-# SLURM job array: GA optimization for all 30 regions starting FROM SCRATCH,
-# i.e. from the spreadsheet values (all capacity factors = 1, storage design
-# variables = 0) instead of the PI's trial-and-error solution.  Addresses the
-# question whether the optimizer needs the expert starting point at all.
+# Scratch optimization: GA started from the spreadsheet values (all capacity
+# factors = 1, storage design variables = 0) instead of the trial-and-error
+# solution, one SLURM array task per region.
 #
-# EXTENDED search budget vs the base run: population 48 (fills 2 x 24-core
-# batches exactly, so it costs no extra wall-clock per generation vs 37),
-# 150 generations, and slower mutation cooling (0.995 vs 0.985) so the search
-# stays mobile long enough to traverse the larger distance from the scratch
-# start.  The bootstrap additionally bisects back toward the feasibility
-# boundary after the storage ramp / capacity inflation, and the initial
-# population is seeded with spread variants (storage down, capacity up/down).
-# The first scratch campaign at the equal budget (37 x 50) is preserved in
-# results_export.xlsx; disclose the budget difference when reporting.
+# Larger search budget than the baseline optimization: population 48 (two full
+# 24-core batches per generation, so no extra wall-clock per generation vs 37),
+# 150 generations, and slower mutation cooling (0.995), so the search stays
+# mobile over the larger distance from the scratch start.
 #
-# Results are fully isolated from the base case AND from the first scratch
-# campaign (which stays untouched in <REGION>_scratch/):
-#   data/results_verification/<REGION>_scratch2/       summaries, logs, raw outs
-#   data/results_verification/xx_optimized_scratch2/   xx.<SHORTCODE> deliverables
-#
-# Usage (from the repo root on a Sherlock login node):
+# Usage (from the repo root):
 #   sbatch scripts/run_all_regions_scratch_slurm.sh
 #
-# Keep --array=0-29 in sync with the region count in config/workflow.yaml.
+# Results: data/results_verification/<REGION>_scratch2/ and
+#          xx_optimized_scratch2/.
 # ============================================================================
 
 #SBATCH --job-name=lm-ga-scratch
@@ -58,7 +48,6 @@ echo "=================================================================="
 
 python -m scripts.run_full_workflow \
     --region          "$REGION" \
-    --optimizer       ga \
     --parallel-evals  "${SLURM_CPUS_PER_TASK:-24}" \
     --ga-population    48 \
     --ga-generations   150 \
@@ -68,7 +57,6 @@ python -m scripts.run_full_workflow \
     --ga-mutation-cooling 0.995 \
     --baseline-start   scratch \
     --max-land-pct     7 \
-    --scratch-label    scratch2 \
-    --no-plots
+    --scratch-label    scratch2
 
 echo "Done: $REGION (scratch)   $(date)"

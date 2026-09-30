@@ -11,8 +11,7 @@ data-center case's results from its isolated folder:
 
 Writes data/results_verification/dc_comparison_summary.csv with, per region and
 case: cost, cost increase vs the no-dc optimum (absolute and %), feasibility,
-new-land share, and solve time.  This CSV is the data source for the
-data-center paper's plots.
+new-land share, and solve time.  plot_dc_comparison.py reads this CSV.
 
 Only stdlib is used.
 
@@ -23,7 +22,6 @@ Usage:
 import argparse
 import csv
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -50,8 +48,8 @@ def _load(path: Path) -> Optional[dict]:
 def collect(results_root: Path, regions: Optional[List[str]] = None) -> List[Dict]:
     rows: List[Dict] = []
     for rdir in sorted(results_root.iterdir()):
-        if not rdir.is_dir() or re.search(r"(_scratch\w*|_dc\d+\w*)$", rdir.name) \
-                or rdir.name.startswith("xx_optimized"):
+        # Base regions only; an underscore marks an isolated run (_dc*, ...).
+        if not rdir.is_dir() or "_" in rdir.name:
             continue
         region = rdir.name
         if regions and region not in regions:

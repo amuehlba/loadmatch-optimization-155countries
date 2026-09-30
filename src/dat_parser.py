@@ -1,5 +1,7 @@
+"""Read and write ``KEY = VALUE`` factor files (fortran_factors.dat format)."""
 import re
 from pathlib import Path
+
 
 def read_dat(filepath: str) -> dict:
     data = {}
@@ -10,6 +12,7 @@ def read_dat(filepath: str) -> dict:
                 key, val = match.groups()
                 data[key] = float(val)
     return data
+
 
 def write_dat(data: dict, filepath: str):
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)

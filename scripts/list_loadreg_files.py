@@ -2,14 +2,14 @@
 
 The Fortran (IFNEWLOAD=1, Electricity Maps 2024) reads one hourly-load file per
 member country of each grid region: ``loadreg.<COUNTRY>`` where <COUNTRY> is the
-country name from countrystats.dat (column 1) TRUNCATED to 14 characters — the
-Fortran's CHARACTER(14) NAMORIGGR.  Example: 'UNITED-STATES-OF-AMERICA' →
+country name from countrystats.dat (column 1) TRUNCATED to 14 characters (the
+Fortran's CHARACTER(14) NAMORIGGR).  Example: 'UNITED-STATES-OF-AMERICA' →
 'loadreg.UNITED-STATES-'.
 
 So the files you need = one loadreg.<country> per country in countrystats.dat
-(155 total), plus the Electricity Maps master '24LOADELECMAPS.dat'.  Everything
-else in the PI's ELECMAPS folder (loadreg.CONUS*, US-state grids, CAISO, Canary
-islands, loadreg.COUNTRY2030GW) is for test grids NOT used by the 30 regions.
+(155 total), plus the Electricity Maps master '24LOADELECMAPS.dat'.  Other files
+in a full ELECMAPS folder (loadreg.CONUS*, US-state grids, CAISO, Canary
+islands, loadreg.COUNTRY2030GW) belong to grids not used by the 30 regions.
 
 Usage
 -----
@@ -107,13 +107,13 @@ def main(argv=None) -> None:
         print(f"\n=== Check against {d} ===")
         print(f"  present & needed : {len(need & present)} / {len(need)}")
         if missing:
-            print(f"  MISSING ({len(missing)}) — download these:")
+            print(f"  MISSING ({len(missing)}), download these:")
             for m in missing:
                 print(f"      {m}")
         else:
-            print("  MISSING: none — you have everything needed.")
+            print("  MISSING: none, you have everything needed.")
         if extra:
-            print(f"  not needed ({len(extra)}) — safe to skip (test grids etc.):")
+            print(f"  not needed ({len(extra)}), safe to skip (other grids):")
             for e in extra:
                 print(f"      {e}")
 

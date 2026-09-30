@@ -1,11 +1,10 @@
-"""Helpers for producing xx deliverable files (stdlib only).
+"""Helpers for producing xx report files (stdlib only).
 
-The Fortran binary writes its xx report to stdout.  Our appended
+The Fortran binary writes its xx report to stdout.  The appended
 READ_FACTOR_OVERRIDES subroutine echoes 'APPLIED FACTOR OVERRIDES FOR <region>'
-plus one line per factor into the same stream, so a run made with a factor file
-carries that block embedded in the xx content.  The PI's pristine xx files do
-not contain it, and his 30-region post-processing program consumes these files,
-so deliverables must match his format exactly.
+plus one line per factor into the same stream.  The LOADMATCH post-processing
+tables expect the standard report without that block, so it is stripped before
+an xx file is written.
 """
 import re
 

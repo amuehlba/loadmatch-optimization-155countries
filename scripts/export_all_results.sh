@@ -2,12 +2,13 @@
 # ============================================================================
 # export_all_results.sh
 #
-# Run AFTER a full campaign (scripts/run_full_campaign_slurm.sh) has finished,
-# from the repo root on a Sherlock login node (or anywhere the results tree +
-# CSVs are present). Regenerates every comparison table, the XLSX, the PI xx
-# deliverables, and all publication figures, then runs a data-integrity check
-# that would have caught the baseline-clobber bug (trial-and-error must NOT be
-# identical to GA-from-trial-and-error).
+# Regenerate every table, xx report and figure from the results tree, then run
+# a consistency check.  Run from the repo root after the campaign
+# (scripts/run_full_campaign_slurm.sh) has finished.
+#
+# Figures from the post-processed LOADMATCH tables (fig_wws_vs_bau and the
+# data-center land/jobs/nameplate/LCOE figures) need the per-case workbooks in
+# data/results_verification/Tables/ and are skipped without them.
 #
 # Usage:
 #   bash scripts/export_all_results.sh
@@ -16,63 +17,59 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-source .venv/bin/activate 2>/dev/null || true
+if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi
+RESULTS=data/results_verification
 
-echo "=== 1/7  Cross-region comparison table (base vs GA vs scratch) ==="
-python -m scripts.export_comparison
+echo "=== 1/4  Tables ==="
+python -m scripts.export_comparison          # comparison_summary.csv
+python -m scripts.export_dc_comparison       # dc_comparison_summary.csv
+python -m scripts.export_bau_comparison      # bau_comparison_summary.csv
+python -m scripts.export_results             # results_export.xlsx
 
-echo "=== 2/7  Data-center comparison table ==="
-python -m scripts.export_dc_comparison
+echo "=== 2/4  xx reports ==="
+python -m scripts.rebuild_xx_reports
 
-echo "=== 3/7  WWS-vs-BAU comparison table (baseline + from-scratch) ==="
-python -m scripts.export_bau_comparison
+echo "=== 3/4  Figures ==="
+python -m scripts.plot_comparison            # cost, land, solve time
+python -m scripts.plot_structure             # factor, cost-category, generation-mix changes
+python -m scripts.plot_convergence           # SI: GA convergence
+python -m scripts.plot_dispatch              # SI: dispatch + storage state of charge
+python -m scripts.plot_dc_comparison         # data-center cost
+if [ -d "$RESULTS/Tables" ]; then
+  python -m scripts.plot_bau_comparison      # WWS vs BAU
+  python -m scripts.plot_dc_tables           # data-center land use, jobs
+  python -m scripts.plot_dc_economics        # data-center nameplate, LCOE
+else
+  echo "  ($RESULTS/Tables/ not found: table-based figures skipped)"
+fi
 
-echo "=== 4/7  Full results workbook (XLSX) ==="
-python -m scripts.export_results
-
-echo "=== 5/7  PI xx deliverables (strip override echo; no-op-safe) ==="
-python -m scripts.rebuild_xx_deliverables
-
-echo "=== 6/7  Publication figures ==="
-python -m scripts.plot_comparison
-python -m scripts.plot_dc_comparison
-python -m scripts.plot_bau_comparison
-python -m scripts.plot_structure                    # what changed vs trial-and-error
-python -m scripts.plot_results --all-regions || echo "  (overview figures skipped)"
-python -m scripts.plot_dispatch || echo "  (SI dispatch/SOC figures skipped)"
-
-echo "=== 7/7  Data-integrity check ==="
+echo "=== 4/4  Consistency check ==="
 python - <<'PY'
-import sys, pandas as pd
-csv = "data/results_verification/comparison_summary.csv"
-df = pd.read_csv(csv)
+import sys
+import pandas as pd
+
+df = pd.read_csv("data/results_verification/comparison_summary.csv")
 df = df[~df["region"].astype(str).str.startswith("TOTAL")].copy()
-for c in ["baseline_cost_bil_per_yr","ga_cost_bil_per_yr","pct_savings",
-          "bl_newland_pct_regland","ga_newland_pct_regland",
-          "ga_scratch2_newland_pct_regland"]:
+for c in ["baseline_cost_bil_per_yr", "ga_cost_bil_per_yr", "pct_savings",
+          "ga_newland_pct_regland", "ga_scratch2_newland_pct_regland"]:
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 n = len(df)
-cost_equal = ((df["baseline_cost_bil_per_yr"] - df["ga_cost_bil_per_yr"]).abs() < 1e-6).sum()
+equal = ((df["baseline_cost_bil_per_yr"] - df["ga_cost_bil_per_yr"]).abs() < 1e-6).sum()
 print(f"  regions: {n}")
-print(f"  baseline_cost == ga_cost exactly: {cost_equal}/{n}")
+print(f"  baseline cost == GA cost: {equal}/{n}")
 print(f"  pct_savings min/max: {df['pct_savings'].min():.2f}% / {df['pct_savings'].max():.2f}%")
-bad = False
-if cost_equal == n:
-    print("  ERROR: every baseline == GA -> baseline was CLOBBERED (see paper2-baseline-clobber). "
-          "Do NOT seed a base re-evaluation into the main dirs; re-run the base campaign.")
-    bad = True
-# Taiwan land-cap check (scratch)
-if "ga_scratch2_newland_pct_regland" in df.columns:
-    t = df[df["region"] == "TAIWAN"]
-    if not t.empty and pd.notna(t.iloc[0]["ga_scratch2_newland_pct_regland"]):
-        v = float(t.iloc[0]["ga_scratch2_newland_pct_regland"])
-        print(f"  TAIWAN from-scratch new-land: {v:.2f}% (cap 7%) -> {'OK' if v <= 7.0 else 'STILL OVER CAP'}")
-# any scratch region over the 7% cap
-if "ga_scratch2_newland_pct_regland" in df.columns:
-    over = df[df["ga_scratch2_newland_pct_regland"] > 7.0]["region"].tolist()
-    print(f"  from-scratch regions over 7% cap: {over if over else 'none'}")
-sys.exit(1 if bad else 0)
+for col, name in (("ga_newland_pct_regland", "Baseline GA"),
+                  ("ga_scratch2_newland_pct_regland", "Scratch GA")):
+    if col in df.columns:
+        over = df[df[col] > 7.0]["region"].tolist()
+        print(f"  {name} regions over the 7% land cap: {over if over else 'none'}")
+if n and equal == n:
+    # A seeded re-evaluation must never overwrite the trial-and-error baseline
+    # of the main results directories.
+    print("  ERROR: every baseline cost equals the GA cost; the baseline summaries "
+          "were overwritten.  Re-run the baseline optimization.")
+    sys.exit(1)
 PY
 
-echo "=== Export complete. Pull data/results_verification/ to local for the paper. ==="
+echo "=== Export complete ==="

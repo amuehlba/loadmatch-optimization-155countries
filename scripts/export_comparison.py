@@ -1,14 +1,11 @@
-"""Cross-region comparison: PI trial-and-error baseline vs GA-optimized results.
+"""Cross-region comparison: trial-and-error vs GA-optimized results.
 
 For every region under ``data/results_verification/<REGION>/`` this reads
-``baseline_summary.json`` (our binary run with the PI's baseline factors — i.e.
-the PI's trial-and-error cost, validated by the parity check) and
-``optimal_summary.json`` (the GA-optimized result, including solve-time timing),
-then writes a CSV and prints a table with a TOTAL row.
-
-The paper's headline numbers come from here:
-  * total baseline cost vs total GA cost, and the % saving
-  * total GA solve time, summed over all regions
+``baseline_summary.json`` (the re-run of the expert trial-and-error solution)
+and ``optimal_summary.json`` (the GA optimum, including solve-time timing),
+joins the from-scratch GA of ``<REGION>_scratch2/``, then writes
+comparison_summary.csv and prints a table with a TOTAL row (costs, savings,
+solve time and evaluations summed over all regions).
 
 Usage
 -----
@@ -16,25 +13,20 @@ Usage
     python -m scripts.export_comparison --regions UNITED-STATES EUROPE
     python -m scripts.export_comparison --output path/to/comparison.csv
 
-Only stdlib is used so this runs on any machine, with or without the GA env.
+Only stdlib is used.
 """
 import argparse
 import csv
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from src.region_shortcodes import REGION_SHORTCODE
-from scripts.parse_fortran_output import parse_land_area
+from src.regions import REGION_SHORTCODE
+from scripts.parse_fortran_output import parse_annual_cost, parse_land_area
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_ROOT = REPO_ROOT / "data" / "results_verification"
 RAW_DIR = REPO_ROOT / "data" / "raw"
-
-# Mean ($/yr) from a Fortran/xx "ANNUAL TOT ENERGY COST ... LO MN HI=" line.
-_ANNUAL_COST_RE = re.compile(
-    r"ANNUAL TOT ENERGY COST.*?LO MN HI=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)")
 
 _LAND_KEYS = ("new_spacing_pct_regland", "new_footprint_pct_regland",
               "new_land_pct_regland")
@@ -45,9 +37,9 @@ _LAND_KEYS = ("new_spacing_pct_regland", "new_footprint_pct_regland",
 DEFAULT_LAND_TOLERANCE = 0.10
 
 
-def _pi_xx_text(region: str, raw_dir: Path) -> Optional[str]:
-    """Contents of the PI's pristine xx.<SHORTCODE> file in raw_dir, if present.
-    Used only as a fallback when our re-run baseline failed."""
+def _reference_xx_text(region: str, raw_dir: Path) -> Optional[str]:
+    """Contents of the reference xx.<SHORTCODE> report in raw_dir, if present.
+    Used only as a fallback when the baseline re-run failed."""
     shortcode = REGION_SHORTCODE.get(region)
     if not shortcode:
         return None
@@ -79,8 +71,6 @@ COLUMNS = [
     ("total_seconds",             "Total s",           ".0f"),
     ("n_evaluations",             "Evals",             ".0f"),
     ("ga_feasible",               "Feasible",          "s"),
-    ("ga_scratch_cost_bil_per_yr","GA-scr $B/yr",      ".2f"),
-    ("scratch_vs_ga_pct",         "scr-GA %",          "+.2f"),
     ("ga_scratch2_cost_bil_per_yr","GA-scr2 $B/yr",    ".2f"),
     ("scratch2_vs_ga_pct",        "scr2-GA %",         "+.2f"),
     ("bl_newland_pct_regland",    "BL land %",         ".3f"),
@@ -95,8 +85,6 @@ CSV_FIELDS = [
     "baseline_cost_bil_per_yr", "ga_cost_bil_per_yr",
     "abs_savings_bil_per_yr", "pct_savings",
     "optimize_seconds", "total_seconds", "n_evaluations", "ga_feasible",
-    "ga_scratch_cost_bil_per_yr", "scratch_vs_ga_pct",
-    "scratch_start_feasible", "scratch_optimize_seconds", "scratch_n_evaluations",
     "ga_scratch2_cost_bil_per_yr", "scratch2_vs_ga_pct",
     "scratch2_optimize_seconds", "scratch2_n_evaluations",
     "bl_spacing_pct_regland", "bl_footprint_pct_regland", "bl_newland_pct_regland",
@@ -125,13 +113,12 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             land_tolerance: float = DEFAULT_LAND_TOLERANCE) -> List[Dict]:
     """One row per region that has an optimal_summary.json (i.e. was optimized).
 
-    Baseline cost priority: use OUR re-run (baseline_summary.json) when it is
-    feasible with a cost — this demonstrates we reproduce the PI's results.  Only
-    when the re-run failed (infeasible / no cost) do we fall back to the PI's
-    pristine xx.<SHORTCODE> result in raw_dir.
+    Baseline cost: the re-run of the trial-and-error solution
+    (baseline_summary.json) when it is feasible with a cost, otherwise the
+    reference xx.<SHORTCODE> report in raw_dir.
 
     Land: new-land shares (% of regional land) are collected for baseline and
-    optimized runs — wind spacing (ONSHORE WIND row) + footprint (TOTAL
+    optimized runs: wind spacing (ONSHORE WIND row) + footprint (TOTAL
     ELEC+HEAT-FPRINT row) from the xx land-area table.  The optimized total is
     checked against the baseline total (land_ok: within +land_tolerance).
     """
@@ -142,16 +129,16 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         if not rdir.is_dir():
             continue
         region = rdir.name
-        # Isolated alternative runs (<REGION>_scratch, <REGION>_dc<N>) are not
-        # rows of their own: scratch results are joined onto the base-region row
-        # below; data-center scenarios get their own dedicated comparison.
-        if re.search(r"(_scratch\w*|_dc\d+\w*)$", region):
+        # Isolated alternative runs are not rows of their own: the scratch run is
+        # joined onto the base-region row below, and data-center scenarios have
+        # their own comparison (export_dc_comparison.py).
+        if "_" in region:
             continue
         if regions and region not in regions:
             continue
         opt = _load(rdir / "optimal_summary.json")
         if opt is None:
-            continue  # region not optimized yet — skip
+            continue  # region not optimized yet, skip
 
         bl = _load(rdir / "baseline_summary.json")
         base_cost = _cost(bl)
@@ -160,11 +147,10 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             baseline_source = "rerun"
             bl_land = _land_stats(bl, rdir, "fortran_baseline_run.out")
         else:
-            xx_text = _pi_xx_text(region, raw_dir)
+            xx_text = _reference_xx_text(region, raw_dir)
             if xx_text is not None:
-                m = _ANNUAL_COST_RE.search(xx_text)
-                base_cost = float(m.group(2)) if m else None
-                baseline_source = "PI xx (fallback)"
+                base_cost = parse_annual_cost(xx_text)
+                baseline_source = "reference xx (fallback)"
                 bl_land = parse_land_area(xx_text)
             else:
                 base_cost = None
@@ -177,15 +163,7 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
         abs_sav = (base_cost - ga_cost) if (base_cost is not None and ga_cost is not None) else None
         pct_sav = (100.0 * abs_sav / base_cost) if (abs_sav is not None and base_cost) else None
 
-        # GA started from scratch (spreadsheet values: FAC*=1, storage=0) —
-        # produced by --baseline-start scratch into <REGION>_scratch/.
-        sdir = results_root / (region + "_scratch")
-        s_opt = _load(sdir / "optimal_summary.json")
-        s_bl = _load(sdir / "baseline_summary.json")
-        ga_scratch_cost = _cost(s_opt)
-        s_timing = (s_opt.get("timing") or {}) if s_opt else {}
-
-        # Second scratch campaign (improved algorithm), isolated under _scratch2.
+        # GA from the spreadsheet start (capacity factors 1, storage 0).
         s2dir = results_root / (region + "_scratch2")
         s2_opt = _load(s2dir / "optimal_summary.json")
         ga_scratch2_cost = _cost(s2_opt)
@@ -195,10 +173,6 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             scratch2_vs_ga_pct = 100.0 * (ga_scratch2_cost - ga_cost) / ga_cost
         else:
             scratch2_vs_ga_pct = None
-        if isinstance(ga_scratch_cost, (int, float)) and isinstance(ga_cost, (int, float)) and ga_cost:
-            scratch_vs_ga_pct = 100.0 * (ga_scratch_cost - ga_cost) / ga_cost
-        else:
-            scratch_vs_ga_pct = None
 
         bl_total = bl_land.get("new_land_pct_regland")
         ga_total = ga_land.get("new_land_pct_regland")
@@ -227,11 +201,6 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
             "total_seconds":            timing.get("total_seconds"),
             "n_evaluations":            timing.get("n_evaluations"),
             "ga_feasible":              opt.get("feasible"),
-            "ga_scratch_cost_bil_per_yr": ga_scratch_cost,
-            "scratch_vs_ga_pct":        scratch_vs_ga_pct,
-            "scratch_start_feasible":   s_bl.get("feasible") if s_bl else None,
-            "scratch_optimize_seconds": s_timing.get("optimize_seconds"),
-            "scratch_n_evaluations":    s_timing.get("n_evaluations"),
             "ga_scratch2_cost_bil_per_yr": ga_scratch2_cost,
             "scratch2_vs_ga_pct":       scratch2_vs_ga_pct,
             "scratch2_optimize_seconds": s2_timing.get("optimize_seconds"),
@@ -253,7 +222,7 @@ def collect(results_root: Path, regions: Optional[List[str]] = None,
     return rows
 
 
-def _scratch_gap_total(rows: List[Dict], key: str = "ga_scratch_cost_bil_per_yr") -> Optional[float]:
+def _scratch_gap_total(rows: List[Dict], key: str = "ga_scratch2_cost_bil_per_yr") -> Optional[float]:
     """Aggregate scratch-vs-baseline-start GA cost gap (%), over regions with both."""
     pairs = [(r[key], r["ga_cost_bil_per_yr"]) for r in rows
              if isinstance(r.get(key), (int, float))
@@ -269,7 +238,7 @@ def total_row(rows: List[Dict]) -> Dict:
         vals = [r[key] for r in src if isinstance(r.get(key), (int, float))]
         return sum(vals) if vals else None
 
-    # Cost totals + % saving MUST be summed over the SAME regions — only those
+    # Cost totals + % saving MUST be summed over the SAME regions, only those
     # that have both a baseline and a GA cost.  Otherwise a region missing its
     # baseline (e.g. an infeasible/failed baseline run) silently skews the saving.
     matched = [r for r in rows
@@ -292,14 +261,10 @@ def total_row(rows: List[Dict]) -> Dict:
         "total_seconds":            _sum("total_seconds", rows),
         "n_evaluations":            _sum("n_evaluations", rows),
         "ga_feasible":              all(r.get("ga_feasible") for r in rows) if rows else None,
-        # Scratch totals: cost gap computed over regions that have BOTH a
-        # from-baseline and a from-scratch GA cost (same matched-set principle).
-        "ga_scratch_cost_bil_per_yr": _sum("ga_scratch_cost_bil_per_yr", rows),
-        "scratch_vs_ga_pct":        _scratch_gap_total(rows),
-        "scratch_optimize_seconds": _sum("scratch_optimize_seconds", rows),
-        "scratch_n_evaluations":    _sum("scratch_n_evaluations", rows),
+        # Scratch cost gap over regions that have BOTH a from-baseline and a
+        # from-scratch GA cost (same matched-set principle).
         "ga_scratch2_cost_bil_per_yr": _sum("ga_scratch2_cost_bil_per_yr", rows),
-        "scratch2_vs_ga_pct":       _scratch_gap_total(rows, "ga_scratch2_cost_bil_per_yr"),
+        "scratch2_vs_ga_pct":       _scratch_gap_total(rows),
         "scratch2_optimize_seconds": _sum("scratch2_optimize_seconds", rows),
         "scratch2_n_evaluations":   _sum("scratch2_n_evaluations", rows),
         # Land percentages are shares of each region's own land area, so summing
@@ -314,7 +279,7 @@ def total_row(rows: List[Dict]) -> Dict:
             sum(1 for r in rows if r.get("scratch2_land_ok") is None)),
         "baseline_source":          "rerun:{} fallback:{}".format(
             sum(1 for r in rows if r.get("baseline_source") == "rerun"),
-            sum(1 for r in rows if str(r.get("baseline_source", "")).startswith("PI xx"))),
+            sum(1 for r in rows if str(r.get("baseline_source", "")).startswith("reference"))),
     }
 
 
@@ -363,7 +328,7 @@ def print_land_check(rows: List[Dict], land_tolerance: float) -> None:
     print("\nLAND CHECK (optimized new spacing+footprint vs baseline, "
           "tolerance +{:.0f}%):".format(100 * land_tolerance))
     if not checked:
-        print("  no regions with land data on both sides — nothing checked.")
+        print("  no regions with land data on both sides, nothing checked.")
     elif not flagged:
         print("  all {} checked regions OK (optimized new-land share within "
               "tolerance of baseline).".format(len(checked)))
@@ -404,7 +369,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT,
                         help="Root of per-region result folders (default: %(default)s).")
     parser.add_argument("--raw-dir", type=Path, default=RAW_DIR,
-                        help="Folder holding the PI's pristine xx.<SHORTCODE> files, "
+                        help="Folder holding the reference xx.<SHORTCODE> reports, "
                              "used only as a baseline fallback (default: %(default)s).")
     parser.add_argument("--land-tolerance", type=float, default=DEFAULT_LAND_TOLERANCE,
                         help="Relative tolerance for the new-land check: flag a region "

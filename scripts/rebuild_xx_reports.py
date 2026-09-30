@@ -1,25 +1,21 @@
-"""Regenerate the xx deliverable files from retained Fortran outputs.
+"""Rewrite the optimized xx reports from the retained Fortran outputs.
 
-For every optimized region under data/results_verification/, reads the retained
-final-run output (fortran_optimal_run.out — identical content to what was first
-written to xx_optimized/), strips the READ_FACTOR_OVERRIDES stdout echo that the
-PI's pristine xx files do not contain, and rewrites
-data/results_verification/xx_optimized[/­_dcN]/xx.<SHORTCODE>.
-
-No simulation is run; this is a pure re-export.  Use it once to clean deliverables
-produced before the echo-stripping was added to the workflow (runs made after
-that write clean files directly, so re-running this is always a no-op-safe).
+For every results directory under data/results_verification/ that has a
+fortran_optimal_run.out, strips the READ_FACTOR_OVERRIDES echo and writes the
+report to data/results_verification/xx_optimized<SUFFIX>/xx.<SHORTCODE>, where
+<SUFFIX> mirrors the results directory (<REGION><SUFFIX>, e.g. _scratch2,
+_dc2rc).  No simulation is run; the driver already writes the same files, so
+re-running this is always safe.
 
 Usage:
-    python -m scripts.rebuild_xx_deliverables
-    python -m scripts.rebuild_xx_deliverables --results-root path/to/results
+    python -m scripts.rebuild_xx_reports
+    python -m scripts.rebuild_xx_reports --results-root path/to/results
 """
 import argparse
-import re
 from pathlib import Path
 from typing import Optional, List
 
-from src.region_shortcodes import REGION_SHORTCODE
+from src.regions import REGION_SHORTCODE
 from src.xx_tools import strip_override_echo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -37,17 +33,12 @@ def rebuild(results_root: Path) -> None:
             skipped.append(rdir.name)
             continue
 
-        # <REGION>[_scratch][_dc<N>] (isolated scratch / data-center results dirs
-        # mirror their suffix in the xx_optimized folder name)
-        label = rdir.name
-        m = re.match(r"(?P<region>.+?)(?P<suffix>(_scratch\w*?)?(_dc\d+\w*)?)$", label)
-        region = m.group("region")
-        subdir = "xx_optimized" + m.group("suffix")
-
-        shortcode = REGION_SHORTCODE.get(region, region)
-        dest_dir = results_root / subdir
+        # Region names never contain "_", so everything from the first "_" on
+        # is the isolation suffix of the run.
+        region, sep, suffix = rdir.name.partition("_")
+        dest_dir = results_root / ("xx_optimized" + sep + suffix)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / "xx.{}".format(shortcode)
+        dest = dest_dir / "xx.{}".format(REGION_SHORTCODE.get(region, region))
 
         text = raw.read_text(encoding="ascii", errors="replace")
         clean = strip_override_echo(text)
@@ -55,11 +46,11 @@ def rebuild(results_root: Path) -> None:
         n_written += 1
         if len(clean) != len(text):
             n_stripped += 1
-            print("  {:<22s} -> {}  (override echo removed)".format(label, dest))
+            print("  {:<22s} -> {}  (override echo removed)".format(rdir.name, dest))
         else:
-            print("  {:<22s} -> {}  (already clean)".format(label, dest))
+            print("  {:<22s} -> {}  (already clean)".format(rdir.name, dest))
 
-    print("\n{} deliverables written ({} had the echo block removed).".format(
+    print("\n{} xx reports written ({} had the echo block removed).".format(
         n_written, n_stripped))
     if skipped:
         print("Skipped (no fortran_optimal_run.out): {}".format(", ".join(skipped)))

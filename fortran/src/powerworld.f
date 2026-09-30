@@ -25,6 +25,10 @@ C THE SOURCE OF THE PROGRAM IN ALL PUBLICATIONS THAT MAKE USE OF SUCH
 C INFORMATION. THE USER ALSO AGREES TO ADDRESS ANY QUESTIONS OR UNCERTAINTIES 
 C                  TO MZJ (JACOBSON@STANFORD.EDU) PRIOR TO PUBLICATION.
 C *****************************************************************************
+C MODIFIED FOR LOADMATCH-O (2026): FACTOR-OVERRIDE FILE, COMMAND-LINE ARGUMENTS,
+C RELATIVE INPUT PATHS, AND DIVIDE-BY-ZERO GUARDS.  ALL CHANGES ARE LISTED IN
+C powerworld_changes.diff.
+C *****************************************************************************
 C REFERENCES:
 C *****************************************************************************
 C
@@ -8658,10 +8662,10 @@ C
       TGWCOMPV   = TGWCOMPV   * FACCOMPV
       TGWUTILPV  = TGWUTILPV  * FACUTILPV
 C
-C PI-approved 2026-07-15: test .GT.SMAL30 (not .GT.0.).  TGWSHEAT is floored to
-C SMAL30 (=1e-30) by the divide-by-zero guard above, so .GT.0. can never fail
-C and the ELSE (FACSHT=0) was dead code.  With .GT.SMAL30 the ELSE fires for
-C regions with no installed solar thermal (TGWSHEAT==SMAL30), zeroing FACSHT.
+C Test .GT.SMAL30 (not .GT.0.): TGWSHEAT is floored to SMAL30 (=1e-30) by the
+C divide-by-zero guard above, so .GT.0. would always hold.  With .GT.SMAL30 the
+C ELSE branch zeroes FACSHT in regions with no installed solar thermal
+C (TGWSHEAT==SMAL30).
       IF (TGWSHEAT.GT.SMAL30) THEN
        FACSHT     = MAX(EGWSHEAT / TGWSHEAT, FACSHT)
        TGWSHEAT   = TGWSHEAT * FACSHT
@@ -16863,11 +16867,10 @@ C           = HYDISCHTW - BASEHYD
 C
 C EXCESIN STOP tolerance: 1.0E-12 TWh (strict; essentially zero unmet inflexible
 C load, a machine-noise floor only).  A larger ABSOLUTE tolerance cannot work
-C across regions spanning orders of magnitude in size: a brief 1.0E-6 TWh setting
-C exceeded GREENLAND's ~1E-6 TWh per-step demand, letting the GA zero out
-C generation and leave a full step's load unmet under the threshold, so energy
-C did not conserve (found 2026-07-25).  Kept strict; genuinely marginal cases are
-C fixed by nudging one design variable to real feasibility, not by loosening this.
+C across regions spanning orders of magnitude in size: 1.0E-6 TWh already exceeds
+C the per-step demand of the smallest region (GREENLAND, ~1E-6 TWh), so a design
+C could leave a full step's load unmet under the threshold.  Marginal cases are
+C made feasible by adjusting a design variable, not by loosening this tolerance.
          IF (EXCESIN.GT.1.0E-12) THEN
           WRITE(IOUT,208)
           WRITE(IOUT,285) TIMWWS(J)/HRSPDAY, STORTEM,EXCESIN,STORSUB,

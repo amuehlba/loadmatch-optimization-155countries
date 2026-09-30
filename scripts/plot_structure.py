@@ -3,7 +3,7 @@
 Companion to plot_comparison.py.  Where those figures show the OUTCOME (cost,
 land, solve time), these show the STRUCTURE behind it - which design levers moved
 and how the system was rebuilt.  Both optimised cases are compared against the
-PI trial-and-error baseline:
+trial-and-error baseline:
 
     GA (from trial-and-error)   - blue
     GA (from scratch, extended) - orange
@@ -95,24 +95,6 @@ FACTOR_LABELS = {
     "STORHPHS": "Pumped-hydro duration", "STORUGDYS": "Seasonal UTES duration",
     "DAYH2STOR": "H$_2$ storage duration",
     "FCDISCH": "Fuel-cell discharge rate", "FCCHARG": "Electrolyser charge rate",
-}
-COST_LABELS = {
-    "SHORT-DIST TRANSMISS": "Short-distance transmission",
-    "LONG-DIST-TRANS": "Long-distance transmission",
-    "DISTRIBUTION": "Distribution",
-    "ELECTRICITY GEN ONLY": "Electricity generation",
-    "ADDED-HYDRO-TURBS": "Added hydro turbines",
-    "SOLAR+GEOTHERM HEAT": "Solar + geothermal heat",
-    "LI-BATTERY STORAGE": "Li-ion battery storage",
-    "H2-ELEC PROD/STOR/FC": "H$_2$ electricity (prod./stor./FC)",
-    "CSPPCM + PHS STORAGE": "CSP-PCM + pumped-hydro storage",
-    "CWSTES+PCMICE STOR": "Cold-water STES + PCM-ice storage",
-    "HWSTES STORAGE": "Hot-water STES storage",
-    "UTES STORAGE": "Seasonal UTES storage",
-    "HPUMPS FOR HWST+UTES": "Heat pumps (HW-STES + UTES)",
-    "INDUS FIREBRICK STOR": "Industrial firebrick storage",
-    "H2-PROD/COMP/STOR": "H$_2$ prod./compression/storage",
-    "ALL-NONH2-STORAGE": "All non-H$_2$ storage",
 }
 
 # Additive cost groups for fig_cost_change_by_category, stacked bottom -> top.

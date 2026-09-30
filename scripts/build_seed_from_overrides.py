@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Build a seed factor file from a base optimum plus explicit KEY=VALUE overrides.
 
-Use when the PI hands us a hand-tuned solution described as "the base case,
-except for these few factors".  We take the base optimum's full factor set and
-overlay only the named factors, then write a simple KEY = VALUE file that
-load_baseline_start() / --baseline-start can read back.
+For a hand-tuned solution described as "the base case, except for these few
+factors": takes the base optimum's full factor set, overlays only the named
+factors, and writes a KEY = VALUE file that --baseline-start can read.
 
-Example (the PI's RBH SOUTHAM-SE solution):
+Example (hand-tuned rooftop (RBH) solution for SOUTHAM-SE):
 
   python -m scripts.build_seed_from_overrides \
       --base data/results_verification/SOUTHAM-SE/genetic_factors.dat \
-      --out  data/pi_southamse_rbh.dat \
+      --out  data/seed_southamse_rbh.dat \
       FACONWIN=1.0 FACOFFWIN=0.283 FACUTILPV=0.657 FACRESPV=6.5 FACCOMPV=7.0 \
       BATDISCH=0.2 FCCHARG=0.019 FCDISCH=0.019 DAYH2STOR=3.9629 STORUGDYS=0.9383
 

@@ -1,6 +1,17 @@
---- docs/powerworld_260911.f	2026-09-12 10:01:34
-+++ fortran/src/powerworld.f	2026-09-12 10:08:17
-@@ -671,10 +671,14 @@
+--- original/powerworld.f
++++ fortran/src/powerworld.f
+@@ -24,6 +24,10 @@
+ C THE SOURCE OF THE PROGRAM IN ALL PUBLICATIONS THAT MAKE USE OF SUCH
+ C INFORMATION. THE USER ALSO AGREES TO ADDRESS ANY QUESTIONS OR UNCERTAINTIES 
+ C                  TO MZJ (JACOBSON@STANFORD.EDU) PRIOR TO PUBLICATION.
++C *****************************************************************************
++C MODIFIED FOR LOADMATCH-O (2026): FACTOR-OVERRIDE FILE, COMMAND-LINE ARGUMENTS,
++C RELATIVE INPUT PATHS, AND DIVIDE-BY-ZERO GUARDS.  ALL CHANGES ARE LISTED IN
++C powerworld_changes.diff.
+ C *****************************************************************************
+ C REFERENCES:
+ C *****************************************************************************
+@@ -671,10 +675,14 @@
  C GRIDNAM = NAME OF GRID WHEN READ IN FROM countrystats.dat
  C GRIDUSE = NAME OF GRID REGION SIMULATED FOR PRESENT SIMULATION (SET HERE)
  C     
@@ -19,7 +30,7 @@
        CHARACTER(14) COUNTRY, NAMEGRID, GRIDNAM,  NAMCOUNGR, GRIDUSE,
       1              NAMECOUN,DOMAIN,   NAMEREAD, DUMMY,     GRIDLOAD,
       1              GRIDCOUN,NAMHTREG, NH,       NAMEORIG,  NAMORIGGR,
-@@ -1156,10 +1160,10 @@
+@@ -1156,10 +1164,10 @@
  C PATHTEMP = DIRECTORY WHERE wwssupworld.dat READ FROM WHEN IFREWRITE=1,2
  C PATHLOAD = DIRECTORY WHERE HOURLY LOAD DATA ARE LOCATED
  C
@@ -34,7 +45,7 @@
  C
  C *****************************************************************************
  C                  PARAMETERS THAT MODEL USERS CHANGE 
-@@ -1244,9 +1248,6 @@
+@@ -1244,9 +1252,6 @@
  C           = 2: INCREASE 2050 DEMAND BY A CONSTANT TW AMOUNT EACH TIME STEP
  C                DUE TO DATA CENTERS. PROVIDE THE ADDED DEMAND WITH
  C                WIND, SOLAR, BATTERIES, & H2 FUEL CELLS ONLY,
@@ -44,7 +55,7 @@
  C           = 0: DO NOT INCREASE DATA CENTER DEMAND OR SUPPLY AT ALL
  C FDATCEN   = FRACTION OF ANNUAL AVG ALL PURPOSE LOAD (TLFIN2050) ADDED ON
  C             TOP OF TLFIN2050 AS INFLEXIBLE LOAD FOR DATACENTERS  
-@@ -1256,14 +1257,19 @@
+@@ -1256,14 +1261,19 @@
  C                        ~1075 GW OF DEMAND 155 COUNTRIES IN 2050
  C           = 0.02 GIVES ~18 GW OF DEMAND IN THE U.S. IN 2050
  C                        ~179 GW OF DEMAND 155 COUNTRIES IN 2050
@@ -67,24 +78,23 @@
  C
        IF (IFDATCEN.GE.1) THEN
         FDATCEN  = 0.10 
-@@ -1536,6 +1542,12 @@
+@@ -1535,6 +1545,12 @@
+       ELSE
         GRIDUSE = 'CONUS'
        ENDIF
- C
++C
 +C     Override GRIDUSE from command-line argument 1 (automated multi-region runs).
 +C     If no argument is provided, the default selected above is kept.
 +      GRIDARG = ' '
 +      CALL GET_COMMAND_ARGUMENT(1, GRIDARG)
 +      IF (GRIDARG.NE.' ') GRIDUSE = GRIDARG
-+C
+ C
        WRITE(IOUT,111) GRIDUSE
   111  FORMAT('DOMAIN: ',A14,' POWERWORLD.F LOADMATCH GRID INTEGRATION ',
-      1       'MODEL'/)
-@@ -1585,6 +1597,14 @@
- C      IFREWRITE = 2 
+@@ -1586,6 +1602,14 @@
         IFREWRITE = 3 
        ENDIF
-+C
+ C
 +C     Override IFREWRITE from command-line argument 2 (automated preprocessing).
 +C     Usage: powerworld [REGION] [1|2|3] -- if omitted, default above is kept.
 +      IFARG = ' '
@@ -92,10 +102,11 @@
 +      IF (IFARG.EQ.'1') IFREWRITE = 1
 +      IF (IFARG.EQ.'2') IFREWRITE = 2
 +      IF (IFARG.EQ.'3') IFREWRITE = 3
- C
++C
  C INITYEAR = INITIAL YEAR OF SIMULATIONS
  C
-@@ -2328,11 +2348,6 @@
+       IF (IFCAISO.EQ.1) THEN
+@@ -2328,11 +2352,6 @@
          BATDISCH   = 0.         
          DAYH2STOR  = 0.  
          STORUGDYS  = 0. 
@@ -107,7 +118,7 @@
         ENDIF
  C
  C *****************************************************************************
-@@ -2698,10 +2713,29 @@
+@@ -2698,10 +2717,29 @@
         CSPTURBFAC = 0.
         FACSHT     = 0.
  C
@@ -141,7 +152,7 @@
  C
         STORUGDYS  = 0.
  C
-@@ -2712,18 +2746,8 @@
+@@ -2712,18 +2750,8 @@
         FLDISELEC  = 0.
         HCDDADD    = 1.
  C
@@ -160,7 +171,7 @@
         ENDIF 
  C  
  C *****************************************************************************
-@@ -5727,6 +5751,28 @@
+@@ -5727,6 +5755,28 @@
        ENDIF
  C     ENDIF GRIDUSE
  C
@@ -189,7 +200,7 @@
  C *****************************************************************************
  C                        FIND TIME ZONE IN MIDDLE OF DOMAIN
  C *****************************************************************************
-@@ -6685,7 +6731,7 @@
+@@ -6685,7 +6735,7 @@
  C INPUT SUPPLY DATA
  C
         IF (IFREWRITE.EQ.3) THEN
@@ -198,18 +209,18 @@
         ELSEIF (IFREWRITE.EQ.2) THEN
          OPEN(KWWS, FILE = PATHHOME//'wwssupreform.dat')
         ELSEIF (IFREWRITE.EQ.1.OR.IFREWRITE.EQ.0) THEN 
-@@ -8612,6 +8658,10 @@
+@@ -8612,6 +8662,10 @@
        TGWCOMPV   = TGWCOMPV   * FACCOMPV
        TGWUTILPV  = TGWUTILPV  * FACUTILPV
  C
-+C PI-approved 2026-07-15: test .GT.SMAL30 (not .GT.0.).  TGWSHEAT is floored to
-+C SMAL30 (=1e-30) by the divide-by-zero guard above, so .GT.0. can never fail
-+C and the ELSE (FACSHT=0) was dead code.  With .GT.SMAL30 the ELSE fires for
-+C regions with no installed solar thermal (TGWSHEAT==SMAL30), zeroing FACSHT.
++C Test .GT.SMAL30 (not .GT.0.): TGWSHEAT is floored to SMAL30 (=1e-30) by the
++C divide-by-zero guard above, so .GT.0. would always hold.  With .GT.SMAL30 the
++C ELSE branch zeroes FACSHT in regions with no installed solar thermal
++C (TGWSHEAT==SMAL30).
        IF (TGWSHEAT.GT.SMAL30) THEN
         FACSHT     = MAX(EGWSHEAT / TGWSHEAT, FACSHT)
         TGWSHEAT   = TGWSHEAT * FACSHT
-@@ -11673,7 +11723,7 @@
+@@ -11673,7 +11727,7 @@
  C STORHOURS = AVG NUMBER OF HOURS OF STORAGE AMONG ALL NON-UTES, NON-H2 STORAGE
  C             EXCEPT, IT INCLUDES H2 STORAGE FOR GRID ELECTRICITY
  C
@@ -218,7 +229,7 @@
  C             
  C UTESTWH   = MAX STORAGE CAPACITY (TWH) UNDERGROUND SEAS HEAT STORAGE IN SOIL 
  C             REALLY TWH OF ELECTRICITY STORAGE THAT GIVES NECESSARY
-@@ -11690,7 +11740,7 @@
+@@ -11690,7 +11744,7 @@
  C FEXISTPHS = FRACTION OF PROPOSED PHS STORAGE THAT ALREADY EXISTS
  C TEXISTPHS = EXISTING PUMPED-HYDRO STORAGE (PHS) INSTALLED CAPACITY (TW)
  C
@@ -227,7 +238,7 @@
  C
  C FRACCSP   = FRAC OF KWH OF NON-UTES STORAGE IN PHASE-CHANGE MATERIAL FROM CSP
  C FRACPHS   = FRAC OF KWH OF NON-UTES STORAGE IN PUMPED-HYDRO STORAGE
-@@ -11732,14 +11782,14 @@
+@@ -11732,14 +11786,14 @@
  C             PRODUCE AND COMPRESS H2 = ENERGY EMBODIED IN H2 / H2CHAREFF
  C           = FCDISCH (TW) / (H2DCEFF * H2CHAREFF)
  C     
@@ -250,24 +261,24 @@
  C     
        SUMFRAC  = FRACCSP + FRACPHS + FRACOLD + FRACPCM 
       1         + FRACHOT + FRACBAT + FRACHFC + FRACHBT 
-@@ -16811,6 +16861,13 @@
+@@ -16811,6 +16865,12 @@
  C PKHYDISCH = MAX DISCHARGE RATE HYDRO FOR PEAKING POWER ALONE (TW) BEFORE T&D
  C           = HYDISCHTW - BASEHYD 
  C
 +C EXCESIN STOP tolerance: 1.0E-12 TWh (strict; essentially zero unmet inflexible
 +C load, a machine-noise floor only).  A larger ABSOLUTE tolerance cannot work
-+C across regions spanning orders of magnitude in size: a brief 1.0E-6 TWh setting
-+C exceeded GREENLAND's ~1E-6 TWh per-step demand, letting the GA zero out
-+C generation and leave a full step's load unmet under the threshold, so energy
-+C did not conserve (found 2026-07-25).  Kept strict; genuinely marginal cases are
-+C fixed by nudging one design variable to real feasibility, not by loosening this.
++C across regions spanning orders of magnitude in size: 1.0E-6 TWh already exceeds
++C the per-step demand of the smallest region (GREENLAND, ~1E-6 TWh), so a design
++C could leave a full step's load unmet under the threshold.  Marginal cases are
++C made feasible by adjusting a design variable, not by loosening this tolerance.
           IF (EXCESIN.GT.1.0E-12) THEN
            WRITE(IOUT,208)
            WRITE(IOUT,285) TIMWWS(J)/HRSPDAY, STORTEM,EXCESIN,STORSUB,
-@@ -21482,3 +21539,221 @@
+@@ -21481,4 +21541,222 @@
+ C *****************************************************************************
  C
        STOP
-       END
++      END
 +
 +      SUBROUTINE READ_FACTOR_OVERRIDES(PATHHOME, REGION,
 +     1    FACONWIN, FACOFFWIN, FACRESPV, FACCOMPV,
@@ -459,7 +470,7 @@
 +      WRITE(*,'(A,1PE12.5)') '  STORHHBT   = ', STORHHBT
 +      WRITE(*,'(A,1PE12.5)') '  FRCIHFLEX  = ', FRCIHFLEX
 +      RETURN
-+      END
+       END
 +
 +      INTEGER FUNCTION LEN_TRIM_F77(STR)
 +      CHARACTER*(*) STR
